@@ -508,6 +508,22 @@ void ui_draw_icon(UiCtx *ui, UiIcon icon, float x, float y, float s, uint32_t c)
             ui_draw_rect(ui, x + s * (cx - 0.12f * sc), y + s * 0.5f, s * 0.24f * sc, s * 0.34f, i == 1 ? c : c2, s * 0.1f);
         }
         break;
+    /* window controls: thin, crisp strokes like a native caption */
+    case UI_ICON_WIN_MIN:
+        ui_draw_line(ui, P(0.24f, 0.52f), P(0.76f, 0.52f), s * 0.07f, c);
+        break;
+    case UI_ICON_WIN_MAX:
+        ui_draw_border(ui, x + s * 0.26f, y + s * 0.26f, s * 0.48f, s * 0.48f, c, s * 0.04f, s * 0.07f);
+        break;
+    case UI_ICON_WIN_RESTORE:
+        ui_draw_line(ui, P(0.36f, 0.24f), P(0.78f, 0.24f), s * 0.07f, c);
+        ui_draw_line(ui, P(0.78f, 0.21f), P(0.78f, 0.64f), s * 0.07f, c);
+        ui_draw_border(ui, x + s * 0.22f, y + s * 0.36f, s * 0.42f, s * 0.42f, c, s * 0.04f, s * 0.07f);
+        break;
+    case UI_ICON_WIN_CLOSE:
+        ui_draw_line(ui, P(0.27f, 0.27f), P(0.73f, 0.73f), s * 0.075f, c);
+        ui_draw_line(ui, P(0.73f, 0.27f), P(0.27f, 0.73f), s * 0.075f, c);
+        break;
     case UI_ICON_PROBE: {
         /* a mirror ball: dark sphere reflecting a bright horizon, with a highlight */
         float cx = x + s * 0.5f, cy = y + s * 0.5f, r = s * 0.4f;
@@ -1284,6 +1300,7 @@ void ui_close_modal(UiCtx *ui) {
     }
 }
 bool ui_has_modal(UiCtx *ui) { return ui->modal != NULL; }
+UiNode *ui_modal_node(UiCtx *ui) { return ui->modal; }
 
 void ui_notify(UiCtx *ui, const char *fmt, ...) {
     if (ui->toast_count == MAX_TOASTS) {
@@ -1304,6 +1321,8 @@ void ui_notify(UiCtx *ui, const char *fmt, ...) {
 bool ui_wants_keyboard(UiCtx *ui) { return ui->focus && (ui->focus->type == UI_TEXTFIELD || ui->focus->editing); }
 bool ui_wants_mouse(UiCtx *ui) { return ui->popup_count > 0 || ui->modal || (ui->hot && ui->hot->type != UI_CUSTOM); }
 bool ui_is_hot(UiCtx *ui, UiNode *n) { return ui->hot == n; }
+UiNode *ui_hot_node(UiCtx *ui) { return ui->hot; }
+bool ui_overlay_open(UiCtx *ui) { return ui->popup_count > 0 || ui->modal != NULL; }
 bool ui_is_inside(UiCtx *ui, UiNode *n) { return inside(n, ui->mouse); }
 UiNode *ui_active(UiCtx *ui) { return ui->active; }
 const char *ui_dragging(UiCtx *ui, const char **payload) {

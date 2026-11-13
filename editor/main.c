@@ -68,6 +68,8 @@ void ed_add_recent(const char *root) {
 
 void ed_set_mode(EdMode mode) {
     ED.mode = mode;
+    ED.save_prompt_open = false;
+    ed_chrome_forget();
     ui_close_popups(ED.ui);
     ui_close_modal(ED.ui);
     ui_clear(ED.ui, ui_root(ED.ui));
@@ -85,6 +87,7 @@ void ed_update_title(void) {
         snprintf(t, sizeof t, "Luxora Editor - %s - %s%s%s", ED.project.name, ED.scene ? lx_scene_name(ED.scene) : "", ED.dirty ? " *" : "",
                  ED.play != ED_EDIT ? "  [PLAYING]" : "");
     lx_platform_set_title(t);
+    ed_titlebar_set_title(t);
 }
 
 int main(int argc, char **argv) {
@@ -120,7 +123,7 @@ int main(int argc, char **argv) {
     lx_game_register_scripts();
     ed_load_prefs();
 
-    LxWindowDesc wd = {"Luxora", 1600, 940, true, true, false};
+    LxWindowDesc wd = {"Luxora", 1600, 940, true, true, false, true};   /* borderless: Luxora draws its own title bar */
     if (!lx_platform_init(&wd)) return 1;
     if (!lx_renderer_init()) {
         lx_platform_shutdown();
@@ -129,6 +132,7 @@ int main(int argc, char **argv) {
     }
     lx_audio_init();
     ED.ui = ui_create();
+    ed_chrome_init();
 
     static char new_root[LX_PATH_MAX];
     if (new_parent && new_name) {
@@ -166,11 +170,14 @@ int main(int argc, char **argv) {
         fps_acc += ED.dt;
         if (++fps_frames >= 20) { ED.fps = (float)fps_frames / fps_acc; fps_acc = 0; fps_frames = 0; }
         lx_input_update(ED.dt);
+        if (lx_platform_take_close_request()) ed_request_quit();   /* window close button / Alt+F4 */
         if (ED.mode == ED_MODE_EDITOR) ed_update(ED.dt);
         if (lx_renderer_begin_frame()) {
             ED.in_frame = true;
             if (ED.mode == ED_MODE_EDITOR) ed_render();
+            ed_chrome_frame_before_ui();
             ui_frame(ED.ui, ED.dt, lx_v4(0.1f, 0.1f, 0.11f, 1));
+            ed_chrome_frame_after_ui();
             if (shot && frame == shot_frames) lx_renderer_screenshot(shot);
             lx_renderer_end_frame();
             ED.in_frame = false;

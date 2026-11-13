@@ -55,7 +55,7 @@ jobs:
           # play mode
           xvfb-run -a -s "-screen 0 1600x940x24" ./build/luxora_editor "$RUNNER_TEMP/vk/Vulkan Sample" --play --screenshot shots/editor_playing.ppm --frames 90
           # full scripted editor session on the real renderer (includes Close Project -> Project Manager -> reopen)
-          xvfb-run -a -s "-screen 0 1600x940x24" ./build/luxora_editor --new $RUNNER_TEMP/vksmoke "Vulkan Smoke" --smoke
+          LUXORA_SMOKE_SHOT=shots/save_prompt.ppm xvfb-run -a -s "-screen 0 1600x940x24" ./build/luxora_editor --new $RUNNER_TEMP/vksmoke "Vulkan Smoke" --smoke
           # the packaged game itself
           cd "$RUNNER_TEMP/projects/CI Sample/Builds/Linux/CI Sample"
           LUXORA_SCREENSHOT=$GITHUB_WORKSPACE/shots/game.ppm LUXORA_SCREENSHOT_FRAME=60 xvfb-run -a -s "-screen 0 1280x720x24" "./CI Sample"

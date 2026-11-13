@@ -33,6 +33,8 @@ typedef enum UiIcon {
     UI_ICON_CAMERA, UI_ICON_LIGHT, UI_ICON_SUN, UI_ICON_BULB, UI_ICON_SPOT, UI_ICON_CUBE, UI_ICON_SPHERE, UI_ICON_PLANE,
     UI_ICON_CYLINDER, UI_ICON_CAPSULE, UI_ICON_ENTITY, UI_ICON_SPEAKER, UI_ICON_LISTENER, UI_ICON_CROWD, UI_ICON_BEHAVIOUR,
     UI_ICON_PROBE,
+    /* window controls */
+    UI_ICON_WIN_MIN, UI_ICON_WIN_MAX, UI_ICON_WIN_RESTORE, UI_ICON_WIN_CLOSE,
     /* tools */
     UI_ICON_SELECT, UI_ICON_MOVE, UI_ICON_ROTATE, UI_ICON_SCALE, UI_ICON_FOCUS, UI_ICON_GRID, UI_ICON_GLOBE, UI_ICON_LOCAL,
     /* general */
@@ -173,6 +175,8 @@ bool ui_popup_open(UiCtx *ui);
 bool ui_wants_keyboard(UiCtx *ui);
 bool ui_wants_mouse(UiCtx *ui);
 bool ui_is_hot(UiCtx *ui, UiNode *n);       /* mouse is over n (topmost) */
+UiNode *ui_hot_node(UiCtx *ui);             /* interactive node under the mouse, if any */
+bool ui_overlay_open(UiCtx *ui);            /* a popup menu or modal dialog is showing */
 bool ui_is_inside(UiCtx *ui, UiNode *n);    /* mouse is inside n's rect, regardless of children */
 UiNode *ui_active(UiCtx *ui);
 void ui_focus(UiCtx *ui, UiNode *n);

@@ -361,9 +361,13 @@ void ed_project_manager_build(void) {
     UiCtx *ui = ED.ui;
     const UiTheme *t = ui_theme(ui);
     UiNode *root = ui_root(ui);
-    root->dir = UI_ROW;
+    root->dir = UI_COL;
+    UiNode *bar = ed_titlebar_begin(root);
+    ed_titlebar_end(bar, "Luxora Project Manager");
+    UiNode *content = ui_box(ui, root, UI_ROW);
+    content->grow = 1;
     /* sidebar */
-    UiNode *side = ui_box(ui, root, UI_COL);
+    UiNode *side = ui_box(ui, content, UI_COL);
     side->w = 250;
     side->bg = t->header;
     ui_pad(side, 18, 22, 18, 18);
@@ -372,11 +376,7 @@ void ed_project_manager_build(void) {
     brand->h = 44;
     brand->gap = 10;
     brand->cross_align = UI_ALIGN_CENTER;
-    UiNode *logo = ui_label(ui, brand, "");
-    logo->icon = UI_ICON_PROJECT;
-    logo->icon_size = 30;
-    logo->icon_color = t->accent;
-    logo->w = 34;
+    ed_app_icon(brand, 36);
     UiNode *name = ui_label(ui, brand, "LUXORA");
     name->font = UI_FONT_TITLE;
     UiNode *ver = ui_label(ui, side, "Engine " LX_VERSION_STRING " · Vulkan");
@@ -403,7 +403,7 @@ void ed_project_manager_build(void) {
     tip->fg = t->text_disabled;
 
     /* main */
-    UiNode *main = ui_box(ui, root, UI_COL);
+    UiNode *main = ui_box(ui, content, UI_COL);
     main->grow = 1;
     ui_pad(main, 36, 30, 36, 24);
     main->gap = 16;

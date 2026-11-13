@@ -36,6 +36,7 @@ typedef struct Editor {
     LxScene *scene;
     char scene_ref[LX_REF_MAX];      /* relative to Assets, "" = unsaved */
     bool dirty;
+    bool save_prompt_open;
     EdPlayState play;
     char *play_snapshot;             /* scene text before entering play mode */
     LxEntity selected;
@@ -122,6 +123,19 @@ void ed_save_scene_as_dialog(void);
 void ed_new_scene_dialog(void);
 void ed_set_scene(LxScene *s, const char *ref);
 bool ed_confirm_discard(void (*then)(void));
+/* "Save changes to <scene> before <action>?" with Save / Don't Save / Cancel; then() runs after Save or Don't Save */
+void ed_save_prompt(const char *action, void (*then)(void));
+/* window chrome (chrome.c) */
+void ed_chrome_init(void);
+uint32_t ed_app_icon_texture(void);
+UiNode *ed_app_icon(UiNode *parent, float size);
+UiNode *ed_titlebar_begin(UiNode *parent);
+void ed_titlebar_end(UiNode *bar, const char *title);
+void ed_titlebar_set_title(const char *title);
+void ed_chrome_forget(void);
+void ed_chrome_frame_before_ui(void);
+void ed_chrome_frame_after_ui(void);
+void ed_request_quit(void);   /* close button, Alt+F4, File > Exit: asks to save first */
 
 /* undo */
 void ed_mark_changed(void);      /* something changed; committed when the edit gesture ends */

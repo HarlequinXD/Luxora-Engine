@@ -81,6 +81,7 @@ void lx_platform_set_cursor(int cursor); /* 0 arrow, 1 text, 2 resize-h, 3 resiz
 enum { LX_EDGE_LEFT = 1, LX_EDGE_RIGHT = 2, LX_EDGE_TOP = 4, LX_EDGE_BOTTOM = 8 };
 void lx_platform_set_intercept_close(bool on); /* close button / Alt+F4 become a request (see below) instead of quitting */
 bool lx_platform_take_close_request(void);
+void lx_platform_set_icon(const uint8_t *rgba, int w, int h);  /* taskbar/window icon (Windows uses the .exe's) */
 void lx_platform_window_minimize(void);
 void lx_platform_window_toggle_maximize(void);
 bool lx_platform_window_maximized(void);

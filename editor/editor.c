@@ -326,12 +326,78 @@ static void new_scene_named(const char *name) {
 }
 void ed_new_scene_dialog(void) { ed_prompt("New Scene", "Scene name", "New Scene", new_scene_named); }
 
-static void (*g_after_discard)(void);
-static void discard_and_continue(void) { ED.dirty = false; if (g_after_discard) g_after_discard(); }
+/* ---- save prompt: Save / Don't Save / Cancel, styled like the rest of the editor ---- */
+static void (*g_after_save)(void);
+typedef void (*ThenFn)(void);
+static ThenFn save_prompt_take(void) {
+    ThenFn then = g_after_save;
+    g_after_save = NULL;
+    ED.save_prompt_open = false;
+    ui_close_modal(ED.ui);
+    return then;
+}
+static void sp_save(UiNode *n) {
+    LX_UNUSED(n);
+    ThenFn then = save_prompt_take();
+    if (ed_save_scene() && then) then();   /* an unsaved new scene opens Save As instead; then the user retries */
+}
+static void sp_dont_save(UiNode *n) {
+    LX_UNUSED(n);
+    ThenFn then = save_prompt_take();
+    ED.dirty = false;
+    if (then) then();
+}
+static void sp_cancel(UiNode *n) { LX_UNUSED(n); save_prompt_take(); }
+
+void ed_save_prompt(const char *action, void (*then)(void)) {
+    UiCtx *ui = ED.ui;
+    const UiTheme *t = ui_theme(ui);
+    ui_close_popups(ui);
+    g_after_save = then;
+    ED.save_prompt_open = true;
+    UiNode *body = ui_modal(ui, "Unsaved Changes", 520, 214);
+    UiNode *row = ui_box(ui, body, UI_ROW);
+    row->gap = 14;
+    row->h = 76;
+    UiNode *ic = ui_label(ui, row, "");
+    ic->icon = UI_ICON_SAVE;
+    ic->icon_size = 30;
+    ic->icon_color = t->accent;
+    ic->w = 40;
+    ic->h = 40;
+    UiNode *col = ui_box(ui, row, UI_COL);
+    col->grow = 1;
+    col->gap = 6;
+    char msg[LX_NAME_MAX + 96];
+    snprintf(msg, sizeof msg, "Save changes to \"%s\" before %s?", ED.scene ? lx_scene_name(ED.scene) : "the scene", action);
+    UiNode *m = ui_label(ui, col, msg);
+    m->font = UI_FONT_BOLD;
+    m->wrap = true;
+    UiNode *sub = ui_label(ui, col, "Your changes will be lost if you don't save them.");
+    sub->fg = t->text_dim;
+    sub->wrap = true;
+    ui_spacer(ui, body);
+    UiNode *br = ui_box(ui, body, UI_ROW);
+    br->h = 32;
+    br->gap = 8;
+    UiNode *dont = ui_button(ui, br, "Don't Save", sp_dont_save);
+    dont->w = 120;
+    dont->fg = t->danger;
+    ui_spacer(ui, br);
+    UiNode *c = ui_button(ui, br, "Cancel", sp_cancel);
+    c->w = 96;
+    UiNode *sv = ui_button(ui, br, "Save", sp_save);
+    sv->icon = UI_ICON_SAVE;
+    sv->w = 120;
+    sv->bg = t->accent;
+    sv->bg_hover = t->accent_hover;
+    sv->fg = t->accent_text;
+    sv->icon_color = t->accent_text;
+}
+
 bool ed_confirm_discard(void (*then)(void)) {
     if (!ED.dirty) return true;
-    g_after_discard = then;
-    ed_confirm("Unsaved Changes", "The current scene has unsaved changes. Discard them?", "Discard", discard_and_continue);
+    ed_save_prompt("continuing", then);
     return false;
 }
 
@@ -596,9 +662,12 @@ static void m_project_settings(UiNode *n) { ed_project_settings(n ? (int)n->tag 
 static void m_build_settings(UiNode *n) { LX_UNUSED(n); ed_build_settings(); }
 static void m_open_folder(UiNode *n) { LX_UNUSED(n); lx_platform_open_folder(ED.project.root); }
 static void close_project_now(void) { ed_request_close_project(); }
-static void m_close_project(UiNode *n) { LX_UNUSED(n); if (ed_confirm_discard(close_project_now)) close_project_now(); }
-static void quit_now(void) { ED.quit = true; }
-static void m_exit(UiNode *n) { LX_UNUSED(n); if (ed_confirm_discard(quit_now)) quit_now(); }
+static void m_close_project(UiNode *n) {
+    LX_UNUSED(n);
+    if (ED.dirty && ED.play == ED_EDIT) ed_save_prompt("closing the project", close_project_now);
+    else close_project_now();
+}
+static void m_exit(UiNode *n) { LX_UNUSED(n); ed_request_quit(); }
 static void m_undo(UiNode *n) { LX_UNUSED(n); ed_undo(); }
 static void m_redo(UiNode *n) { LX_UNUSED(n); ed_redo(); }
 static void m_duplicate(UiNode *n) { LX_UNUSED(n); ed_duplicate_selected(); }
@@ -794,18 +863,8 @@ void ed_build_shell(void) {
     root->dir = UI_COL;
     ED.root = root;
 
-    /* menu bar */
-    UiNode *mb = ui_box(ui, root, UI_ROW);
-    mb->h = 30;
-    mb->bg = t->header;
-    ui_pad(mb, 6, 0, 10, 0);
-    mb->gap = 2;
-    mb->cross_align = UI_ALIGN_CENTER;
-    UiNode *logo = ui_label(ui, mb, "");
-    logo->icon = UI_ICON_PROJECT;
-    logo->icon_color = t->accent;
-    logo->w = 26;
-    logo->center_text = true;
+    /* title bar: app icon, menus, draggable title, window controls */
+    UiNode *mb = ed_titlebar_begin(root);
     static const char *names[] = {"File", "Edit", "Create", "Window", "Build", "Play", "Help"};
     void (*cbs[])(UiNode *) = {file_menu, edit_menu, create_menu, window_menu, build_menu, play_menu, help_menu};
     for (int i = 0; i < 7; i++) {
@@ -813,11 +872,7 @@ void ed_build_shell(void) {
         b->bg = 0;
         b->h = 24;
     }
-    ui_spacer(ui, mb);
-    UiNode *pname = ui_label(ui, mb, ED.project.name);
-    pname->icon = UI_ICON_PROJECT;
-    pname->icon_size = 14;
-    pname->fg = t->text_dim;
+    ed_titlebar_end(mb, "");
     ED.menubar = mb;
 
     /* toolbar */

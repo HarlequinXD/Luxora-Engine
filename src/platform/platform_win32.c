@@ -219,6 +219,7 @@ void lx_platform_set_cursor(int c) {
 }
 
 void lx_platform_set_intercept_close(bool on) { W.intercept_close = on; }
+void lx_platform_set_icon(const uint8_t *rgba, int w, int h) { LX_UNUSED(rgba); LX_UNUSED(w); LX_UNUSED(h); } /* from the .exe resource */
 bool lx_platform_take_close_request(void) {
     bool r = W.close_requested;
     W.close_requested = false;

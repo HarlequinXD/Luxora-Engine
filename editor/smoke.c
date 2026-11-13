@@ -1,5 +1,6 @@
 /* Scripted smoke test (--smoke): drives the editor through its windows and tools over a
  * few hundred frames, then quits. Used by CI and local testing to catch crashes and leaks. */
+#include <stdlib.h>
 #include "editor.h"
 
 typedef void (*SmokeFn)(void);
@@ -81,6 +82,26 @@ static void s_collapse_click(void) {
     SMOKE_CHECK(!wrap->hidden && after && !after->hidden, "collapsing Transform leaves the components below visible");
     h->on_click(h);
     SMOKE_CHECK(body && !body->hidden, "expanding Transform shows its fields again");
+}
+
+static void s_quit_prompt(void) {
+    SMOKE_CHECK(ED.menubar && ED.menubar->first && ED.menubar->first->type == UI_IMAGE, "title bar shows the app icon");
+    ED.dirty = true;
+    ed_request_quit();   /* what the window's close button does */
+    SMOKE_CHECK(ED.save_prompt_open && ui_has_modal(ED.ui) && !ED.quit, "closing with unsaved changes asks to save");
+}
+static void s_prompt_shot(void) {
+    const char *shot = getenv("LUXORA_SMOKE_SHOT");   /* CI: picture of the save prompt + title bar */
+    if (shot && shot[0]) lx_renderer_screenshot(shot);
+}
+static void s_quit_cancel(void) {
+    UiNode *cancel = find_node(ui_root(ED.ui), NULL, "Cancel");
+    extern UiNode *ui_modal_node(UiCtx *ui);
+    if (!cancel) cancel = find_node(ui_modal_node(ED.ui), NULL, "Cancel");
+    SMOKE_CHECK(cancel != NULL, "save prompt has Cancel");
+    if (cancel) cancel->on_click(cancel);
+    SMOKE_CHECK(!ui_has_modal(ED.ui) && !ED.quit && ED.dirty, "Cancel keeps the editor open with the changes");
+    ED.dirty = false;
 }
 
 static UiNode *g_first_widget;
@@ -234,6 +255,9 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {219, s_closed, "back at the project manager"},
     {222, s_reopen_project, "reopen the project"},
     {226, s_reopened, "project is open again"},
+    {228, s_quit_prompt, "close the window with unsaved changes"},
+    {229, s_prompt_shot, "screenshot of the save prompt"},
+    {231, s_quit_cancel, "cancel the save prompt"},
 };
 
 bool ed_smoke_step(int frame) {
@@ -242,5 +266,5 @@ bool ed_smoke_step(int frame) {
             LX_INFO("[smoke] %s", STEPS[i].what);
             if (ED.mode == ED_MODE_EDITOR || frame >= 216) STEPS[i].fn(); /* the last steps run in the Project Manager */
         }
-    return frame < 232;
+    return frame < 236;
 }

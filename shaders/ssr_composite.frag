@@ -18,10 +18,19 @@ void main() {
     float rough = sp.a;
     vec4 s = texture(u_ssr, uv);
     if (rough > 0.12) {
-        // glossy: widen the gather with roughness (the trace is sharp)
+        // glossy: widen the gather with roughness (the trace is sharp). Samples are weighted by
+        // 1 / (1 + luminance) so one bright outlier cannot dominate (no sparkles).
         vec2 o = rough * 6.0 / pc.b.zw;
-        s = s * 0.4 + 0.15 * (texture(u_ssr, uv + vec2(o.x, o.y)) + texture(u_ssr, uv + vec2(-o.x, o.y)) +
-                              texture(u_ssr, uv + vec2(o.x, -o.y)) + texture(u_ssr, uv + vec2(-o.x, -o.y)));
+        vec4 t[5] = vec4[5](s, texture(u_ssr, uv + vec2(o.x, o.y)), texture(u_ssr, uv + vec2(-o.x, o.y)),
+                            texture(u_ssr, uv + vec2(o.x, -o.y)), texture(u_ssr, uv + vec2(-o.x, -o.y)));
+        vec4 acc = vec4(0.0);
+        float wsum = 0.0;
+        for (int i = 0; i < 5; i++) {
+            float w = (i == 0 ? 1.6 : 1.0) / (1.0 + dot(t[i].rgb, vec3(0.2126, 0.7152, 0.0722)));
+            acc += t[i] * w;
+            wsum += w;
+        }
+        s = acc / wsum;
     }
     if (s.a < 0.004) discard;
     vec3 n = normalize(textureLod(u_gnormal, uv, 0.0).xyz * 2.0 - 1.0);

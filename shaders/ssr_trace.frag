@@ -45,7 +45,9 @@ void main() {
     float jitter = ign(gl_FragCoord.xy);
     float prev_t = 0.0, hit_t = -1.0;
     for (int i = 1; i <= steps; i++) {
-        float t = tmax * (float(i) - jitter * 0.95) / float(steps);
+        // steps start fine and grow with distance: precise contact reflections, long reach
+        float f = (float(i) - jitter * 0.95) / float(steps);
+        float t = tmax * f * mix(f, 1.0, 0.35);
         vec2 s = mix(s0, s1, t);
         float ray_z = 1.0 / mix(k0, k1, t);
         float scene_z = ssr_view_depth(textureLod(u_depth, s, 0.0).r);
@@ -70,5 +72,11 @@ void main() {
     float travel = 1.0 - smoothstep(0.65, 1.0, hit_t);
     float gloss = 1.0 - smoothstep(pc.a.w * 0.6, pc.a.w, rough);
     float conf = edge * travel * gloss * facing;
-    o_ssr = vec4(textureLod(u_hdr, s, 0.0).rgb * conf, conf);
+    vec3 c = textureLod(u_hdr, s, 0.0).rgb;
+    // firefly guard: a ray landing on a tiny, extremely bright highlight (the sun on chrome) must not
+    // become a sparkle on a glossy floor; rougher surfaces are clamped harder
+    float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    float cap = mix(32.0, 4.0, clamp(rough / max(pc.a.w, 0.05), 0.0, 1.0));
+    c *= min(1.0, cap / max(lum, 1e-4));
+    o_ssr = vec4(c * conf, conf);
 }

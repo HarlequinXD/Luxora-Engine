@@ -148,6 +148,21 @@ void lx_platform_shutdown(void) {
 void lx_platform_set_title(const char *title) { XStoreName(X.dpy, X.win, title); }
 
 void lx_platform_set_intercept_close(bool on) { X.intercept_close = on; }
+
+void lx_platform_set_icon(const uint8_t *rgba, int w, int h) {
+    /* _NET_WM_ICON: width, height, then ARGB pixels as CARDINALs (longs) */
+    size_t n = 2 + (size_t)w * (size_t)h;
+    unsigned long *data = lx_alloc(n * sizeof *data);
+    data[0] = (unsigned long)w;
+    data[1] = (unsigned long)h;
+    for (int i = 0; i < w * h; i++) {
+        const uint8_t *p = rgba + i * 4;
+        data[2 + i] = ((unsigned long)p[3] << 24) | ((unsigned long)p[0] << 16) | ((unsigned long)p[1] << 8) | p[2];
+    }
+    XChangeProperty(X.dpy, X.win, XInternAtom(X.dpy, "_NET_WM_ICON", False), XA_CARDINAL, 32, PropModeReplace,
+                    (unsigned char *)data, (int)n);
+    lx_free(data);
+}
 bool lx_platform_take_close_request(void) {
     bool r = X.close_requested;
     X.close_requested = false;

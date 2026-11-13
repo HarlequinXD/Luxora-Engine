@@ -874,28 +874,25 @@ static void close_modal(UiNode *n) { LX_UNUSED(n); ui_close_modal(ED.ui); }
 void ed_about(void) {
     UiCtx *ui = ED.ui;
     const UiTheme *t = ui_theme(ui);
-    UiNode *body = ui_modal(ui, "About Luxora", 520, 380);
+    UiNode *body = ui_modal(ui, "About Luxora", 520, 404);
     UiNode *row = ui_box(ui, body, UI_ROW);
     row->h = 56;
     row->gap = 12;
     row->cross_align = UI_ALIGN_CENTER;
-    UiNode *logo = ui_label(ui, row, "");
-    logo->icon = UI_ICON_PROJECT;
-    logo->icon_size = 44;
-    logo->icon_color = t->accent;
-    logo->w = 50;
+    ed_app_icon(row, 52);
     UiNode *col = ui_box(ui, row, UI_COL);
     col->grow = 1;
     ui_label(ui, col, "Luxora Engine")->font = UI_FONT_TITLE;
     UiNode *v = ui_label(ui, col, "Version " LX_VERSION_STRING " · written in C11 · Vulkan 1.3");
     v->fg = t->text_dim;
     static const char *lines[] = {"Physically based rendering with cascaded shadows",
+                                  "Reflection probes (GGX pre-filtered) + screen-space reflections",
                                   "Virtual photon global illumination (CPU, all cores)",
                                   "Ray-traced acoustics: speed of sound, occlusion, reflections, reverb",
                                   "Data-oriented crowds, automatic LODs, instanced batching",
                                   "Input Manager: keyboard, mouse, gamepad and touch",
                                   "Builds for Windows, Linux and Android"};
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < (int)(sizeof lines / sizeof lines[0]); i++) {
         UiNode *l = ui_label(ui, body, lines[i]);
         l->icon = UI_ICON_CHECK;
         l->icon_color = t->success;
