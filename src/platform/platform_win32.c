@@ -227,6 +227,18 @@ void lx_platform_set_intercept_close(bool on) { W.intercept_close = on; }
 #define RES_LANG MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US)
 static void to_wide(const char *s, wchar_t *w, int cap) { MultiByteToWideChar(CP_UTF8, 0, s, -1, w, cap); }
 
+typedef struct ResList { LPWSTR name[64]; WORD lang[64]; int type[64]; int n; } ResList;
+static BOOL CALLBACK enum_langs(HMODULE m, LPCWSTR type, LPCWSTR name, WORD lang, LONG_PTR u) {
+    LX_UNUSED(m); LX_UNUSED(type);
+    ResList *l = (ResList *)u;
+    if (l->n < 64 && IS_INTRESOURCE(name)) { l->name[l->n] = (LPWSTR)name; l->lang[l->n] = lang; l->n++; }
+    return TRUE;
+}
+static BOOL CALLBACK enum_names(HMODULE m, LPCWSTR type, LPWSTR name, LONG_PTR u) {
+    EnumResourceLanguagesW(m, type, name, enum_langs, u);
+    return TRUE;
+}
+
 bool lx_exe_set_icon(const char *exe, const char *ico_path) {
     size_t size;
     unsigned char *ico = (unsigned char *)lx_file_read(ico_path, &size);
@@ -235,9 +247,21 @@ bool lx_exe_set_icon(const char *exe, const char *ico_path) {
     if (count <= 0 || size < 6 + 16 * (size_t)count) { lx_free(ico); return false; }
     wchar_t wexe[LX_PATH_MAX];
     to_wide(exe, wexe, LX_PATH_MAX);
+    /* find the icons the file has now (ids and languages), so exactly those get replaced */
+    ResList old = {0};
+    HMODULE mod = LoadLibraryExW(wexe, NULL, LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+    if (mod) {
+        EnumResourceNamesW(mod, RT_ICON, enum_names, (LONG_PTR)&old);
+        int icons = old.n;
+        EnumResourceNamesW(mod, RT_GROUP_ICON, enum_names, (LONG_PTR)&old);
+        for (int i = 0; i < old.n; i++) old.type[i] = i < icons ? 3 : 14;   /* RT_ICON / RT_GROUP_ICON */
+        FreeLibrary(mod);
+    }
     HANDLE h = BeginUpdateResourceW(wexe, FALSE);
-    if (!h) { lx_free(ico); return false; }
-    for (int id = 1; id <= 32; id++) UpdateResourceW(h, RT_ICON, MAKEINTRESOURCEW(id), RES_LANG, NULL, 0);   /* drop the old images */
+    if (!h) { LX_WARN("BeginUpdateResource failed (%lu)", GetLastError()); lx_free(ico); return false; }
+    for (int i = 0; i < old.n; i++)
+        if (!UpdateResourceW(h, MAKEINTRESOURCEW(old.type[i]), old.name[i], old.lang[i], NULL, 0))
+            LX_WARN("Removing old icon resource failed (%lu)", GetLastError());
     /* group directory: like the .ico header, but each entry ends in a resource id instead of a file offset */
     size_t gsize = 6 + 14 * (size_t)count;
     unsigned char *grp = lx_calloc(1, gsize);
@@ -254,9 +278,13 @@ bool lx_exe_set_icon(const char *exe, const char *ico_path) {
         uint16_t id = (uint16_t)(i + 1);
         memcpy(g + 12, &id, 2);
         ok = UpdateResourceW(h, RT_ICON, MAKEINTRESOURCEW(id), RES_LANG, ico + offset, bytes) != 0;
+        if (!ok) LX_WARN("Writing icon image %d failed (%lu)", i + 1, GetLastError());
     }
-    if (ok) ok = UpdateResourceW(h, RT_GROUP_ICON, MAKEINTRESOURCEW(1), RES_LANG, grp, (DWORD)gsize) != 0;
-    ok = EndUpdateResourceW(h, !ok) && ok;
+    if (ok) {
+        ok = UpdateResourceW(h, RT_GROUP_ICON, MAKEINTRESOURCEW(1), RES_LANG, grp, (DWORD)gsize) != 0;
+        if (!ok) LX_WARN("Writing the icon group failed (%lu)", GetLastError());
+    }
+    if (!EndUpdateResourceW(h, !ok)) { LX_WARN("EndUpdateResource failed (%lu)", GetLastError()); ok = false; }
     lx_free(grp);
     lx_free(ico);
     return ok;
