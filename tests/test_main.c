@@ -1003,6 +1003,184 @@ static void test_gameplay(void) {
     lx_scene_destroy(s);
 }
 
+/* ---- models: FBX import, skinning, animation, avatars ---- */
+static const char *TEST_FBX =
+    "; FBX 7.4.0 project file\n"
+    "FBXHeaderExtension:  {\n    FBXVersion: 7400\n}\n"
+    "GlobalSettings:  {\n    Properties70:  {\n        P: \"UpAxis\", \"int\", \"Integer\", \"\",1\n"
+    "        P: \"UnitScaleFactor\", \"double\", \"Number\", \"\",100\n    }\n}\n"
+    "Objects:  {\n"
+    "    Geometry: 10, \"Geometry::Bar\", \"Mesh\" {\n"
+    "        Vertices: *18 {\n            a: -0.1,0,0,0.1,0,0,-0.1,1,0,0.1,1,0,-0.1,2,0,0.1,2,0\n        }\n"
+    "        PolygonVertexIndex: *8 {\n            a: 0,1,3,-3,2,3,5,-5\n        }\n"
+    "        LayerElementUV: 0 {\n            MappingInformationType: \"ByPolygonVertex\"\n            ReferenceInformationType: \"Direct\"\n"
+    "            UV: *16 {\n                a: 0,0,1,0,1,0.5,0,0.5,0,0.5,1,0.5,1,1,0,1\n            }\n        }\n"
+    "    }\n"
+    "    Model: 20, \"Model::Bar\", \"Mesh\" {\n    }\n"
+    "    Model: 30, \"Model::Root\", \"LimbNode\" {\n    }\n"
+    "    Model: 31, \"Model::Tip\", \"LimbNode\" {\n        Properties70:  {\n"
+    "            P: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\",0,1,0\n        }\n    }\n"
+    "    Deformer: 40, \"Deformer::Skin\", \"Skin\" {\n    }\n"
+    "    Deformer: 41, \"SubDeformer::C0\", \"Cluster\" {\n        Indexes: *4 {\n            a: 0,1,2,3\n        }\n"
+    "        Weights: *4 {\n            a: 1,1,1,1\n        }\n"
+    "        Transform: *16 {\n            a: 1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1\n        }\n"
+    "        TransformLink: *16 {\n            a: 1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1\n        }\n    }\n"
+    "    Deformer: 42, \"SubDeformer::C1\", \"Cluster\" {\n        Indexes: *2 {\n            a: 4,5\n        }\n"
+    "        Weights: *2 {\n            a: 1,1\n        }\n"
+    "        Transform: *16 {\n            a: 1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1\n        }\n"
+    "        TransformLink: *16 {\n            a: 1,0,0,0,0,1,0,0,0,0,1,0,0,1,0,1\n        }\n    }\n"
+    "    Material: 50, \"Material::Red Paint\", \"\" {\n        Properties70:  {\n"
+    "            P: \"DiffuseColor\", \"Color\", \"\", \"A\",1,0,0\n        }\n    }\n"
+    "    AnimationStack: 60, \"AnimStack::Armature|Bend\", \"\" {\n    }\n"
+    "    AnimationLayer: 61, \"AnimLayer::Base\", \"\" {\n    }\n"
+    "    AnimationCurveNode: 62, \"AnimCurveNode::R\", \"\" {\n        Properties70:  {\n"
+    "            P: \"d|X\", \"Number\", \"\", \"A\",0\n            P: \"d|Y\", \"Number\", \"\", \"A\",0\n"
+    "            P: \"d|Z\", \"Number\", \"\", \"A\",0\n        }\n    }\n"
+    "    AnimationCurve: 63, \"AnimCurve::\", \"\" {\n        KeyTime: *2 {\n            a: 0,46186158000\n        }\n"
+    "        KeyValueFloat: *2 {\n            a: 0,90\n        }\n    }\n"
+    "}\n"
+    "Connections:  {\n"
+    "    C: \"OO\",20,0\n    C: \"OO\",10,20\n    C: \"OO\",50,20\n    C: \"OO\",30,0\n    C: \"OO\",31,30\n"
+    "    C: \"OO\",40,10\n    C: \"OO\",41,40\n    C: \"OO\",42,40\n    C: \"OO\",30,41\n    C: \"OO\",31,42\n"
+    "    C: \"OO\",61,60\n    C: \"OO\",62,61\n    C: \"OP\",62,31, \"Lcl Rotation\"\n    C: \"OP\",63,62, \"d|Z\"\n"
+    "}\n";
+
+/* a rig with Unreal mannequin bone names, written as an FBX */
+static char *unreal_rig_fbx(void) {
+    static const char *bones[][2] = {{"root", ""}, {"pelvis", "root"}, {"spine_01", "pelvis"}, {"spine_02", "spine_01"}, {"spine_03", "spine_02"},
+                                     {"neck_01", "spine_03"}, {"head", "neck_01"}, {"clavicle_l", "spine_03"}, {"upperarm_l", "clavicle_l"},
+                                     {"lowerarm_l", "upperarm_l"}, {"hand_l", "lowerarm_l"}, {"thumb_01_l", "hand_l"}, {"index_01_l", "hand_l"},
+                                     {"clavicle_r", "spine_03"}, {"upperarm_r", "clavicle_r"}, {"lowerarm_r", "upperarm_r"}, {"hand_r", "lowerarm_r"},
+                                     {"thigh_l", "pelvis"}, {"calf_l", "thigh_l"}, {"foot_l", "calf_l"}, {"ball_l", "foot_l"},
+                                     {"thigh_r", "pelvis"}, {"calf_r", "thigh_r"}, {"foot_r", "calf_r"}, {"ball_r", "foot_r"}};
+    int n = (int)(sizeof bones / sizeof bones[0]);
+    LxStrBuf sb = {0};
+    lx_sb_printf(&sb, "; FBX 7.4.0 project file\nFBXHeaderExtension:  {\n    FBXVersion: 7400\n}\nObjects:  {\n");
+    for (int i = 0; i < n; i++) lx_sb_printf(&sb, "    Model: %d, \"Model::%s\", \"LimbNode\" {\n    }\n", 100 + i, bones[i][0]);
+    lx_sb_printf(&sb, "}\nConnections:  {\n");
+    for (int i = 0; i < n; i++) {
+        int p = 0;
+        for (int k = 0; k < n; k++) if (!strcmp(bones[k][0], bones[i][1])) p = 100 + k;
+        lx_sb_printf(&sb, "    C: \"OO\",%d,%d\n", 100 + i, p);
+    }
+    lx_sb_printf(&sb, "}\n");
+    return sb.data;
+}
+
+static void test_models(void) {
+    printf("models\n");
+    char dir[LX_PATH_MAX], path[LX_PATH_MAX];
+    lx_path_join(dir, sizeof dir, tmpdir(), "luxora_test_models");
+    lx_path_remove(dir);
+    lx_mkdir_p(dir);
+    lx_assets_set_root(dir);
+    lx_path_join(path, sizeof path, dir, "BarModel.fbx");
+    lx_file_write(path, TEST_FBX, strlen(TEST_FBX));
+    LxModel *m = lx_asset_model("BarModel.fbx");
+    CHECK(m != NULL, "ASCII FBX imports (%s)", lx_model_error("BarModel.fbx"));
+    if (!m) return;
+    CHECK(lx_model_node_count(m) == 3 && lx_model_bone_count(m) == 2 && lx_model_mesh_count(m) == 1, "nodes %d bones %d meshes %d",
+          lx_model_node_count(m), lx_model_bone_count(m), lx_model_mesh_count(m));
+    CHECK(lx_model_clip_count(m) == 1 && !strcmp(lx_model_clip_name(m, 0), "Bend") && NEAR(lx_model_clip_length(m, 0), 1.0f, 0.01f), "clip 'Bend' (%s)",
+          lx_model_clip_name(m, 0));
+    char mat[LX_PATH_MAX];
+    lx_path_join(mat, sizeof mat, dir, "BarModel Materials/Red Paint.lxmat");
+    LxMaterial lm;
+    CHECK(lx_material_load(&lm, mat) && NEAR(lm.albedo.x, 1, 1e-4f) && NEAR(lm.albedo.y, 0, 1e-4f), "material written from the FBX");
+    LxMesh *mesh = lx_asset_mesh("BarModel.fbx#mesh0");
+    CHECK(mesh && mesh->skin && mesh->skin->bone_count == 2 && mesh->lods[0].index_count == 12, "skinned mesh part");
+
+    LxScene *s = lx_scene_create("Models");
+    LxEntity root = lx_model_instantiate(s, "BarModel.fbx", lx_v3(0, 0, 0), 0);
+    LxEntity tip = lx_entity_find(s, "Tip");
+    CHECK(root && tip && lx_get_animator(s, root) && lx_get_mesh(s, lx_entity_find(s, "Bar")), "placed with bones, renderer and animator");
+    CHECK(NEAR(lx_entity_world_position(s, tip).y, 1, 1e-5f), "bone rest pose");
+    lx_animator_play(s, root, "BarModel.fbx#Bend", 0);
+    lx_animator_set_time(s, root, 0.5f);
+    lx_animator_update(s, root, 0);
+    lx_scene_update_skins(s);
+    LxMesh *def = lx_skin_mesh_for(s, lx_entity_find(s, "Bar"));
+    bool found = false;
+    for (int i = 0; def && i < def->lods[0].vertex_count; i++) {
+        LxVertex *v = &def->lods[0].vertices[i];
+        if (NEAR(v->px, -0.7778f, 2e-3f) && NEAR(v->py, 1.6364f, 2e-3f)) found = true;
+    }
+    CHECK(def && found, "skinned vertex follows the animated bone (45 degrees)");
+    LxVec3 e = lx_entity_euler(s, tip);
+    CHECK(NEAR(e.z, 45, 0.1f), "bone rotated %g", e.z);
+    /* scenes remember animators */
+    char *text = lx_scene_serialize(s);
+    LxScene *s2 = lx_scene_deserialize(text);
+    lx_free(text);
+    LxEntity r2 = lx_entity_find(s2, "Bar");
+    LxEntity top2 = r2 ? lx_entity_parent(s2, r2) : 0;
+    CHECK(top2 && lx_get_animator(s2, top2) && !strcmp(lx_get_animator(s2, top2)->model, "BarModel.fbx"), "animator saved with the scene");
+    lx_scene_simulate(s2, 0.25f);   /* play on start */
+    CHECK(lx_animator_playing(s2, top2) && NEAR(lx_animator_time(s2, top2), 0.25f, 1e-4f), "plays on start");
+    lx_scene_stop_simulation(s2);
+    lx_scene_destroy(s2);
+    lx_scene_destroy(s);
+
+    /* automapping: Unreal names */
+    char *ue = unreal_rig_fbx();
+    lx_path_join(path, sizeof path, dir, "UE.fbx");
+    lx_file_write(path, ue, strlen(ue));
+    lx_free(ue);
+    LxModel *um = lx_asset_model("UE.fbx");
+    char av[LX_HB_COUNT][64];
+    int mapped = um ? lx_avatar_automap(um, av) : 0;
+    char miss[256];
+    CHECK(um && lx_avatar_is_valid(av, miss, sizeof miss), "Unreal skeleton maps to a valid avatar (missing: %s)", miss);
+    CHECK(!strcmp(av[LX_HB_HIPS], "pelvis") && !strcmp(av[LX_HB_LEFT_UPPER_ARM], "upperarm_l") && !strcmp(av[LX_HB_RIGHT_LOWER_LEG], "calf_r") &&
+          !strcmp(av[LX_HB_CHEST], "spine_02") && !strcmp(av[LX_HB_UPPER_CHEST], "spine_03") && !strcmp(av[LX_HB_LEFT_TOES], "ball_l") &&
+          !strcmp(av[LX_HB_LEFT_THUMB_PROXIMAL], "thumb_01_l"), "Unreal names (%d mapped)", mapped);
+
+    /* real files when available (CI downloads Mixamo samples): import, automap, retarget */
+    const char *fbx_dir = getenv("LUXORA_TEST_FBX_DIR");
+    if (fbx_dir && fbx_dir[0]) {
+        lx_assets_set_root(fbx_dir);
+        LxModel *samba = lx_asset_model("Samba Dancing.fbx"), *beta = lx_asset_model("mixamo.fbx");
+        CHECK(samba && beta, "Mixamo FBX files import");
+        if (samba && beta) {
+            CHECK(lx_model_bone_count(samba) > 50 && lx_model_clip_count(samba) == 1 && lx_model_mesh_count(samba) == 2, "Samba Dancing contents");
+            LxAabb b = lx_model_bounds(samba);
+            CHECK(b.max.y > 1.6f && b.max.y < 2.0f, "converted to metres (height %.2f)", b.max.y);
+            char a1[LX_HB_COUNT][64], a2[LX_HB_COUNT][64];
+            CHECK(lx_avatar_automap(samba, a1) >= 50 && lx_avatar_is_valid(a1, NULL, 0), "Mixamo automap");
+            lx_avatar_automap(beta, a2);
+            /* make both humanoid, then retarget Samba's dance onto the other character */
+            LxModelImport i1 = *lx_model_settings(samba), i2 = *lx_model_settings(beta);
+            i1.rig = i2.rig = LX_RIG_HUMANOID;
+            memcpy(i1.avatar, a1, sizeof a1);
+            memcpy(i2.avatar, a2, sizeof a2);
+            char p1[LX_PATH_MAX], p2[LX_PATH_MAX];
+            lx_path_join(p1, sizeof p1, fbx_dir, "Samba Dancing.fbx");
+            lx_path_join(p2, sizeof p2, fbx_dir, "mixamo.fbx");
+            lx_model_import_save(p1, &i1);
+            lx_model_import_save(p2, &i2);
+            lx_model_reload("Samba Dancing.fbx");
+            lx_model_reload("mixamo.fbx");
+            LxScene *rs = lx_scene_create("Retarget");
+            LxEntity dancer = lx_model_instantiate(rs, "mixamo.fbx", lx_v3(0, 0, 0), 0);
+            lx_animator_play(rs, dancer, "Samba Dancing.fbx#0", 0);
+            LxEntity hips = lx_entity_find(rs, "mixamorig:Hips");
+            LxVec3 h0 = lx_entity_world_position(rs, hips);
+            for (int f = 0; f < 60; f++) lx_scene_simulate(rs, 1.0f / 30);
+            LxVec3 h1 = lx_entity_world_position(rs, hips);
+            LxQuat q = lx_entity_world_rotation(rs, lx_entity_find(rs, "mixamorig:LeftForeArm"));
+            CHECK(!isnan(h1.x) && !isnan(q.w) && lx_len3(lx_sub3(h1, h0)) > 0.01f, "retargeted dance moves the hips (%.3f)", lx_len3(lx_sub3(h1, h0)));
+            CHECK(h1.y > 0.6f && h1.y < 1.3f, "hips stay at a sensible height (%.2f)", h1.y);
+            lx_scene_stop_simulation(rs);
+            lx_scene_destroy(rs);
+            lx_path_remove(strcat(p1, ".lximport"));
+            lx_path_remove(strcat(p2, ".lximport"));
+        }
+    }
+    lx_models_clear();
+    lx_assets_set_root("");
+    lx_path_remove(dir);
+}
+
 int main(void) {
     lx_jobs_init(0);
     lx_register_builtin_behaviours();
@@ -1043,6 +1221,7 @@ int main(void) {
     test_physics();
     test_game_ui();
     test_gameplay();
+    test_models();
 #if LUXORA_SCRIPT_COMPILER
     test_scripts();
 #endif

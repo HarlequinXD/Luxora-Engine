@@ -35,7 +35,12 @@ typedef struct GpuImage {
     uint32_t w, h, d, layers, mips;
 } GpuImage;
 
-typedef struct MeshGpu { GpuBuffer vb[LX_MAX_LODS], ib[LX_MAX_LODS]; } MeshGpu;
+typedef struct MeshGpu {
+    GpuBuffer vb[LX_MAX_LODS], ib[LX_MAX_LODS];
+    bool dynamic;                  /* skinned: vertices streamed through per-frame host buffers */
+    GpuBuffer dvb[FRAMES];
+    uint32_t dver[FRAMES];
+} MeshGpu;
 /* A texture can be colour (sRGB: albedo) or data (linear: normal, roughness, height...). The same
  * image used both ways gets one GPU copy per interpretation, never the wrong one. */
 typedef struct TexGpu { GpuImage img[2]; bool has[2]; } TexGpu;   /* [0] linear, [1] sRGB */
@@ -1279,9 +1284,30 @@ static GpuBuffer upload_buffer(const void *data, VkDeviceSize size, VkBufferUsag
     return dst;
 }
 
+/* the mesh an object draws: its deformed copy when skinned */
+static LxMesh *entity_mesh(LxEntityData *d) { return d->skin ? lx_skin_mesh_of(d) : lx_asset_mesh(d->mesh.mesh); }
+
 static MeshGpu *mesh_gpu(LxMesh *m) {
-    if (m->gpu) return m->gpu;
+    if (m->gpu) {
+        MeshGpu *g = m->gpu;
+        if (g->dynamic) {
+            /* this frame's copy of the deformed vertices */
+            int f = R.frame;
+            size_t bytes = sizeof(LxVertex) * (size_t)m->lods[0].vertex_count;
+            if (!g->dvb[f].buf) { buffer_create(&g->dvb[f], bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, true); g->dver[f] = m->version - 1; }
+            if (g->dver[f] != m->version) { memcpy(g->dvb[f].mapped, m->lods[0].vertices, bytes); g->dver[f] = m->version; }
+            g->vb[0] = g->dvb[f];
+        }
+        return g;
+    }
     MeshGpu *g = lx_calloc(1, sizeof *g);
+    if (m->dynamic) {
+        g->dynamic = true;
+        g->ib[0] = upload_buffer(m->lods[0].indices, sizeof(uint32_t) * (VkDeviceSize)m->lods[0].index_count, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+        m->gpu = g;
+        LX_VEC_PUSH(g_live_meshes, g_live_mesh_count, g_live_mesh_cap, m);
+        return mesh_gpu(m);
+    }
     for (int l = 0; l < m->lod_count; l++) {
         g->vb[l] = upload_buffer(m->lods[l].vertices, sizeof(LxVertex) * (VkDeviceSize)m->lods[l].vertex_count, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
         g->ib[l] = upload_buffer(m->lods[l].indices, sizeof(uint32_t) * (VkDeviceSize)m->lods[l].index_count, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
@@ -1295,7 +1321,11 @@ void lx_renderer_mesh_release(LxMesh *m) {
     if (!m || !m->gpu || !R.device) return;
     vkDeviceWaitIdle(R.device);
     MeshGpu *g = m->gpu;
-    for (int l = 0; l < LX_MAX_LODS; l++) { buffer_destroy(&g->vb[l]); buffer_destroy(&g->ib[l]); }
+    if (g->dynamic) {
+        for (int f = 0; f < FRAMES; f++) buffer_destroy(&g->dvb[f]);
+        buffer_destroy(&g->ib[0]);
+    } else
+        for (int l = 0; l < LX_MAX_LODS; l++) { buffer_destroy(&g->vb[l]); buffer_destroy(&g->ib[l]); }
     lx_free(g);
     m->gpu = NULL;
     for (int i = 0; i < g_live_mesh_count; i++) if (g_live_meshes[i] == m) { g_live_meshes[i] = g_live_meshes[--g_live_mesh_count]; break; }
@@ -1895,7 +1925,7 @@ static uint64_t scene_look_hash(LxScene *s) {
         h = fnv(h, &i, sizeof i);
         h = fnv(h, d->world.m, 64);
         if (d->comps & LX_COMP_MESH) {
-            const LxMesh *mesh = lx_asset_mesh(d->mesh.mesh);
+            const LxMesh *mesh = entity_mesh(d);
             const LxMaterial *m = lx_asset_material(d->mesh.material);
             float mf[10] = {m->albedo.x, m->albedo.y, m->albedo.z, m->albedo.w, m->metallic, m->roughness,
                             m->emissive.x, m->emissive.y, m->emissive.z, m->emissive_strength};
@@ -2045,7 +2075,7 @@ static bool probe_render_face(LxScene *s, ProbeSlot *p, int face, VkCommandBuffe
     for (int i = 1; i < s->count; i++) {
         LxEntityData *d = &s->entities[i];
         if (!d->alive || !d->active || !(d->comps & LX_COMP_MESH) || entity_hidden(s, d)) continue;
-        LxMesh *mesh = lx_asset_mesh(d->mesh.mesh);
+        LxMesh *mesh = entity_mesh(d);
         LxAabb wb = lx_aabb_transform(mesh->bounds, d->world);
         /* skip whatever the capture point is inside of (it would only show its back faces) */
         if (eye.x > wb.min.x && eye.x < wb.max.x && eye.y > wb.min.y && eye.y < wb.max.y && eye.z > wb.min.z && eye.z < wb.max.z) continue;
@@ -2176,6 +2206,7 @@ static void probes_update(LxScene *s, VkCommandBuffer cmd, FrameData *fr, const 
 }
 
 void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *target) {
+    if (s) lx_scene_update_skins(s);   /* skinned meshes follow their bones */
     if (!R.frame_active || !s) return;
     double t_start = lx_time();
     FrameData *fr = &R.frames[R.frame];
@@ -2302,7 +2333,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
             if (!lx_entity_data(s, p)->active) { hidden = true; break; }
         if (hidden) continue;
         if (d->comps & LX_COMP_MESH) {
-            LxMesh *mesh = lx_asset_mesh(d->mesh.mesh);
+            LxMesh *mesh = entity_mesh(d);
             const LxMaterial *mat = lx_asset_material(d->mesh.material);
             LxAabb wb = lx_aabb_transform(mesh->bounds, d->world);
             LxVec3 c = lx_aabb_center(wb);
@@ -2531,7 +2562,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
         if (view->highlight) {
             LxEntityData *d = lx_entity_data(s, view->highlight);
             if (d && (d->comps & LX_COMP_MESH) && fr->inst_used + 80 <= fr->inst.size) {
-                LxMesh *mesh = lx_asset_mesh(d->mesh.mesh);
+                LxMesh *mesh = entity_mesh(d);
                 float *dst = (float *)((uint8_t *)fr->inst.mapped + fr->inst_used);
                 memcpy(dst, d->world.m, 64);
                 dst[16] = dst[17] = dst[18] = dst[19] = 1.0f;

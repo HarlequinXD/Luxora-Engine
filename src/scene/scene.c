@@ -66,6 +66,7 @@ void lx_scene_destroy(LxScene *s) {
     lx_scene_stop_simulation(s);
     lx_physics_world_free(s);
     lx_gameplay_free(s);
+    for (int i = 1; i < s->count; i++) lx_anim_release(&s->entities[i]);
     for (int i = 1; i < s->count; i++)
         if (s->entities[i].crowd_sim) lx_crowd_destroy(s->entities[i].crowd_sim);
     lx_free(s->entities);
@@ -146,6 +147,7 @@ void lx_entity_destroy(LxScene *s, LxEntity e) {
         d->binst.desc->on_destroy(&ctx);
     }
     lx_free(d->binst.state);
+    lx_anim_release(d);
     if (d->audio_voice >= 0) lx_audio_stop(s, e);
     if (d->crowd_sim) lx_crowd_destroy(d->crowd_sim);
     if ((d->comps & LX_COMP_MESH) && d->mesh.static_geometry) s->static_version++;
@@ -175,6 +177,7 @@ static void copy_components(LxEntityData *dst, const LxEntityData *src) {
     dst->collider = src->collider;
     dst->body = src->body;
     dst->character = src->character;
+    dst->animator = src->animator;
     memcpy(dst->tag, src->tag, sizeof dst->tag);
     memcpy(dst->prefab, src->prefab, sizeof dst->prefab);
 }
@@ -566,6 +569,21 @@ GETTER(lx_get_reflection_probe, LxReflectionProbe, LX_COMP_REFLECTION_PROBE, pro
 GETTER(lx_get_collider, LxCollider, LX_COMP_COLLIDER, collider)
 GETTER(lx_get_rigidbody, LxRigidbody, LX_COMP_RIGIDBODY, body)
 GETTER(lx_get_character, LxCharacterController, LX_COMP_CHARACTER, character)
+GETTER(lx_get_animator, LxAnimator, LX_COMP_ANIMATOR, animator)
+
+LxAnimator *lx_add_animator(LxScene *s, LxEntity e, const char *model_ref) {
+    LxEntityData *d = lx_entity_data(s, e);
+    if (!d) return NULL;
+    if (!(d->comps & LX_COMP_ANIMATOR)) {
+        memset(&d->animator, 0, sizeof d->animator);
+        d->animator.speed = 1.0f;
+        d->animator.loop = true;
+        d->animator.play_on_start = true;
+    }
+    if (model_ref) lx_strcpy(d->animator.model, sizeof d->animator.model, model_ref);
+    d->comps |= LX_COMP_ANIMATOR;
+    return &d->animator;
+}
 
 void lx_remove_component(LxScene *s, LxEntity e, LxComponentBits c) {
     LxEntityData *d = lx_entity_data(s, e);
@@ -575,6 +593,7 @@ void lx_remove_component(LxScene *s, LxEntity e, LxComponentBits c) {
     if ((c & LX_COMP_CROWD) && d->crowd_sim) { lx_crowd_destroy(d->crowd_sim); d->crowd_sim = NULL; }
     if (c & LX_COMP_BEHAVIOUR) { lx_free(d->binst.state); memset(&d->binst, 0, sizeof d->binst); }
     d->comps &= ~(uint32_t)c;
+    if (c & (LX_COMP_ANIMATOR | LX_COMP_MESH)) lx_anim_free_entity(d);
 }
 
 LxEntity lx_spawn_primitive(LxScene *s, LxPrimitive p, const char *name, LxVec3 pos) {

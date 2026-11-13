@@ -225,6 +225,12 @@ LxEntity ed_prefab_place(const char *ref, LxVec3 pos, LxEntity parent);
 void ed_prefab_apply(LxEntity e);
 void ed_prefab_unlink(LxEntity e);
 void ed_prefab_select_asset(LxEntity e);
+/* models.c: imported models (FBX), the Animator, and the Avatar window */
+LxEntity ed_model_place(const char *ref, LxVec3 pos, LxEntity parent);
+void ed_model_inspector(UiNode *body, const char *ref);
+void ed_animator_section(UiNode *sec, LxEntity e);
+void ed_avatar_window(const char *ref);
+void ed_avatar_refresh_dots(void);
 void ed_remember_scene(void);           /* editor.c: reopen this scene next time */   /* panels.c: write edited materials */
 
 /* scripts.c: compiling Assets/Scripts with the built-in compiler */

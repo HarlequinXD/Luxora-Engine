@@ -20,6 +20,9 @@ uint32_t ed_color_for_icon(UiIcon icon) {
     case UI_ICON_CROWD: return UI_HEX(0xff6b5e);
     case UI_ICON_PROBE: return UI_HEX(0x8be9fd);
     case UI_ICON_PREFAB: return UI_HEX(0x6fb7ff);
+    case UI_ICON_MODEL: return UI_HEX(0xe8a07a);
+    case UI_ICON_ANIMATOR: return UI_HEX(0xf08a4b);
+    case UI_ICON_AVATAR: return UI_HEX(0x7fd47a);
     case UI_ICON_COLLIDER: return UI_HEX(0x8fd46b);
     case UI_ICON_RIGIDBODY: return UI_HEX(0xffa657);
     case UI_ICON_CHARACTER: return UI_HEX(0x9fb4c8);
@@ -67,6 +70,7 @@ UiIcon ed_icon_for_file(const char *name, bool dir) {
     if (ext_is(name, ".lxscene")) return UI_ICON_SCENE;
     if (ext_is(name, ".lxmat")) return UI_ICON_MATERIAL;
     if (ext_is(name, ".obj")) return UI_ICON_MESH;
+    if (ext_is(name, ".fbx")) return UI_ICON_MODEL;
     if (ext_is(name, ".png") || ext_is(name, ".tga") || ext_is(name, ".bmp")) return UI_ICON_TEXTURE;
     if (ext_is(name, ".wav")) return UI_ICON_SOUND;
     if (ext_is(name, ".c") || ext_is(name, ".h")) return UI_ICON_SCRIPT;
@@ -84,6 +88,7 @@ static const char *drag_type_for(UiIcon icon) {
     case UI_ICON_SCRIPT: return "script";
     case UI_ICON_FOLDER: return "folder";
     case UI_ICON_PREFAB: return "prefab";
+    case UI_ICON_MODEL: return "model";
     default: return "file";
     }
 }
@@ -241,12 +246,15 @@ static void row_drop(UiNode *n, const char *type, const char *payload) {
         if (mr) { lx_strcpy(mr->material, sizeof mr->material, payload); ED.inspector_dirty = true; ed_mark_changed(); ed_commit(); }
     } else if (!strcmp(type, "prefab")) {
         ed_prefab_place(payload, lx_v3(0, 0, 0), target);   /* as a child of the row it's dropped on */
+    } else if (!strcmp(type, "model")) {
+        ed_model_place(payload, lx_v3(0, 0, 0), target);
     }
 }
 
 static void list_drop(UiNode *n, const char *type, const char *payload) {
     LX_UNUSED(n);
     if (!strcmp(type, "prefab")) { ed_prefab_place(payload, ed_spawn_point(), 0); return; }
+    if (!strcmp(type, "model")) { ed_model_place(payload, ed_spawn_point(), 0); return; }
     if (!strcmp(type, "entity")) {
         LxEntity e = (LxEntity)strtoul(payload, NULL, 10);
         if (e && lx_entity_valid(ED.scene, e) && lx_entity_parent(ED.scene, e)) {
@@ -320,7 +328,7 @@ static void add_rows(UiNode *list, LxEntity e, int depth) {
     row->drag_type = "entity";
     snprintf(row->drag_payload, sizeof row->drag_payload, "%u", e);
     lx_strcpy(row->text, sizeof row->text, lx_entity_name(s, e));
-    row->accept = "entity,material,prefab";
+    row->accept = "entity,material,prefab,model";
     row->on_drop = row_drop;
     row->selected = e == ED.selected;
     row->cross_align = UI_ALIGN_CENTER;
@@ -374,7 +382,7 @@ static void hierarchy_frame(UiNode *list) {
     for (LxEntity r = lx_scene_root_first(ED.scene); r; r = lx_entity_next_sibling(ED.scene, r)) add_rows(list, r, 0);
     UiNode *tail = ui_box(ED.ui, list, UI_COL);
     tail->h = 60;
-    tail->accept = "entity,mesh,prefab";
+    tail->accept = "entity,mesh,prefab,model";
     tail->on_drop = list_drop;
     tail->on_right_click = list_menu;
 }
@@ -405,7 +413,7 @@ UiNode *ed_hierarchy_panel(UiNode *parent) {
     ui_pad(list, 4, 2, 4, 4);
     list->gap = 1;
     list->on_frame = hierarchy_frame;
-    list->accept = "entity,mesh,prefab";
+    list->accept = "entity,mesh,prefab,model";
     list->on_drop = list_drop;
     list->on_right_click = list_menu;
     ED.hierarchy_list = list;
@@ -648,6 +656,7 @@ static void add_component(UiNode *n) {
     }
     case LX_COMP_RIGIDBODY: lx_add_rigidbody(s, e); break;
     case LX_COMP_CHARACTER: lx_add_character(s, e); break;
+    case LX_COMP_ANIMATOR: lx_add_animator(s, e, ""); break;
     }
     ED.inspector_dirty = true;
     ED.hierarchy_hash = 0;
@@ -663,7 +672,8 @@ static void add_component_menu(UiNode *b) {
         {LX_COMP_AUDIO_SOURCE, "Audio Source", UI_ICON_SPEAKER}, {LX_COMP_AUDIO_LISTENER, "Audio Listener", UI_ICON_LISTENER},
         {LX_COMP_BEHAVIOUR, "Behaviour (Script)", UI_ICON_BEHAVIOUR}, {LX_COMP_CROWD, "Crowd", UI_ICON_CROWD},
         {LX_COMP_REFLECTION_PROBE, "Reflection Probe", UI_ICON_PROBE}, {LX_COMP_COLLIDER, "Collider", UI_ICON_COLLIDER},
-        {LX_COMP_RIGIDBODY, "Rigidbody", UI_ICON_RIGIDBODY}, {LX_COMP_CHARACTER, "Character Controller", UI_ICON_CHARACTER}};
+        {LX_COMP_RIGIDBODY, "Rigidbody", UI_ICON_RIGIDBODY}, {LX_COMP_CHARACTER, "Character Controller", UI_ICON_CHARACTER},
+        {LX_COMP_ANIMATOR, "Animator", UI_ICON_ANIMATOR}};
     for (int i = 0; i < (int)(sizeof comps / sizeof comps[0]); i++) {
         UiNode *it = ui_menu_item(ED.ui, p, comps[i].name, NULL, add_component);
         it->icon = comps[i].icon;
@@ -940,6 +950,11 @@ static void build_entity_inspector(UiNode *body) {
         rc->icon = UI_ICON_REFRESH;
         rc->h = 26;
     }
+    if (d->comps & LX_COMP_ANIMATOR) {
+        static bool g_open_animator = true;
+        sec = comp_section(body, UI_ICON_ANIMATOR, "Animator", &g_open_animator, LX_COMP_ANIMATOR);
+        ed_animator_section(sec, e);
+    }
     if (d->comps & LX_COMP_CROWD) {
         sec = comp_section(body, UI_ICON_CROWD, "Crowd", &g_open_crowd, LX_COMP_CROWD);
         UiNode *row = ed_prop_row(sec, "Agents");
@@ -1135,6 +1150,7 @@ static void build_asset_inspector(UiNode *body) {
     pl->font = UI_FONT_SMALL;
     pl->fg = t->text_dim;
     ui_pad(pl, 12, 0, 8, 0);
+    if (icon == UI_ICON_MODEL) { ed_model_inspector(body, ref); return; }
     if (icon == UI_ICON_PREFAB) {
         /* what's inside: every object (indented by depth) and its components */
         static bool g_open_prefab = true;
@@ -1158,7 +1174,7 @@ static void build_asset_inspector(UiNode *body) {
             static const struct { uint32_t bit; const char *name; } K[] = {
                 {LX_COMP_MESH, "Mesh"}, {LX_COMP_LIGHT, "Light"}, {LX_COMP_CAMERA, "Camera"}, {LX_COMP_AUDIO_SOURCE, "Audio"},
                 {LX_COMP_BEHAVIOUR, "Behaviour"}, {LX_COMP_COLLIDER, "Collider"}, {LX_COMP_RIGIDBODY, "Rigidbody"},
-                {LX_COMP_CHARACTER, "Character"}, {LX_COMP_REFLECTION_PROBE, "Probe"}, {LX_COMP_CROWD, "Crowd"}};
+                {LX_COMP_CHARACTER, "Character"}, {LX_COMP_REFLECTION_PROBE, "Probe"}, {LX_COMP_CROWD, "Crowd"}, {LX_COMP_ANIMATOR, "Animator"}};
             for (size_t k = 0; k < sizeof K / sizeof K[0]; k++)
                 if (c & K[k].bit) {
                     if (comps[0]) lx_strcpy(comps + strlen(comps), sizeof comps - strlen(comps), ", ");
@@ -1572,6 +1588,10 @@ static void tile_open(UiNode *n) {
         char ref[LX_REF_MAX];
         ed_relative_asset(ref, sizeof ref, path);
         ed_prefab_place(ref, ed_spawn_point(), 0);
+    } else if (icon == UI_ICON_MODEL) {
+        char ref[LX_REF_MAX];
+        ed_relative_asset(ref, sizeof ref, path);
+        ed_model_place(ref, ed_spawn_point(), 0);
     } else if (icon == UI_ICON_SCRIPT || icon == UI_ICON_FILE) lx_platform_open_folder(path);
     else tile_click(n);
 }
@@ -1851,7 +1871,7 @@ static void content_frame(UiNode *panel) {
         lx_strcpy(tl->drag_payload, sizeof tl->drag_payload, ref);
         tl->selected = !strcmp(ED.selected_asset, full);
         lx_strcpy(tl->tooltip, sizeof tl->tooltip, ref);
-        if (e[i].is_dir) { tl->accept = "mesh,material,texture,sound,scene,script,file,folder,prefab,entity"; tl->on_drop = folder_drop; }
+        if (e[i].is_dir) { tl->accept = "mesh,material,texture,sound,scene,script,file,folder,prefab,entity,model"; tl->on_drop = folder_drop; }
         float thumb_aspect = 1.0f;
         uint32_t thumb = icon == UI_ICON_TEXTURE ? thumbnail(full, e[i].size, &thumb_aspect) : 0;
         if (ED.content_list_view) {

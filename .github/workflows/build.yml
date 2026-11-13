@@ -28,6 +28,18 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
 
+      - name: Sample FBX characters (downloaded for testing, not part of the repo)
+        run: |
+          mkdir -p $RUNNER_TEMP/fbx
+          for f in "Samba%20Dancing.fbx" "mixamo.fbx"; do
+            curl -fsSL --retry 3 -o "$RUNNER_TEMP/fbx/${f//%20/ }" "https://raw.githubusercontent.com/mrdoob/three.js/r170/examples/models/fbx/$f" || true
+          done
+          ls -la $RUNNER_TEMP/fbx
+          if [ -s "$RUNNER_TEMP/fbx/Samba Dancing.fbx" ] && [ -s "$RUNNER_TEMP/fbx/mixamo.fbx" ]; then
+            echo "LUXORA_TEST_FBX_DIR=$RUNNER_TEMP/fbx" >> $GITHUB_ENV
+            echo "LUXORA_SMOKE_FBX_DIR=$RUNNER_TEMP/fbx" >> $GITHUB_ENV
+          else echo "::warning::sample FBX download failed - model tests skipped"; fi
+
       - name: Unit tests
         run: ./build/luxora_tests
 
@@ -93,7 +105,7 @@ jobs:
           from PIL import Image
           for f in sorted(glob.glob('shots/*.png')):
               im = Image.open(f).convert('RGB')
-              im.thumbnail((960, 960))
+              im.thumbnail((1280, 1280))
               b = io.BytesIO(); im.save(b, 'JPEG', quality=80)
               print('LXSHOT-BEGIN', f.split('/')[-1])
               data = base64.b64encode(b.getvalue()).decode()

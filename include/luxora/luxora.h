@@ -295,6 +295,7 @@ typedef enum LxComponentBits {
     LX_COMP_COLLIDER = 1 << 8,
     LX_COMP_RIGIDBODY = 1 << 9,
     LX_COMP_CHARACTER = 1 << 10,
+    LX_COMP_ANIMATOR = 1 << 11,
 } LxComponentBits;
 
 typedef struct LxCamera {
@@ -471,6 +472,7 @@ LxReflectionProbe *lx_add_reflection_probe(LxScene *s, LxEntity e);
 LxCollider *lx_add_collider(LxScene *s, LxEntity e, LxColliderShape shape); /* sized to the mesh when there is one */
 LxRigidbody *lx_add_rigidbody(LxScene *s, LxEntity e);
 LxCharacterController *lx_add_character(LxScene *s, LxEntity e);
+struct LxAnimator *lx_add_animator(LxScene *s, LxEntity e, const char *model_ref);
 LxCamera *lx_get_camera(LxScene *s, LxEntity e);
 LxLight *lx_get_light(LxScene *s, LxEntity e);
 LxMeshRenderer *lx_get_mesh(LxScene *s, LxEntity e);
@@ -481,6 +483,7 @@ LxReflectionProbe *lx_get_reflection_probe(LxScene *s, LxEntity e);
 LxCollider *lx_get_collider(LxScene *s, LxEntity e);
 LxRigidbody *lx_get_rigidbody(LxScene *s, LxEntity e);
 LxCharacterController *lx_get_character(LxScene *s, LxEntity e);
+struct LxAnimator *lx_get_animator(LxScene *s, LxEntity e);
 void lx_remove_component(LxScene *s, LxEntity e, LxComponentBits comp);
 
 LxEntity lx_spawn_primitive(LxScene *s, LxPrimitive p, const char *name, LxVec3 pos);
@@ -551,6 +554,103 @@ void lx_register_builtin_behaviours(void);
 /* Runs behaviours (start on first tick), physics and crowds for a scene. */
 void lx_scene_simulate(LxScene *s, float dt);
 void lx_scene_stop_simulation(LxScene *s);
+
+/* ===================================================================
+ *  Models (FBX), skinned meshes, animation and humanoid avatars
+ * =================================================================== */
+
+/* Import settings live next to the model in "<file>.lximport" (the editor writes them). */
+typedef enum LxRigType {
+    LX_RIG_NONE,       /* a static model: no skeleton, no animation */
+    LX_RIG_GENERIC,    /* the skeleton as it is: its animations play on models with the same bone names */
+    LX_RIG_HUMANOID    /* bones mapped to a standard human (an avatar): animations retarget to any humanoid */
+} LxRigType;
+
+/* The humanoid avatar's bones, in Unity's HumanBodyBones order. */
+typedef enum LxHumanBone {
+    LX_HB_HIPS, LX_HB_LEFT_UPPER_LEG, LX_HB_RIGHT_UPPER_LEG, LX_HB_LEFT_LOWER_LEG, LX_HB_RIGHT_LOWER_LEG,
+    LX_HB_LEFT_FOOT, LX_HB_RIGHT_FOOT, LX_HB_SPINE, LX_HB_CHEST, LX_HB_NECK, LX_HB_HEAD,
+    LX_HB_LEFT_SHOULDER, LX_HB_RIGHT_SHOULDER, LX_HB_LEFT_UPPER_ARM, LX_HB_RIGHT_UPPER_ARM,
+    LX_HB_LEFT_LOWER_ARM, LX_HB_RIGHT_LOWER_ARM, LX_HB_LEFT_HAND, LX_HB_RIGHT_HAND,
+    LX_HB_LEFT_TOES, LX_HB_RIGHT_TOES, LX_HB_LEFT_EYE, LX_HB_RIGHT_EYE, LX_HB_JAW,
+    LX_HB_LEFT_THUMB_PROXIMAL, LX_HB_LEFT_THUMB_INTERMEDIATE, LX_HB_LEFT_THUMB_DISTAL,
+    LX_HB_LEFT_INDEX_PROXIMAL, LX_HB_LEFT_INDEX_INTERMEDIATE, LX_HB_LEFT_INDEX_DISTAL,
+    LX_HB_LEFT_MIDDLE_PROXIMAL, LX_HB_LEFT_MIDDLE_INTERMEDIATE, LX_HB_LEFT_MIDDLE_DISTAL,
+    LX_HB_LEFT_RING_PROXIMAL, LX_HB_LEFT_RING_INTERMEDIATE, LX_HB_LEFT_RING_DISTAL,
+    LX_HB_LEFT_LITTLE_PROXIMAL, LX_HB_LEFT_LITTLE_INTERMEDIATE, LX_HB_LEFT_LITTLE_DISTAL,
+    LX_HB_RIGHT_THUMB_PROXIMAL, LX_HB_RIGHT_THUMB_INTERMEDIATE, LX_HB_RIGHT_THUMB_DISTAL,
+    LX_HB_RIGHT_INDEX_PROXIMAL, LX_HB_RIGHT_INDEX_INTERMEDIATE, LX_HB_RIGHT_INDEX_DISTAL,
+    LX_HB_RIGHT_MIDDLE_PROXIMAL, LX_HB_RIGHT_MIDDLE_INTERMEDIATE, LX_HB_RIGHT_MIDDLE_DISTAL,
+    LX_HB_RIGHT_RING_PROXIMAL, LX_HB_RIGHT_RING_INTERMEDIATE, LX_HB_RIGHT_RING_DISTAL,
+    LX_HB_RIGHT_LITTLE_PROXIMAL, LX_HB_RIGHT_LITTLE_INTERMEDIATE, LX_HB_RIGHT_LITTLE_DISTAL,
+    LX_HB_UPPER_CHEST,
+    LX_HB_COUNT
+} LxHumanBone;
+const char *lx_human_bone_name(LxHumanBone b);      /* "LeftUpperArm" ... */
+bool lx_human_bone_required(LxHumanBone b);         /* the 15 an avatar must have */
+
+#define LX_MAX_CLIPS 64
+typedef struct LxClipSettings { char name[64]; bool loop; } LxClipSettings;
+typedef struct LxModelImport {
+    float scale;                     /* extra scale on top of the file's units (1 = as authored, in metres) */
+    bool import_materials, import_animations, calculate_normals;
+    float smoothing_angle;           /* degrees, when normals are calculated */
+    LxRigType rig;
+    char avatar[LX_HB_COUNT][64];    /* humanoid: the rig's bone for each human bone ("" = none) */
+    int clip_count;
+    LxClipSettings clips[LX_MAX_CLIPS];
+} LxModelImport;
+LxModelImport lx_model_import_defaults(void);
+bool lx_model_import_load(const char *model_path, LxModelImport *out);    /* reads <model>.lximport */
+bool lx_model_import_save(const char *model_path, const LxModelImport *imp);
+
+typedef struct LxModel LxModel;
+LxModel *lx_asset_model(const char *ref);            /* "Models/Hero.fbx" (cached; NULL if it fails) */
+void lx_model_reload(const char *ref);              /* after its file or import settings change */
+int lx_model_bone_count(const LxModel *m);
+const char *lx_model_bone_name(const LxModel *m, int i);
+int lx_model_bone_parent(const LxModel *m, int i);
+int lx_model_node_count(const LxModel *m);           /* every node: bones, meshes, empties */
+const char *lx_model_node_name(const LxModel *m, int i);
+int lx_model_node_parent(const LxModel *m, int i);
+bool lx_model_node_is_bone(const LxModel *m, int i);
+int lx_model_mesh_count(const LxModel *m);
+int lx_model_clip_count(const LxModel *m);
+const char *lx_model_clip_name(const LxModel *m, int i);
+float lx_model_clip_length(const LxModel *m, int i);   /* seconds */
+const LxModelImport *lx_model_settings(const LxModel *m);
+LxRigType lx_model_rig(const LxModel *m);
+int lx_model_avatar_bone(const LxModel *m, LxHumanBone b);   /* bone index or -1 */
+const char *lx_model_error(const char *ref);           /* why a model failed to load */
+LxAabb lx_model_bounds(const LxModel *m);
+
+/* Humanoid avatars: fill the mapping from bone names (Unity, Mixamo, Unreal, Blender/Rigify, 3ds Max Biped). */
+int lx_avatar_automap(const LxModel *m, char out[LX_HB_COUNT][64]);   /* returns bones mapped */
+bool lx_avatar_is_valid(char avatar[LX_HB_COUNT][64], char *missing, size_t cap);
+
+/* Places a model in the scene: its node hierarchy (bones included, so things can be attached to a
+ * hand), mesh renderers and - with a rig - an Animator on the root. */
+LxEntity lx_model_instantiate(LxScene *s, const char *model_ref, LxVec3 position, LxEntity parent);
+
+/* Animator: plays clips on a model's skeleton. Clips are "Models/Dance.fbx#ClipName" (or "#0").
+ * Generic rigs play clips whose bone names match; humanoid rigs retarget any humanoid clip. */
+typedef struct LxAnimator {
+    char model[LX_REF_MAX];          /* the model whose skeleton this object has */
+    char clip[LX_REF_MAX];           /* clip played on start */
+    float speed;
+    bool loop, play_on_start;
+    bool root_motion;                /* keep the hips' horizontal movement (else it stays in place) */
+} LxAnimator;
+void lx_animator_play(LxScene *s, LxEntity e, const char *clip_ref, float fade_seconds);
+void lx_animator_stop(LxScene *s, LxEntity e);
+bool lx_animator_playing(LxScene *s, LxEntity e);
+float lx_animator_time(LxScene *s, LxEntity e);
+void lx_animator_set_time(LxScene *s, LxEntity e, float seconds);
+const char *lx_animator_current_clip(LxScene *s, LxEntity e);
+void lx_animator_reset_pose(LxScene *s, LxEntity e);           /* stop and return the bones to the model's rest pose */
+void lx_animator_update(LxScene *s, LxEntity e, float dt);   /* advance + pose now (the editor's preview uses it) */
+void lx_scene_update_animation(LxScene *s, float dt);        /* every animator (lx_scene_simulate calls it) */
+void lx_scene_update_skins(LxScene *s);                      /* deform skinned meshes (the renderer calls it) */
 
 /* ===================================================================
  *  Gameplay: prefabs, tags, messages, timers, tweens, time, random, save data

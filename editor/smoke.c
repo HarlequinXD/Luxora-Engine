@@ -1,6 +1,8 @@
 /* Scripted smoke test (--smoke): drives the editor through its windows and tools over a
  * few hundred frames, then quits. Used by CI and local testing to catch crashes and leaks. */
 #include <stdlib.h>
+#include <math.h>
+#include <stdio.h>
 #include "editor.h"
 
 typedef void (*SmokeFn)(void);
@@ -191,6 +193,101 @@ static void s_prefab_shot(void) {
     lx_path_parent(dir, sizeof dir, shot);
     lx_path_join(path, sizeof path, dir[0] ? dir : ".", "prefabs.ppm");
     lx_renderer_screenshot(path);
+}
+
+/* models: import two Mixamo characters as humanoids, open the Avatar window, and play one
+ * character's dance on the other (retargeting). Needs LUXORA_SMOKE_FBX_DIR (CI downloads them). */
+static char g_md_char[LX_REF_MAX], g_md_dance[LX_REF_MAX];
+static LxEntity g_md_ent;
+static void smoke_shot(const char *name) {
+    const char *shot = getenv("LUXORA_SMOKE_SHOT");
+    if (!shot || !shot[0]) return;
+    char dir[LX_PATH_MAX], path[LX_PATH_MAX];
+    lx_path_parent(dir, sizeof dir, shot);
+    lx_path_join(path, sizeof path, dir[0] ? dir : ".", name);
+    lx_renderer_screenshot(path);
+}
+static bool copy_model(const char *dir, const char *name, char *ref_out) {
+    char src[LX_PATH_MAX], dst_dir[LX_PATH_MAX], dst[LX_PATH_MAX];
+    lx_path_join(src, sizeof src, dir, name);
+    size_t n;
+    char *data = lx_file_read(src, &n);
+    if (!data) return false;
+    lx_path_join(dst_dir, sizeof dst_dir, ED.project.assets, "Models");
+    lx_mkdir_p(dst_dir);
+    lx_path_join(dst, sizeof dst, dst_dir, name);
+    bool ok = lx_file_write(dst, data, n);
+    lx_free(data);
+    snprintf(ref_out, LX_REF_MAX, "Models/%s", name);
+    /* Humanoid, avatar mapped from the bone names */
+    LxModel *m = lx_asset_model(ref_out);
+    if (!m) return false;
+    LxModelImport imp = *lx_model_settings(m);
+    imp.rig = LX_RIG_HUMANOID;
+    int mapped = lx_avatar_automap(m, imp.avatar);
+    ok = ok && lx_model_import_save(dst, &imp);
+    lx_model_reload(ref_out);
+    SMOKE_CHECK(mapped >= 20 && lx_avatar_is_valid(imp.avatar, NULL, 0), "%s: avatar automapped (%d bones)", name, mapped);
+    return ok;
+}
+static void s_model_import(void) {
+    const char *dir = getenv("LUXORA_SMOKE_FBX_DIR");
+    if (!dir || !dir[0]) { LX_INFO("[smoke] LUXORA_SMOKE_FBX_DIR not set - skipping models"); return; }
+    if (!copy_model(dir, "mixamo.fbx", g_md_char) || !copy_model(dir, "Samba Dancing.fbx", g_md_dance)) {
+        SMOKE_CHECK(false, "copy the sample models");
+        return;
+    }
+    char path[LX_PATH_MAX];
+    lx_asset_path(path, sizeof path, g_md_char);
+    ED.selected = 0;
+    ed_select_asset(path);
+}
+static void s_model_inspector_shot(void) {
+    if (!g_md_char[0]) return;
+    SMOKE_CHECK(find_node(ui_root(ED.ui), NULL, "Configure Avatar...") != NULL, "model inspector shows the Rig section");
+    smoke_shot("model_inspector.ppm");
+    ed_avatar_window(g_md_char);
+}
+static void s_avatar_shot(void) {
+    if (!g_md_char[0]) return;
+    extern UiNode *ui_modal_node(UiCtx *ui);
+    SMOKE_CHECK(find_node(ui_modal_node(ED.ui), NULL, "Automap") != NULL, "Avatar window is open");
+    smoke_shot("avatar.ppm");
+    ui_close_modal(ED.ui);
+}
+static void s_model_place(void) {
+    if (!g_md_char[0]) return;
+    g_md_ent = ed_model_place(g_md_char, lx_v3(1.0f, 0, 2.6f), 0);
+    LxAnimator *a = g_md_ent ? lx_get_animator(ED.scene, g_md_ent) : NULL;
+    SMOKE_CHECK(a != NULL, "placed model has an Animator");
+    if (!a) return;
+    LxModel *dance = lx_asset_model(g_md_dance);
+    snprintf(a->clip, sizeof a->clip, "%s#%s", g_md_dance, dance ? lx_model_clip_name(dance, 0) : "0");
+    lx_animator_play(ED.scene, g_md_ent, a->clip, 0);
+    lx_animator_update(ED.scene, g_md_ent, 3.4f);   /* the editor's preview: a pose part-way into the dance */
+    SMOKE_CHECK(lx_animator_playing(ED.scene, g_md_ent), "another humanoid's clip plays on the character (retargeted)");
+    ed_select(g_md_ent);
+    ED.cam_pos = lx_v3(1.0f, 1.05f, 5.4f);
+    ED.cam_yaw = 0.0f;
+    ED.cam_pitch = -6.0f;
+}
+static LxEntity find_named(LxEntity e, const char *part) {
+    for (LxEntity c = lx_entity_first_child(ED.scene, e); c; c = lx_entity_next_sibling(ED.scene, c)) {
+        if (strstr(lx_entity_name(ED.scene, c), part)) return c;
+        LxEntity d = find_named(c, part);
+        if (d) return d;
+    }
+    return 0;
+}
+static void s_model_anim_shot(void) {
+    if (!g_md_ent) return;
+    smoke_shot("animated_character.ppm");
+    LxEntity hips = find_named(g_md_ent, "Hips");
+    LxQuat before = hips ? lx_entity_rotation(ED.scene, hips) : lx_quat_identity();
+    lx_animator_reset_pose(ED.scene, g_md_ent);
+    LxQuat after = hips ? lx_entity_rotation(ED.scene, hips) : lx_quat_identity();
+    SMOKE_CHECK(!lx_animator_playing(ED.scene, g_md_ent) && (!hips || fabsf(before.w - after.w) + fabsf(before.y - after.y) > 1e-4f),
+                "stopping the preview returns to the rest pose");
 }
 static void s_quit_cancel(void) {
     UiNode *cancel = find_node(ui_root(ED.ui), NULL, "Cancel");
@@ -426,6 +523,11 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {248, s_prefab_place, "place prefab copies, edit one and apply"},
     {251, s_prefab_applied, "every copy updated"},
     {255, s_prefab_shot, "screenshot of prefabs"},
+    {256, s_model_import, "import two Mixamo characters as humanoids"},
+    {260, s_model_inspector_shot, "screenshot of the model inspector, open the Avatar window"},
+    {264, s_avatar_shot, "screenshot of the Avatar window"},
+    {266, s_model_place, "place a character and preview another model's dance on it"},
+    {270, s_model_anim_shot, "screenshot of the retargeted dance, reset the pose"},
 };
 
 bool ed_smoke_step(int frame) {
@@ -434,5 +536,5 @@ bool ed_smoke_step(int frame) {
             LX_INFO("[smoke] %s", STEPS[i].what);
             if (ED.mode == ED_MODE_EDITOR || frame >= 216) STEPS[i].fn(); /* the last steps run in the Project Manager */
         }
-    return frame < 258;
+    return frame < 273;
 }

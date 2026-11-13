@@ -255,6 +255,7 @@ void lx_scene_simulate(LxScene *s, float real_dt) {
         }
     }
     lx_gameplay_after_update(s, dt);
+    lx_scene_update_animation(s, dt);   /* animators pose their skeletons */
     lx_scene_update_transforms(s);
     lx_physics_simulate(s, dt);
     late_update(s, dt);

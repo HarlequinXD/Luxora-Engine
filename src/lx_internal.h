@@ -193,7 +193,19 @@ typedef struct LxMeshLod {
     float screen_size;  /* use this LOD while projected size >= screen_size */
 } LxMeshLod;
 
+/* skinning data for an imported mesh part (src/model) */
+typedef struct LxMeshSkin {
+    int bone_count;
+    char (*bones)[64];        /* bone names, looked up under the model's root */
+    LxMat4 *inverse_bind;     /* mesh-local -> bone space at bind time */
+    uint16_t (*joints)[4];    /* per vertex of lods[0] */
+    float (*weights)[4];
+} LxMeshSkin;
+
 struct LxMesh {
+    LxMeshSkin *skin;           /* skinned: deformed per object (lods[0] holds the bind pose) */
+    bool dynamic;               /* vertices change every frame: the renderer streams them */
+    uint32_t version;           /* bumped when dynamic vertices change */
     char ref[LX_REF_MAX];
     LxMeshLod lods[LX_MAX_LODS]; /* lods[0] = full detail */
     int lod_count;
@@ -221,6 +233,7 @@ struct LxTexture {
 uint8_t *lx_image_load(const char *path, int *w, int *h); /* RGBA8; PNG, TGA, BMP */
 uint8_t *lx_png_decode(const uint8_t *data, size_t size, int *w, int *h);
 uint8_t *lx_png_encode(const uint8_t *rgba, int w, int h, size_t *out_size);
+uint8_t *lx_zlib_inflate(const uint8_t *data, size_t size, size_t *out_len);   /* zlib stream (2-byte header) */
 uint8_t *lx_image_resize(const uint8_t *rgba, int sw, int sh, int dw, int dh);   /* area-averaged */
 uint8_t *lx_image_square(const uint8_t *rgba, int w, int h, int size);           /* centre-crop + resize */
 bool lx_ico_write(const char *path, const uint8_t *rgba, int w, int h);            /* multi-size Windows icon */
@@ -269,6 +282,9 @@ typedef struct LxEntityData {
     LxCollider collider;
     LxRigidbody body;
     LxCharacterController character;
+    LxAnimator animator;
+    struct LxAnimState *anim;     /* runtime: clip playback (src/model/anim.c) */
+    struct LxSkinState *skin;     /* runtime: this object's deformed copy of a skinned mesh */
     LxPhysState phys;
     LxBehaviourInstance binst;
     LxCrowd *crowd_sim;
@@ -305,6 +321,12 @@ void lx_gameplay_after_update(LxScene *s, float dt);                     /* twee
 void lx_gameplay_end_frame(LxScene *s);                                  /* deferred destroys, save data */
 void lx_gameplay_entity_destroyed(LxScene *s, LxEntity e);
 void lx_gameplay_free(LxScene *s);
+void lx_anim_free_entity(LxEntityData *d);                 /* src/model/anim.c: after a component is removed */
+void lx_anim_release(LxEntityData *d);                     /* the object is destroyed */
+LxMesh *lx_model_mesh_ref(const char *ref);                 /* "Models/x.fbx#mesh3" (src/model/model.c) */
+void lx_models_clear(void);
+LxMesh *lx_skin_mesh_for(LxScene *s, LxEntity e);           /* the deformed mesh to draw, or NULL */
+LxMesh *lx_skin_mesh_of(LxEntityData *d);
 bool lx_gameplay_defer_destroy(LxScene *s, LxEntity e);   /* true: queued until the frame ends */
 void lx_prefab_cache_clear(void);                          /* after a prefab file changes */
 /* serialize.c: entities from scene/prefab text added to an existing scene; returns the first root */

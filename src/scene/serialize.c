@@ -72,6 +72,12 @@ static void write_entity(LxStrBuf *sb, const LxScene *s, LxEntity e, int id_of_p
         lx_sb_printf(sb, "character.radius = %g\ncharacter.height = %g\ncharacter.step = %g\ncharacter.slope = %g\ncharacter.push = %g\n",
                      c->radius, c->height, c->step_height, c->slope_limit_deg, c->push_power);
     }
+    if (d->comps & LX_COMP_ANIMATOR) {
+        const LxAnimator *a = &d->animator;
+        lx_sb_printf(sb, "animator.model = %s\nanimator.clip = %s\nanimator.speed = %g\nanimator.loop = %d\nanimator.play_on_start = %d\n"
+                         "animator.root_motion = %d\n",
+                     a->model, a->clip, a->speed, a->loop, a->play_on_start, a->root_motion);
+    }
     if (d->comps & LX_COMP_REFLECTION_PROBE) {
         const LxReflectionProbe *p = &d->probe;
         lx_sb_printf(sb, "probe.size = %g %g %g\nprobe.intensity = %g\nprobe.blend = %g\nprobe.box = %d\nprobe.realtime = %d\n", p->size.x,
@@ -251,6 +257,15 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
             else if (!strcmp(f, "step")) c->step_height = (float)atof(v);
             else if (!strcmp(f, "slope")) c->slope_limit_deg = (float)atof(v);
             else if (!strcmp(f, "push")) c->push_power = (float)atof(v);
+        } else if (!strncmp(k, "animator.", 9)) {
+            const char *f = k + 9;
+            LxAnimator *a = lx_add_animator(s, cur_e, NULL);
+            if (!strcmp(f, "model")) lx_strcpy(a->model, sizeof a->model, v);
+            else if (!strcmp(f, "clip")) lx_strcpy(a->clip, sizeof a->clip, v);
+            else if (!strcmp(f, "speed")) a->speed = (float)atof(v);
+            else if (!strcmp(f, "loop")) a->loop = lx_parse_bool(v);
+            else if (!strcmp(f, "play_on_start")) a->play_on_start = lx_parse_bool(v);
+            else if (!strcmp(f, "root_motion")) a->root_motion = lx_parse_bool(v);
         } else if (!strncmp(k, "probe.", 6)) {
             const char *f = k + 6;
             LxReflectionProbe *p = lx_add_reflection_probe(s, cur_e);

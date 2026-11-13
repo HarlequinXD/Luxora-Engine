@@ -637,6 +637,35 @@ void ui_draw_icon(UiCtx *ui, UiIcon icon, float x, float y, float s, uint32_t c)
         ui_draw_circle(ui, x + s * 0.5f, y + s * 0.22f, s * 0.13f, c, 16);
         ui_draw_rect(ui, x + s * 0.34f, y + s * 0.4f, s * 0.32f, s * 0.48f, c, s * 0.15f);
         break;
+    case UI_ICON_ANIMATOR: {
+        /* a figure mid-stride */
+        ui_draw_circle(ui, x + s * 0.56f, y + s * 0.16f, s * 0.11f, c, 14);
+        ui_draw_line(ui, P(0.52f, 0.3f), P(0.44f, 0.58f), t * 1.4f, c);        /* body */
+        ui_draw_line(ui, P(0.44f, 0.58f), P(0.62f, 0.72f), t * 1.2f, c);       /* front leg */
+        ui_draw_line(ui, P(0.62f, 0.72f), P(0.58f, 0.9f), t * 1.2f, c);
+        ui_draw_line(ui, P(0.44f, 0.58f), P(0.3f, 0.76f), t * 1.2f, c);        /* back leg */
+        ui_draw_line(ui, P(0.3f, 0.76f), P(0.16f, 0.82f), t * 1.2f, c);
+        ui_draw_line(ui, P(0.5f, 0.36f), P(0.72f, 0.5f), t * 1.1f, c);         /* arms */
+        ui_draw_line(ui, P(0.5f, 0.36f), P(0.3f, 0.46f), t * 1.1f, c);
+        break;
+    }
+    case UI_ICON_AVATAR:
+        /* a standing figure with its joints marked */
+        ui_draw_circle(ui, x + s * 0.5f, y + s * 0.15f, s * 0.11f, c, 14);
+        ui_draw_line(ui, P(0.5f, 0.28f), P(0.5f, 0.58f), t * 1.4f, c);
+        ui_draw_line(ui, P(0.24f, 0.34f), P(0.76f, 0.34f), t * 1.2f, c);
+        ui_draw_line(ui, P(0.5f, 0.58f), P(0.36f, 0.9f), t * 1.2f, c);
+        ui_draw_line(ui, P(0.5f, 0.58f), P(0.64f, 0.9f), t * 1.2f, c);
+        ui_draw_circle(ui, x + s * 0.5f, y + s * 0.58f, s * 0.06f, c, 10);
+        ui_draw_circle(ui, x + s * 0.24f, y + s * 0.34f, s * 0.05f, c, 10);
+        ui_draw_circle(ui, x + s * 0.76f, y + s * 0.34f, s * 0.05f, c, 10);
+        break;
+    case UI_ICON_MODEL:
+        /* a cube with a figure's head on top: an imported model */
+        ui_draw_border(ui, x + s * 0.18f, y + s * 0.42f, s * 0.64f, s * 0.46f, c, s * 0.06f, t);
+        ui_draw_line(ui, P(0.18f, 0.58f), P(0.82f, 0.58f), t, c);
+        ui_draw_circle(ui, x + s * 0.5f, y + s * 0.22f, s * 0.13f, c, 14);
+        break;
     case UI_ICON_PROBE: {
         /* a mirror ball: dark sphere reflecting a bright horizon, with a highlight */
         float cx = x + s * 0.5f, cy = y + s * 0.5f, r = s * 0.4f;
@@ -1820,6 +1849,11 @@ static void open_dropdown(UiCtx *ui, UiNode *n) {
         it->tab_index = i;
         it->selected = n->i && *n->i == i;
         if (it->selected) it->icon = UI_ICON_CHECK;
+    }
+    if (n->option_count > 16) {   /* long lists scroll, starting at the current choice */
+        p->h = 16 * 27 + 8;
+        p->scroll = true;
+        if (n->i && *n->i > 8) p->scroll_pos = S(ui, 27) * (float)(*n->i - 6);
     }
 }
 

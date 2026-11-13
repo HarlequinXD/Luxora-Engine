@@ -53,6 +53,10 @@ static AssetEntry *add(const char *ref, AssetKind k, void *ptr) {
 
 LxMesh *lx_asset_mesh(const char *ref) {
     if (!ref || !ref[0]) ref = "builtin:cube";
+    if (strchr(ref, '#')) {   /* a part of an imported model: owned by the model */
+        LxMesh *part = lx_model_mesh_ref(ref);
+        return part ? part : lx_asset_mesh("builtin:cube");
+    }
     AssetEntry *e = find(ref, ASSET_MESH);
     if (e) return e->ptr ? e->ptr : lx_asset_mesh("builtin:cube");
     LxMesh *m = NULL;
@@ -246,6 +250,7 @@ void lx_assets_reload(const char *ref) {
 
 void lx_assets_clear(void) {
     lx_renderer_wait_idle();
+    lx_models_clear();
     for (int i = 0; i < g_asset_count; i++) free_entry(&g_assets[i]);
     g_asset_count = 0;
 }

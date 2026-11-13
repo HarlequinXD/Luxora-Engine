@@ -137,6 +137,8 @@ static uint8_t *zlib_inflate(const uint8_t *data, size_t size, size_t *out_len) 
     return o.data;
 }
 
+uint8_t *lx_zlib_inflate(const uint8_t *data, size_t size, size_t *out_len) { return zlib_inflate(data, size, out_len); }
+
 /* ---------------- PNG ---------------- */
 static uint32_t be32(const uint8_t *p) { return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]; }
 
