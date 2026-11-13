@@ -110,6 +110,31 @@ static void s_parallax_shot(void) {
     lx_path_join(path, sizeof path, dir[0] ? dir : ".", "parallax.ppm");
     lx_renderer_screenshot(path);
 }
+static void s_material_view(void) {
+    char p[LX_PATH_MAX];
+    lx_path_join(p, sizeof p, ED.project.assets, "Materials/Cobblestone.lxmat");
+    ED.selected = 0;
+    ed_select_asset(p);
+}
+static UiNode *find_label(UiNode *n, const char *text) {
+    if (!n) return NULL;
+    if (n->type == UI_LABEL && !strcmp(n->text, text)) return n;
+    for (UiNode *c = n->first; c; c = c->next) {
+        UiNode *r = find_label(c, text);
+        if (r) return r;
+    }
+    return NULL;
+}
+static void s_material_shot(void) {
+    UiNode *base = find_label(ui_root(ED.ui), "BASE COLOR"), *height = find_label(ui_root(ED.ui), "HEIGHT (PARALLAX)");
+    SMOKE_CHECK(base && height && base->y < height->y, "material inspector groups, colour first");
+    const char *shot = getenv("LUXORA_SMOKE_SHOT");
+    if (!shot || !shot[0]) return;
+    char dir[LX_PATH_MAX], path[LX_PATH_MAX];
+    lx_path_parent(dir, sizeof dir, shot);
+    lx_path_join(path, sizeof path, dir[0] ? dir : ".", "material_inspector.ppm");
+    lx_renderer_screenshot(path);
+}
 static void s_quit_cancel(void) {
     UiNode *cancel = find_node(ui_root(ED.ui), NULL, "Cancel");
     extern UiNode *ui_modal_node(UiCtx *ui);
@@ -338,6 +363,8 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {231, s_quit_cancel, "cancel the save prompt"},
     {233, s_parallax_view, "look at the cobblestone path"},
     {238, s_parallax_shot, "screenshot of parallax mapping"},
+    {239, s_material_view, "inspect the cobblestone material"},
+    {243, s_material_shot, "screenshot of the material inspector"},
 };
 
 bool ed_smoke_step(int frame) {
@@ -346,5 +373,5 @@ bool ed_smoke_step(int frame) {
             LX_INFO("[smoke] %s", STEPS[i].what);
             if (ED.mode == ED_MODE_EDITOR || frame >= 216) STEPS[i].fn(); /* the last steps run in the Project Manager */
         }
-    return frame < 241;
+    return frame < 246;
 }

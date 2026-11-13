@@ -939,40 +939,74 @@ static UiNode *mat_bind(UiNode *n, const char *ref) {
     return n;
 }
 
+/* A heading inside the material editor: the properties come in groups, ordered the way a surface
+ * is built up - colour first, then metal/roughness, surface detail, light and finally sound. */
+static void mat_group(UiNode *parent, const char *title, bool first) {
+    UiCtx *ui = ED.ui;
+    const UiTheme *t = ui_theme(ui);
+    if (!first) {
+        UiNode *gap = ui_box(ui, parent, UI_COL);
+        gap->h = 6;
+        ui_separator(ui, parent);
+    }
+    UiNode *h = ui_label(ui, parent, title);
+    h->font = UI_FONT_SMALL;
+    h->fg = t->accent;
+    h->h = 20;
+}
+
+static UiNode *mat_tip(UiNode *n, const char *tip) {
+    lx_strcpy(n->tooltip, sizeof n->tooltip, tip);
+    return n;
+}
+
 static void build_material_editor(UiNode *parent, const char *ref) {
     LxMaterial *m = lx_asset_material(ref);
-    UiNode *c = color_row(parent, "Albedo", &m->albedo.x, 1);
-    mat_bind(c, ref);
+
+    mat_group(parent, "BASE COLOR", true);
+    mat_bind(color_row(parent, "Color", &m->albedo.x, 1), ref);
+    mat_bind(asset_field(parent, "Color Map", m->albedo_map, sizeof m->albedo_map, "texture"), ref);
+
+    mat_group(parent, "METALLIC", false);
     mat_bind(slider_row(parent, "Metallic", &m->metallic, 0, 1), ref);
+    mat_tip(mat_bind(asset_field(parent, "Metallic Map", m->metallic_map, sizeof m->metallic_map, "texture"), ref),
+            "Grayscale metalness (or the blue channel of an AO/Roughness/Metallic pack), multiplied by Metallic");
+
+    mat_group(parent, "ROUGHNESS", false);
     mat_bind(slider_row(parent, "Roughness", &m->roughness, 0.02f, 1), ref);
-    mat_bind(color_row(parent, "Emission", &m->emissive.x, 1), ref);
-    mat_bind(float_row(parent, "Emission Strength", &m->emissive_strength, 0.1f, 0, 1000), ref);
-    UiNode *tx = asset_field(parent, "Albedo Map", m->albedo_map, sizeof m->albedo_map, "texture");
-    mat_bind(tx, ref);
-    tx = asset_field(parent, "Normal Map", m->normal_map, sizeof m->normal_map, "texture");
-    mat_bind(tx, ref);
-    mat_bind(slider_row(parent, "Normal Strength", &m->normal_strength, 0, 3), ref);
-    UiNode *fg = mat_bind(bool_row(parent, "DirectX Normal Map", &m->normal_flip_green), ref);
-    lx_strcpy(fg->tooltip, sizeof fg->tooltip, "Tick if the bumps look inverted: the map's green channel points down (DirectX / Unreal style)");
-    tx = mat_bind(asset_field(parent, "Roughness Map", m->roughness_map, sizeof m->roughness_map, "texture"), ref);
-    lx_strcpy(tx->tooltip, sizeof tx->tooltip, "Grayscale roughness (or the green channel of an AO/Roughness/Metallic pack), multiplied by Roughness");
-    UiNode *sm = mat_bind(bool_row(parent, "Map Is Smoothness", &m->roughness_is_smoothness), ref);
-    lx_strcpy(sm->tooltip, sizeof sm->tooltip, "Tick for gloss/smoothness maps (white = shiny)");
-    tx = mat_bind(asset_field(parent, "Metallic Map", m->metallic_map, sizeof m->metallic_map, "texture"), ref);
-    lx_strcpy(tx->tooltip, sizeof tx->tooltip, "Grayscale metalness (or the blue channel of an AO/Roughness/Metallic pack), multiplied by Metallic");
-    tx = mat_bind(asset_field(parent, "AO Map", m->ao_map, sizeof m->ao_map, "texture"), ref);
-    lx_strcpy(tx->tooltip, sizeof tx->tooltip, "Ambient occlusion (red channel): darkens ambient light and reflections in crevices");
-    mat_bind(slider_row(parent, "AO Strength", &m->ao_strength, 0, 1), ref);
-    tx = mat_bind(asset_field(parent, "Height Map", m->height_map, sizeof m->height_map, "texture"), ref);
-    lx_strcpy(tx->tooltip, sizeof tx->tooltip, "Displacement (white = high): parallax occlusion mapping gives the surface real depth");
-    UiNode *hs = mat_bind(slider_row(parent, "Parallax Depth", &m->height_scale, 0, 0.2f), ref);
-    lx_strcpy(hs->tooltip, sizeof hs->tooltip, "How deep the height map looks (in texture tiles). 0.03 - 0.08 suits stone and bricks");
-    mat_bind(bool_row(parent, "Parallax Self-Shadows", &m->parallax_shadows), ref);
-    mat_bind(float_row(parent, "UV Scale", &m->uv_scale, 0.05f, 0.001f, 1000), ref);
-    UiNode *a1 = mat_bind(slider_row(parent, "Sound Absorption", &m->acoustic_absorption, 0, 1), ref);
-    lx_strcpy(a1->tooltip, sizeof a1->tooltip, "Sound energy swallowed on each reflection (carpet ~0.6, concrete ~0.02)");
-    UiNode *a2 = mat_bind(slider_row(parent, "Sound Transmission", &m->acoustic_transmission, 0, 1), ref);
-    lx_strcpy(a2->tooltip, sizeof a2->tooltip, "Sound passing through the surface (walls block most)");
+    mat_tip(mat_bind(asset_field(parent, "Roughness Map", m->roughness_map, sizeof m->roughness_map, "texture"), ref),
+            "Grayscale roughness (or the green channel of an AO/Roughness/Metallic pack), multiplied by Roughness");
+    mat_tip(mat_bind(bool_row(parent, "Map Is Smoothness", &m->roughness_is_smoothness), ref), "Tick for gloss/smoothness maps (white = shiny)");
+
+    mat_group(parent, "NORMAL", false);
+    mat_bind(asset_field(parent, "Normal Map", m->normal_map, sizeof m->normal_map, "texture"), ref);
+    mat_bind(slider_row(parent, "Strength", &m->normal_strength, 0, 3), ref);
+    mat_tip(mat_bind(bool_row(parent, "DirectX Format", &m->normal_flip_green), ref),
+            "Tick if the bumps look inverted: the map's green channel points down (DirectX / Unreal style)");
+
+    mat_group(parent, "HEIGHT (PARALLAX)", false);
+    mat_tip(mat_bind(asset_field(parent, "Height Map", m->height_map, sizeof m->height_map, "texture"), ref),
+            "Displacement (white = high): parallax occlusion mapping gives the surface real depth");
+    mat_tip(mat_bind(slider_row(parent, "Depth", &m->height_scale, 0, 0.2f), ref),
+            "How deep the height map looks (in texture tiles). 0.03 - 0.08 suits stone and bricks");
+    mat_bind(bool_row(parent, "Self-Shadows", &m->parallax_shadows), ref);
+
+    mat_group(parent, "AMBIENT OCCLUSION", false);
+    mat_tip(mat_bind(asset_field(parent, "AO Map", m->ao_map, sizeof m->ao_map, "texture"), ref),
+            "Ambient occlusion (red channel): darkens ambient light and reflections in crevices");
+    mat_bind(slider_row(parent, "Strength", &m->ao_strength, 0, 1), ref);
+
+    mat_group(parent, "EMISSION", false);
+    mat_bind(color_row(parent, "Color", &m->emissive.x, 1), ref);
+    mat_bind(float_row(parent, "Strength", &m->emissive_strength, 0.1f, 0, 1000), ref);
+
+    mat_group(parent, "TILING", false);
+    mat_tip(mat_bind(float_row(parent, "UV Scale", &m->uv_scale, 0.05f, 0.001f, 1000), ref), "How many times the maps repeat");
+
+    mat_group(parent, "ACOUSTICS", false);
+    mat_tip(mat_bind(slider_row(parent, "Absorption", &m->acoustic_absorption, 0, 1), ref),
+            "Sound energy swallowed on each reflection (carpet ~0.6, concrete ~0.02)");
+    mat_tip(mat_bind(slider_row(parent, "Transmission", &m->acoustic_transmission, 0, 1), ref), "Sound passing through the surface (walls block most)");
 }
 
 /* built-in materials have no file: copy one into Materials/ so it can be edited */
