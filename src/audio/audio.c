@@ -511,6 +511,56 @@ void lx_audio_play_oneshot(const char *clip, LxVec3 pos, float volume) {
     lx_mutex_unlock(AU.lock);
 }
 
+int lx_audio_playing_count(void) {
+    if (!AU.initialised) return 0;
+    int n = 0;
+    lx_mutex_lock(AU.lock);
+    for (int i = 0; i < MAX_VOICES; i++) n += AU.voices[i].active && !AU.voices[i].stopping;
+    lx_mutex_unlock(AU.lock);
+    return n;
+}
+
+/* ---------------- preview channel ---------------- */
+static int g_preview_voice = -1;
+static uint32_t g_preview_serial;
+
+void lx_audio_preview_stop(void) {
+    if (!AU.initialised || g_preview_voice < 0) return;
+    lx_mutex_lock(AU.lock);
+    Voice *v = &AU.voices[g_preview_voice];
+    if (v->active && v->serial == g_preview_serial) v->stopping = true;   /* short fade, no click */
+    lx_mutex_unlock(AU.lock);
+    g_preview_voice = -1;
+}
+
+bool lx_audio_preview_playing(void) {
+    if (!AU.initialised || g_preview_voice < 0) return false;
+    lx_mutex_lock(AU.lock);
+    const Voice *v = &AU.voices[g_preview_voice];
+    bool playing = v->active && !v->stopping && v->serial == g_preview_serial;
+    lx_mutex_unlock(AU.lock);
+    if (!playing) g_preview_voice = -1;
+    return playing;
+}
+
+void lx_audio_preview(const char *clip, float volume, float pitch) {
+    lx_audio_preview_stop();
+    if (!AU.initialised) return;
+    LxSound *snd = lx_asset_sound(clip);
+    if (!snd) return;
+    lx_mutex_lock(AU.lock);
+    Voice *v = alloc_voice();
+    if (v) {
+        start_voice(v, snd, volume, false, false, LX_BUS_SFX);
+        v->entity = 0;
+        v->scene = NULL;
+        v->cur.pitch = v->target.pitch = pitch > 0.05f ? pitch : 1.0f;
+        g_preview_voice = (int)(v - AU.voices);
+        g_preview_serial = v->serial;
+    }
+    lx_mutex_unlock(AU.lock);
+}
+
 /* ---------------- propagation ---------------- */
 typedef struct PropResult {
     VoiceParams p;

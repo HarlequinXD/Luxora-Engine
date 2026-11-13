@@ -1,6 +1,5 @@
 /* Luxora UI toolkit implementation (retained mode). See ui.h. */
 #include "ui.h"
-#include "font_atlas.h"
 #include <stdarg.h>
 #include <ctype.h>
 
@@ -114,12 +113,15 @@ float ui_scale(UiCtx *ui) { return ui->scale; }
  * ====================================================================== */
 static void load_fonts(UiCtx *ui) {
     bool hi = ui->scale > 1.3f;
-    const unsigned char *png = hi ? lx_font_png_2x : lx_font_png_1x;
-    size_t png_size = hi ? sizeof lx_font_png_2x : sizeof lx_font_png_1x;
-    const LxBakedGlyph *glyphs = hi ? lx_glyphs_2x : lx_glyphs_1x;
-    int count = hi ? LX_GLYPH_COUNT_2X : LX_GLYPH_COUNT_1X;
-    const LxBakedFont *fonts = hi ? lx_fonts_2x : lx_fonts_1x;
-    ui->atlas_scale = hi ? 2.0f : 1.0f;
+    LxFontAtlas fa;
+    lx_font_atlas_get(hi, &fa);
+    const unsigned char *png = fa.png;
+    size_t png_size = fa.png_size;
+    const LxBakedGlyph *glyphs = fa.glyphs;
+    int count = fa.glyph_count;
+    const LxBakedFont *fonts = fa.fonts;
+    ui->atlas_scale = fa.scale;
+    lx_game_ui_use_atlas(hi);   /* the game UI (shown in the viewport while playing) draws with this atlas too */
     int w, h;
     uint8_t *rgba = lx_png_decode(png, png_size, &w, &h);
     if (!rgba) { LX_ERROR("Font atlas decode failed"); return; }
@@ -353,6 +355,19 @@ static void draw_text_fit(UiCtx *ui, UiFont f, float x, float y, const char *t, 
     }
     memcpy(buf + n, "…", 4);
     ui_draw_text(ui, f, x, y, buf, col);
+}
+
+void ui_draw_mesh(UiCtx *ui, const LxUiVertex *v, int vc, const uint32_t *idx, int ic, const LxUiCmd *cmds, int cc) {
+    if (!vc || !ic) return;
+    ensure(ui, vc, ic);
+    uint32_t base = (uint32_t)ui->vcount;
+    memcpy(ui->verts + ui->vcount, v, sizeof(LxUiVertex) * (size_t)vc);
+    ui->vcount += vc;
+    for (int c = 0; c < cc; c++) {
+        begin_cmd(ui, cmds[c].texture);
+        for (uint32_t k = 0; k < cmds[c].index_count; k++) ui->idx[ui->icount++] = base + idx[cmds[c].index_offset + k];
+        ui->cmds[ui->ccount - 1].index_count += cmds[c].index_count;
+    }
 }
 
 void ui_draw_image(UiCtx *ui, uint32_t tex, float x, float y, float w, float h) {

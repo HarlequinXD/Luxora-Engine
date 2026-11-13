@@ -177,6 +177,8 @@ bool ui_wants_keyboard(UiCtx *ui);
 bool ui_wants_mouse(UiCtx *ui);
 bool ui_is_hot(UiCtx *ui, UiNode *n);       /* mouse is over n (topmost) */
 UiNode *ui_hot_node(UiCtx *ui);
+/* appends pre-built triangles (e.g. the game UI) to the draw list, clipped to the current clip rect */
+void ui_draw_mesh(UiCtx *ui, const LxUiVertex *v, int vc, const uint32_t *idx, int ic, const LxUiCmd *cmds, int cc);
 void ui_set_app_icon(UiCtx *ui, uint32_t texture);             /* interactive node under the mouse, if any */
 bool ui_overlay_open(UiCtx *ui);            /* a popup menu or modal dialog is showing */
 bool ui_is_inside(UiCtx *ui, UiNode *n);    /* mouse is inside n's rect, regardless of children */

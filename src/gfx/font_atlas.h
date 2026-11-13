@@ -4,8 +4,7 @@
 #include <stdint.h>
 
 #define LX_FONT_COUNT 5
-typedef struct LxBakedGlyph { uint32_t cp; uint16_t font, x, y, w, h; int16_t xoff, yoff; float advance; } LxBakedGlyph;
-typedef struct LxBakedFont { float ascent, descent, line_height; } LxBakedFont;
+/* LxBakedGlyph / LxBakedFont are declared in lx_internal.h */
 
 static const unsigned char lx_font_png_1x[] = {
     137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,2,0,0,0,1,0,

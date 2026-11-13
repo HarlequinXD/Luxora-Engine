@@ -129,6 +129,19 @@ void lx_renderer_wait_idle(void);
 void lx_renderer_set_vsync(bool on);
 
 typedef struct LxUiVertex { float x, y, u, v; uint32_t color; } LxUiVertex;
+/* the baked UI font atlas (src/gfx/font_atlas.h), shared by the editor and the game UI */
+typedef struct LxBakedGlyph { uint32_t cp; uint16_t font, x, y, w, h; int16_t xoff, yoff; float advance; } LxBakedGlyph;
+typedef struct LxBakedFont { float ascent, descent, line_height; } LxBakedFont;
+typedef struct LxFontAtlas {
+    const unsigned char *png; size_t png_size;
+    const LxBakedGlyph *glyphs; int glyph_count;
+    const LxBakedFont *fonts;    /* LX_FONT_COUNT: body, bold, small, title, mono */
+    float scale;                 /* 1 or 2: atlas pixels per logical pixel */
+} LxFontAtlas;
+void lx_font_atlas_get(bool hi_dpi, LxFontAtlas *out);
+
+
+
 typedef struct LxUiCmd {
     uint32_t texture;           /* 0 = font atlas, else id from lx_ui_texture_* */
     uint32_t index_offset, index_count;
@@ -140,6 +153,18 @@ typedef struct LxUiDrawList {
     const LxUiCmd *cmds; int cmd_count;
     LxVec4 clear_color;
 } LxUiDrawList;
+
+/* game UI host side (src/gameui): the player draws it over the window, the editor inside the viewport */
+void lx_game_ui_use_atlas(bool hi_dpi);         /* which baked atlas is loaded as UI texture 0 */
+void lx_game_ui_begin_frame(float vx, float vy, float vw, float vh, bool clear); /* viewport in window pixels */
+typedef struct LxGameUiGeometry {
+    const LxUiVertex *vertices; int vertex_count;
+    const uint32_t *indices; int index_count;
+    const LxUiCmd *cmds; int cmd_count;
+} LxGameUiGeometry;
+void lx_game_ui_geometry(LxGameUiGeometry *out); /* this frame's drawing, in window pixels */
+void lx_game_ui_render(void);                    /* player: draw it on the swapchain */
+void lx_game_ui_shutdown(void);
 void lx_renderer_set_font_atlas(const uint8_t *alpha, int w, int h);
 uint32_t lx_ui_texture_from_rgba(const uint8_t *rgba, int w, int h); /* thumbnails/icons */
 void lx_ui_texture_free(uint32_t id);

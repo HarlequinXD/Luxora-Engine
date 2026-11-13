@@ -100,6 +100,11 @@ int lx_run(const LxAppDesc *d) {
             }
         }
         lx_input_update(dt);
+        {
+            int ww, wh;
+            lx_window_size(&ww, &wh);
+            lx_game_ui_begin_frame(0, 0, (float)ww, (float)wh, true);   /* scripts draw HUDs during simulate */
+        }
         lx_scene_simulate(E.scene, dt);
         if (d->on_update) d->on_update(E.scene, dt);
         lx_audio_update(E.scene, dt);
@@ -109,6 +114,7 @@ int lx_run(const LxAppDesc *d) {
             LxRenderView view;
             LxEntity cam = lx_scene_main_camera(E.scene);
             if (cam && lx_camera_view(E.scene, cam, w, h, &view)) lx_render_scene(E.scene, &view, NULL);
+            lx_game_ui_render();
             lx_input_draw_touch_controls();
             if (shot && frame == shot_frame) lx_renderer_screenshot(shot);
             lx_renderer_end_frame();

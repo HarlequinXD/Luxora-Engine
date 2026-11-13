@@ -627,6 +627,7 @@ void ed_play(void) {
     if (ED.play == ED_PAUSED) { ED.play = ED_PLAYING; return; }
     if (ED.play != ED_EDIT || !ED.scene) return;
     if (ED.change_pending) ed_commit();
+    lx_audio_preview_stop();
     ED.play_snapshot = lx_scene_serialize(ED.scene);
     ED.play = ED_PLAYING;
     ED.game_view_before_play = ED.game_view;
@@ -669,6 +670,7 @@ void ed_stop(void) {
 void ed_step(void) {
     if (ED.play == ED_EDIT) { ed_play(); ED.play = ED_PAUSED; }
     if (ED.play == ED_PAUSED) {
+        if (ED.viewport) lx_game_ui_begin_frame(ED.viewport->x, ED.viewport->y, ED.viewport->cw, ED.viewport->ch, true);
         lx_scene_simulate(ED.scene, 1.0f / 60.0f);
         lx_audio_update(ED.scene, 1.0f / 60.0f);
     }
@@ -1035,6 +1037,8 @@ void ed_update(float dt) {
     ed_shortcuts();
     /* edit gestures end when the mouse is released and no field is being typed in */
     if (ED.change_pending && !lx_mouse_down(LX_MOUSE_LEFT) && !ui_wants_keyboard(ED.ui)) ed_commit();
+    if (ED.viewport) /* the game's HUD is laid out over the viewport */
+        lx_game_ui_begin_frame(ED.viewport->x, ED.viewport->y, ED.viewport->cw, ED.viewport->ch, ED.play == ED_PLAYING);
     if (ED.play == ED_PLAYING) lx_scene_simulate(ED.scene, dt);
     else lx_scene_update_transforms(ED.scene);
     lx_audio_update(ED.scene, dt);

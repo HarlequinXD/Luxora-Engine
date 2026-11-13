@@ -34,6 +34,7 @@ set(LUXORA_SOURCES
   src/audio/audio.c
   src/crowd/crowd.c
   src/physics/physics.c
+  src/gameui/gameui.c
   src/scene/scene.c src/scene/serialize.c src/scene/behaviours.c
   src/project/project.c
   src/input/input.c

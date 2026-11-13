@@ -671,6 +671,11 @@ void lx_audio_play(LxScene *s, LxEntity source);
 void lx_audio_stop(LxScene *s, LxEntity source);
 void lx_audio_stop_all(void);
 void lx_audio_play_oneshot(const char *clip_ref, LxVec3 pos, float volume);
+/* Preview channel (editor tools, menus): one non-spatial sound at a time; a new preview replaces the old. */
+void lx_audio_preview(const char *clip_ref, float volume, float pitch);
+void lx_audio_preview_stop(void);
+bool lx_audio_preview_playing(void);
+int lx_audio_playing_count(void);   /* sounds currently audible (not fading out) */
 float lx_sound_duration(const LxSound *snd);
 /* Offline: compute the impulse response between two points (for tests/tools). */
 int lx_acoustic_impulse(LxScene *s, LxVec3 src, LxVec3 lst, float *out_ir, int ir_len, int sample_rate);
@@ -731,6 +736,50 @@ bool lx_project_load(LxProject *p, const char *root_dir);
 bool lx_project_save(const LxProject *p);
 const char *lx_platform_name(LxPlatform p);
 LxPlatform lx_platform_current(void);
+
+/* ===================================================================
+ *  Game UI: HUDs, menus, health bars, buttons (immediate mode)
+ *
+ *  Call these every frame from a behaviour (on_update or on_late_update); what you draw is shown
+ *  for that frame, over the game. Units are "canvas" units: the screen scaled to 1080 units tall
+ *  (see lx_ui_set_reference_height), x to the right, y down - so a layout designed at 1080p fits
+ *  any resolution and aspect. lx_ui_anchor() chooses which screen point x/y are measured from;
+ *  the element is aligned to that point too (TOP_RIGHT puts its top-right corner there).
+ *  Text uses the Inter font (regular/bold) or DejaVu Sans Mono.
+ * =================================================================== */
+#define LX_RGBA(r, g, b, a) ((uint32_t)(r) | ((uint32_t)(g) << 8) | ((uint32_t)(b) << 16) | ((uint32_t)(a) << 24))
+#define LX_RGB(r, g, b) LX_RGBA(r, g, b, 255)
+#define LX_COLOR_WHITE LX_RGB(255, 255, 255)
+#define LX_COLOR_BLACK LX_RGB(0, 0, 0)
+#define LX_COLOR_RED LX_RGB(229, 72, 77)
+#define LX_COLOR_GREEN LX_RGB(70, 190, 100)
+#define LX_COLOR_BLUE LX_RGB(66, 135, 245)
+#define LX_COLOR_YELLOW LX_RGB(245, 200, 66)
+
+typedef enum LxUiAnchor {
+    LX_ANCHOR_TOP_LEFT, LX_ANCHOR_TOP, LX_ANCHOR_TOP_RIGHT,
+    LX_ANCHOR_LEFT, LX_ANCHOR_CENTER, LX_ANCHOR_RIGHT,
+    LX_ANCHOR_BOTTOM_LEFT, LX_ANCHOR_BOTTOM, LX_ANCHOR_BOTTOM_RIGHT
+} LxUiAnchor;
+typedef enum LxUiFont { LX_FONT_REGULAR, LX_FONT_BOLD, LX_FONT_MONO } LxUiFont;
+
+LxVec2 lx_ui_canvas_size(void);                 /* e.g. 1920 x 1080 on a 16:9 screen */
+void lx_ui_set_reference_height(float units);   /* default 1080 */
+void lx_ui_anchor(LxUiAnchor anchor);           /* for the following calls; resets to TOP_LEFT each frame */
+void lx_ui_font(LxUiFont font);                 /* resets to REGULAR each frame */
+void lx_ui_rect(float x, float y, float w, float h, uint32_t color, float corner_radius);
+void lx_ui_rect_outline(float x, float y, float w, float h, uint32_t color, float corner_radius, float thickness);
+void lx_ui_circle(float x, float y, float radius, uint32_t color);           /* x, y is the centre */
+void lx_ui_line(float x0, float y0, float x1, float y1, float thickness, uint32_t color);
+void lx_ui_text(float x, float y, float size, uint32_t color, const char *fmt, ...);
+float lx_ui_text_width(float size, const char *text);
+void lx_ui_image(const char *texture_ref, float x, float y, float w, float h, uint32_t tint);
+void lx_ui_bar(float x, float y, float w, float h, float value01, uint32_t fill, uint32_t background); /* health, loading */
+bool lx_ui_button(const char *label, float x, float y, float w, float h);   /* true on the frame it's clicked or tapped */
+LxVec2 lx_ui_pointer(void);                     /* mouse / first touch, in canvas units */
+bool lx_ui_pointer_over(void);                  /* over a button: don't treat the click as gameplay */
+/* project a world position (e.g. above an enemy's head) to canvas units with the scene's main camera */
+bool lx_ui_world_to_canvas(LxScene *s, LxVec3 world, LxVec2 *out);
 
 /* ===================================================================
  *  Application runtime

@@ -547,8 +547,41 @@ static UiNode *color_row(UiNode *parent, const char *label, float *rgb, float ma
     return n;
 }
 
-static void preview_play(UiNode *n) { LX_UNUSED(n); lx_audio_play(ED.scene, ED.inspector_entity); }
-static void preview_stop(UiNode *n) { LX_UNUSED(n); lx_audio_stop(ED.scene, ED.inspector_entity); }
+/* one preview button (asset or Audio Source) at a time: it toggles Preview <-> Stop */
+static UiNode *g_preview_btn;
+static void preview_button_sync(void) {
+    if (!g_preview_btn) return;
+    bool playing = lx_audio_preview_playing();
+    UiIcon want = playing ? UI_ICON_STOP : UI_ICON_PLAY;
+    if (g_preview_btn->icon != want) {
+        g_preview_btn->icon = want;
+        ui_set_text(g_preview_btn, "%s", playing ? "Stop" : "Preview");
+        g_preview_btn->icon_color = playing ? ui_theme(ED.ui)->danger : ui_theme(ED.ui)->success;
+    }
+}
+static void preview_toggle(UiNode *n) {
+    LX_UNUSED(n);
+    if (lx_audio_preview_playing()) lx_audio_preview_stop();
+    else {
+        LxAudioSource *a = lx_get_audio_source(ED.scene, ED.inspector_entity);
+        if (a && a->clip[0]) lx_audio_preview(a->clip, a->volume, a->pitch);
+        else if (!a) {
+            char ref[LX_REF_MAX];
+            ed_relative_asset(ref, sizeof ref, ED.inspector_asset);
+            lx_audio_preview(ref, 1.0f, 1.0f);
+        } else ui_notify(ED.ui, "Choose a clip first");
+    }
+    preview_button_sync();
+}
+static UiNode *preview_button(UiNode *parent) {
+    UiNode *b = ui_button(ED.ui, parent, "Preview", preview_toggle);
+    b->icon = UI_ICON_PLAY;
+    b->icon_color = ui_theme(ED.ui)->success;
+    b->grow = 1;
+    g_preview_btn = b;
+    preview_button_sync();
+    return b;
+}
 
 static void behaviour_changed(UiNode *n) {
     LX_UNUSED(n);
@@ -718,13 +751,7 @@ static void build_entity_inspector(UiNode *body) {
         float_row(sec, "Min Distance", &d->audio.min_distance, 0.1f, 0.01f, 1000);
         float_row(sec, "Max Distance", &d->audio.max_distance, 0.5f, 0.1f, 10000);
         UiNode *prow = ed_prop_row(sec, "Preview");
-        UiNode *pb = ui_button(ui, prow, "Play", preview_play);
-        pb->icon = UI_ICON_PLAY;
-        pb->icon_color = t->success;
-        pb->grow = 1;
-        UiNode *sb2 = ui_button(ui, prow, "Stop", preview_stop);
-        sb2->icon = UI_ICON_STOP;
-        sb2->grow = 1;
+        preview_button(prow);
     }
     if (d->comps & LX_COMP_AUDIO_LISTENER) {
         sec = comp_section(body, UI_ICON_LISTENER, "Audio Listener", &g_open_listener, LX_COMP_AUDIO_LISTENER);
@@ -1019,11 +1046,8 @@ static void build_asset_inspector(UiNode *body) {
         UiNode *row = ui_box(ui, body, UI_ROW);
         ui_pad(row, 12, 8, 12, 8);
         row->h = 46;
-        extern void ed_preview_sound(UiNode *);
-        UiNode *b = ui_button(ui, row, "Preview", ed_preview_sound);
-        b->icon = UI_ICON_PLAY;
+        UiNode *b = preview_button(row);
         b->disabled = !snd;
-        b->grow = 1;
     } else if (icon == UI_ICON_SCRIPT || icon == UI_ICON_FILE || icon == UI_ICON_SCENE) {
         UiNode *row = ui_box(ui, body, UI_ROW);
         ui_pad(row, 12, 8, 12, 8);
@@ -1041,17 +1065,10 @@ static void build_asset_inspector(UiNode *body) {
     }
 }
 
-void ed_preview_sound(UiNode *n) {
-    LX_UNUSED(n);
-    char ref[LX_REF_MAX];
-    ed_relative_asset(ref, sizeof ref, ED.inspector_asset);
-    LxEntity l = lx_scene_listener(ED.scene);
-    lx_audio_play_oneshot(ref, l ? lx_entity_world_position(ED.scene, l) : ED.cam_pos, 1.0f);
-}
-
 static void inspector_frame(UiNode *body) {
     if (!ED.scene) return;
     material_flush();
+    preview_button_sync();   /* flips back to "Preview" when the sound ends */
     LxEntityData *d = lx_entity_data(ED.scene, ED.selected);
     uint32_t comps = d ? d->comps : 0;
     bool asset_changed = strcmp(ED.inspector_asset, ED.selected_asset) != 0;
@@ -1063,10 +1080,13 @@ static void inspector_frame(UiNode *body) {
     }
     if (!ED.inspector_dirty && !d && !ED.selected_asset[0] && !asset_changed && ED.inspector_entity == 0 && body->first) return;
     ED.inspector_dirty = false;
+    /* a sound you were previewing stops when you select something else */
+    if (asset_changed || ED.inspector_entity != (d ? ED.selected : 0)) lx_audio_preview_stop();
     ED.inspector_entity = d ? ED.selected : 0;
     ED.inspector_comps = comps;
     ED.inspector_storage = ED.scene->entities;
     lx_strcpy(ED.inspector_asset, sizeof ED.inspector_asset, ED.selected_asset);
+    g_preview_btn = NULL;
     ui_clear(ED.ui, body);
     if (ED.selected_asset[0]) build_asset_inspector(body);
     else if (d) build_entity_inspector(body);

@@ -553,6 +553,12 @@ static void viewport_draw(UiNode *n, UiCtx *ui) {
     if (!ED.viewport_rt) return;
     ui_push_clip(ui, n->x, n->y, n->cw, n->ch);
     ui_draw_image(ui, lx_render_target_texture(ED.viewport_rt), n->x, n->y, n->cw, n->ch);
+    if (ED.play != ED_EDIT) {
+        /* the game's own UI (HUD, menus), exactly as the player draws it */
+        LxGameUiGeometry g;
+        lx_game_ui_geometry(&g);
+        ui_draw_mesh(ui, g.vertices, g.vertex_count, g.indices, g.index_count, g.cmds, g.cmd_count);
+    }
     bool game = showing_game();
     if (!game) {
         draw_icons(ui);

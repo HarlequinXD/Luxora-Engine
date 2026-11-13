@@ -587,8 +587,71 @@ static void test_wav(void) {
     CHECK(s && s->frame_count == frames && s->sample_rate == 48000, "wav header");
     if (s) CHECK(NEAR(s->samples[10], 0.25f, 1e-3f), "stereo downmix %g", s->samples[10]);
     if (s) { lx_free(s->samples); lx_free(s); }
+    /* preview channel: pressing preview again replaces the sound instead of stacking it */
+#ifdef _WIN32
+    _putenv_s("LUXORA_NO_AUDIO", "1");
+#else
+    setenv("LUXORA_NO_AUDIO", "1", 1);
+#endif
+    lx_audio_init();
+    char dir[LX_PATH_MAX];
+    lx_path_parent(dir, sizeof dir, path);
+    lx_assets_set_root(dir);
+    int before = lx_audio_playing_count();
+    for (int i = 0; i < 5; i++) lx_audio_preview("luxora_test.wav", 1.0f, 1.0f);
+    CHECK(lx_audio_preview_playing() && lx_audio_playing_count() == before + 1, "preview x5 plays one sound (%d)", lx_audio_playing_count() - before);
+    lx_audio_preview_stop();
+    CHECK(!lx_audio_preview_playing() && lx_audio_playing_count() == before, "preview stops");
+    lx_audio_shutdown();
+    lx_assets_clear();
     lx_path_remove(path);
     lx_free(w);
+}
+
+/* ---------------- game UI ---------------- */
+static float gui_min_x(const LxGameUiGeometry *g) { float m = 1e9f; for (int i = 0; i < g->vertex_count; i++) m = lx_minf(m, g->vertices[i].x); return m; }
+static float gui_max_x(const LxGameUiGeometry *g) { float m = -1e9f; for (int i = 0; i < g->vertex_count; i++) m = lx_maxf(m, g->vertices[i].x); return m; }
+
+static void test_game_ui(void) {
+    printf("game ui\n");
+    lx_game_ui_use_atlas(true);
+    memset(&g_lx_input, 0, sizeof g_lx_input);
+    /* a 3840x2160 window: canvas stays 1080 tall, everything scales by 2 */
+    lx_game_ui_begin_frame(0, 0, 3840, 2160, true);
+    LxVec2 cs = lx_ui_canvas_size();
+    CHECK(NEAR(cs.x, 1920, 0.5f) && NEAR(cs.y, 1080, 0.5f), "canvas is 1920x1080 at 16:9 (%gx%g)", cs.x, cs.y);
+    lx_ui_anchor(LX_ANCHOR_TOP_RIGHT);
+    lx_ui_rect(-20, 20, 100, 50, LX_COLOR_RED, 8);
+    LxGameUiGeometry g;
+    lx_game_ui_geometry(&g);
+    CHECK(g.index_count > 0 && NEAR(gui_max_x(&g), (1920 - 20) * 2, 1) && NEAR(gui_min_x(&g), (1920 - 120) * 2, 1),
+          "TOP_RIGHT anchor places the rect's right edge 20 units in (%g..%g)", gui_min_x(&g), gui_max_x(&g));
+    lx_game_ui_begin_frame(0, 0, 1920, 1080, true);
+    lx_ui_anchor(LX_ANCHOR_CENTER);
+    float tw = lx_ui_text_width(48, "Game Over");
+    lx_ui_text(0, 0, 48, LX_COLOR_WHITE, "Game Over");
+    lx_game_ui_geometry(&g);
+    CHECK(tw > 150 && tw < 400 && g.index_count >= 8 * 6, "48-unit text is %g wide and drawn (%d indices)", tw, g.index_count);
+    CHECK(NEAR((gui_min_x(&g) + gui_max_x(&g)) * 0.5f, 960, 12), "CENTER anchor centres the text (%g)", (gui_min_x(&g) + gui_max_x(&g)) * 0.5f);
+    /* a button clicked with the mouse: press over it, release over it */
+    bool clicked = false;
+    for (int frame = 0; frame < 3; frame++) {
+        g_lx_input.mouse_pos = lx_v2(960, 540);
+        g_lx_input.mouse[LX_MOUSE_LEFT] = frame == 1;
+        lx_input_update(1.0f / 60.0f);
+        lx_game_ui_begin_frame(0, 0, 1920, 1080, true);
+        lx_ui_anchor(LX_ANCHOR_CENTER);
+        clicked |= lx_ui_button("Play", 0, 0, 300, 80) && frame == 2;
+    }
+    CHECK(clicked && lx_ui_pointer_over(), "button reports a click and pointer-over");
+    lx_game_ui_begin_frame(0, 0, 1920, 1080, true);
+    lx_ui_bar(20, 20, 300, 24, 0.5f, LX_COLOR_GREEN, LX_RGBA(0, 0, 0, 128));
+    lx_ui_circle(100, 100, 20, LX_COLOR_YELLOW);
+    lx_ui_line(0, 0, 100, 100, 3, LX_COLOR_WHITE);
+    lx_ui_rect_outline(10, 10, 50, 50, LX_COLOR_BLUE, 6, 2);
+    lx_game_ui_geometry(&g);
+    CHECK(g.index_count > 100 && g.cmd_count == 1, "shapes batch into one draw (%d cmds)", g.cmd_count);
+    lx_game_ui_shutdown();
 }
 
 static void test_input(void) {
@@ -684,6 +747,7 @@ int main(void) {
     test_reflection_probe();
     test_icon_images();
     test_physics();
+    test_game_ui();
     lx_assets_clear();
     lx_jobs_shutdown();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
