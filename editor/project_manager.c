@@ -92,7 +92,7 @@ static void rebuild_list(void) {
         row->on_right_click = recent_menu;
         row->tooltip[0] = 0;
         UiNode *icon = ui_label(ui, row, "");
-        icon->icon = UI_ICON_PROJECT;
+        icon->icon = ok ? UI_ICON_APP : UI_ICON_WARNING;   /* missing projects show a warning instead */
         icon->icon_size = 30;
         icon->icon_color = ok ? t->accent : t->text_disabled;
         icon->w = 34;
@@ -300,7 +300,7 @@ static void browse_fill(void) {
         bool is_proj = lx_file_exists(proj);
         UiNode *b = ui_button(ui, PM.browse_list, e[i].name, browse_pick);
         b->on_double_click = is_proj ? do_open : browse_into;
-        b->icon = is_proj ? UI_ICON_PROJECT : UI_ICON_FOLDER;
+        b->icon = is_proj ? UI_ICON_APP : UI_ICON_FOLDER;
         b->icon_color = is_proj ? t->accent : t->warning;
         b->center_text = false;
         b->bg = 0;
@@ -386,7 +386,7 @@ void ed_project_manager_build(void) {
     UiNode *sp = ui_box(ui, side, UI_COL);
     sp->h = 16;
     static const char *nav[] = {"Projects", "New Project", "About"};
-    static const UiIcon nav_icons[] = {UI_ICON_PROJECT, UI_ICON_PLUS, UI_ICON_INFO};
+    static const UiIcon nav_icons[] = {UI_ICON_APP, UI_ICON_PLUS, UI_ICON_INFO};
     for (int i = 0; i < 3; i++) {
         UiNode *b = ui_button(ui, side, nav[i], nav_click);
         b->icon = nav_icons[i];

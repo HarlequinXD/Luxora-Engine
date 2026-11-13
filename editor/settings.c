@@ -83,7 +83,7 @@ static UiNode *note(UiNode *body, UiIcon icon, const char *text) {
 
 /* ---------------- General ---------------- */
 static void build_general(UiNode *b) {
-    UiNode *s = ed_section(b, UI_ICON_PROJECT, "Project", &g_dummy_open, NULL);
+    UiNode *s = ed_section(b, UI_ICON_APP, "Project", &g_dummy_open, NULL);
     row_text(s, "Name", ED.project.name, sizeof ED.project.name);
     row_text(s, "Company", ED.project.company, sizeof ED.project.company);
     row_text(s, "Version", ED.project.version, sizeof ED.project.version);
@@ -686,7 +686,7 @@ void ed_project_settings(int category) {
     nav->w = 190;
     nav->gap = 2;
     static const char *names[] = {"General", "Graphics", "Sound", "Input Manager", "Platforms"};
-    static const UiIcon icons[] = {UI_ICON_PROJECT, UI_ICON_MONITOR, UI_ICON_SPEAKER, UI_ICON_GAMEPAD, UI_ICON_PHONE};
+    static const UiIcon icons[] = {UI_ICON_APP, UI_ICON_MONITOR, UI_ICON_SPEAKER, UI_ICON_GAMEPAD, UI_ICON_PHONE};
     for (int i = 0; i < 5; i++) {
         UiNode *b = ui_button(ui, nav, names[i], nav_pick);
         b->icon = icons[i];

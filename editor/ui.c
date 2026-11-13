@@ -21,6 +21,7 @@ typedef struct Toast { char text[160]; float time; } Toast;
 
 struct UiCtx {
     UiNode *root;
+    uint32_t app_icon;
     UiNode *popups[MAX_POPUPS];
     int popup_count;
     UiNode *modal;
@@ -444,6 +445,9 @@ void ui_draw_icon(UiCtx *ui, UiIcon icon, float x, float y, float s, uint32_t c)
         ui_draw_rect(ui, x + s * 0.12f, y + s * 0.52f, s * 0.16f, s * 0.3f, c, s * 0.05f);
         ui_draw_rect(ui, x + s * 0.72f, y + s * 0.52f, s * 0.16f, s * 0.3f, c, s * 0.05f);
         break;
+    case UI_ICON_APP:
+        if (ui->app_icon) { ui_draw_image(ui, ui->app_icon, x, y, s, s); break; }
+        /* fall through - no texture yet: draw the vector project mark */
     case UI_ICON_PROJECT:
         ui_draw_rect(ui, x + s * 0.1f, y + s * 0.1f, s * 0.8f, s * 0.8f, c2, s * 0.14f);
         ui_draw_triangle(ui, P(0.5f, 0.24f), P(0.76f, 0.5f), P(0.5f, 0.76f), c);
@@ -1322,6 +1326,7 @@ bool ui_wants_keyboard(UiCtx *ui) { return ui->focus && (ui->focus->type == UI_T
 bool ui_wants_mouse(UiCtx *ui) { return ui->popup_count > 0 || ui->modal || (ui->hot && ui->hot->type != UI_CUSTOM); }
 bool ui_is_hot(UiCtx *ui, UiNode *n) { return ui->hot == n; }
 UiNode *ui_hot_node(UiCtx *ui) { return ui->hot; }
+void ui_set_app_icon(UiCtx *ui, uint32_t texture) { ui->app_icon = texture; }
 bool ui_overlay_open(UiCtx *ui) { return ui->popup_count > 0 || ui->modal != NULL; }
 bool ui_is_inside(UiCtx *ui, UiNode *n) { return inside(n, ui->mouse); }
 UiNode *ui_active(UiCtx *ui) { return ui->active; }

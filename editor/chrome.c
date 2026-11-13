@@ -24,6 +24,7 @@ void ed_chrome_init(void) {
         lx_free(px);
     }
     lx_platform_set_intercept_close(true);
+    ui_set_app_icon(ED.ui, ed_app_icon_texture());
 }
 
 uint32_t ed_app_icon_texture(void) {
