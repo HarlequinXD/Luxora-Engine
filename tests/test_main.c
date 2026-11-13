@@ -10,6 +10,13 @@ static int g_fail, g_pass;
     } while (0)
 #define NEAR(a, b, eps) (fabsf((a) - (b)) <= (eps))
 
+static const char *tmpdir(void) {
+    const char *t = getenv("TMPDIR");
+    if (!t) t = getenv("TEMP");
+    if (!t) t = getenv("TMP");
+    return t ? t : "/tmp";
+}
+
 static void test_math(void) {
     printf("math\n");
     LxMat4 t = lx_mat4_trs(lx_v3(1, 2, 3), lx_quat_euler_deg(lx_v3(30, 45, 10)), lx_v3(2, 2, 2));
@@ -274,7 +281,7 @@ static void test_crowd(void) {
 static void test_project(void) {
     printf("project\n");
     char dir[LX_PATH_MAX];
-    snprintf(dir, sizeof dir, "%s/luxora_test_%d", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)(lx_time() * 1000) % 100000);
+    snprintf(dir, sizeof dir, "%s/luxora_test_%d", tmpdir(), (int)(lx_time() * 1000) % 100000);
     lx_mkdir_p(dir);
     LxProject p;
     CHECK(lx_project_create(&p, dir, "Sample Game", LX_TEMPLATE_SAMPLE_3D), "create project");
@@ -325,7 +332,7 @@ static void test_wav(void) {
     int16_t *pcm = (int16_t *)(w + 44);
     for (int i = 0; i < frames; i++) { pcm[i * 2] = 16384; pcm[i * 2 + 1] = 0; }
     char path[LX_PATH_MAX];
-    snprintf(path, sizeof path, "%s/luxora_test.wav", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+    snprintf(path, sizeof path, "%s/luxora_test.wav", tmpdir());
     lx_file_write(path, w, 44 + data_bytes);
     LxSound *s = lx_sound_load_wav(path);
     CHECK(s && s->frame_count == frames && s->sample_rate == 48000, "wav header");
@@ -383,7 +390,7 @@ static void test_input(void) {
     g_lx_input.touch_count = 0;
     /* save / load round trip */
     char path[LX_PATH_MAX];
-    snprintf(path, sizeof path, "%s/luxora_input_test.lxinput", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+    snprintf(path, sizeof path, "%s/luxora_input_test.lxinput", tmpdir());
     LxInputAction *custom = lx_input_add_action(m, "Throw Grenade", false);
     lx_input_add_binding(custom, (LxBinding){LX_BIND_KEY, LX_KEY_G, 0, 1});
     lx_input_add_binding(custom, (LxBinding){LX_BIND_PAD_BUTTON, LX_PAD_RB, 0, 1});

@@ -271,10 +271,11 @@ static bool cluster_lod(const LxMesh *m, int grid, LxMeshLod *out) {
     int nvc = 0;
     for (int i = 0; i < src->vertex_count; i++) {
         const LxVertex *v = &src->vertices[i];
-        int64_t cx = (int64_t)((v->px - m->bounds.min.x) / cell), cy = (int64_t)((v->py - m->bounds.min.y) / cell),
-                cz = (int64_t)((v->pz - m->bounds.min.z) / cell);
-        int64_t oct = (v->nx > 0) | ((v->ny > 0) << 1) | ((v->nz > 0) << 2);
-        int64_t key = (cx << 42) ^ (cy << 21) ^ cz ^ (oct << 61);
+        uint64_t cx = (uint64_t)(int64_t)((v->px - m->bounds.min.x) / cell), cy = (uint64_t)(int64_t)((v->py - m->bounds.min.y) / cell),
+                 cz = (uint64_t)(int64_t)((v->pz - m->bounds.min.z) / cell);
+        uint64_t oct = (uint64_t)((v->nx > 0) | ((v->ny > 0) << 1) | ((v->nz > 0) << 2));
+        /* keys are kept positive so -1 can mark empty hash slots */
+        int64_t key = (int64_t)(((cx & 0x1fffff) << 39) ^ ((cy & 0x1fffff) << 18) ^ (cz & 0x3ffff) ^ (oct << 60)) & INT64_MAX;
         uint32_t h = (uint32_t)(((uint64_t)key * 0x9E3779B97F4A7C15ull) >> 32) & (uint32_t)(hash_cap - 1);
         while (keys[h] != -1 && keys[h] != key) h = (h + 1) & (uint32_t)(hash_cap - 1);
         if (keys[h] == -1) {

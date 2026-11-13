@@ -135,6 +135,7 @@ uint32_t lx_ui_white_texture(void);              /* 1x1 white, for solid shapes 
 void lx_renderer_draw_ui(const LxUiDrawList *list); /* draws onto the swapchain image */
 /* Reads back the last presented swapchain image as RGBA8 (for screenshots/tests). */
 bool lx_renderer_screenshot(const char *ppm_path);
+int lx_renderer_validation_errors(void);
 
 /* ---------- mesh internals ---------- */
 typedef struct LxVertex {

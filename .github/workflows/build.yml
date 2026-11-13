@@ -1,0 +1,133 @@
+name: Build & Test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Linux (build, tests, Vulkan screenshots)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libx11-dev xvfb mesa-vulkan-drivers vulkan-validationlayers \
+                                  vulkan-tools glslang-tools python3-pil
+
+      - name: Check committed SPIR-V matches the shader sources
+        run: |
+          python3 tools/compile_shaders.py glslangValidator
+          git diff --exit-code src/gfx/shaders_spv.h || (echo "::warning::shaders_spv.h differs from a fresh compile (compiler version differences are OK)")
+
+      - name: Configure & build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Unit tests
+        run: ./build/luxora_tests
+
+      - name: Editor smoke test (no GPU)
+        run: |
+          export HOME=$RUNNER_TEMP/home && mkdir -p $HOME
+          LUXORA_NO_AUDIO=1 xvfb-run -a -s "-screen 0 1600x940x24" ./build/luxora_editor_nogpu --new $RUNNER_TEMP/projects "CI Sample" --smoke
+
+      - name: Build a game from the editor pipeline
+        run: |
+          export HOME=$RUNNER_TEMP/home
+          LUXORA_NO_AUDIO=1 xvfb-run -a -s "-screen 0 1600x940x24" ./build/luxora_editor_nogpu "$RUNNER_TEMP/projects/CI Sample" --build
+          ls -la "$RUNNER_TEMP/projects/CI Sample/Builds/Linux/CI Sample"
+
+      - name: Vulkan runtime (lavapipe + validation layers)
+        run: |
+          vulkaninfo --summary || true
+          export HOME=$RUNNER_TEMP/home
+          export LUXORA_VALIDATION=1 LUXORA_NO_AUDIO=1
+          mkdir -p shots
+          # project manager
+          xvfb-run -a -s "-screen 0 1600x940x24" ./build/luxora_editor --screenshot shots/project_manager.ppm --frames 30
+          # editor with the sample project (fresh project = sample scene with GI, crowd, materials)
+          xvfb-run -a -s "-screen 0 1600x940x24" ./build/luxora_editor --new $RUNNER_TEMP/vk "Vulkan Sample" --screenshot shots/editor.ppm --frames 60
+          # play mode
+          xvfb-run -a -s "-screen 0 1600x940x24" ./build/luxora_editor "$RUNNER_TEMP/vk/Vulkan Sample" --play --screenshot shots/editor_playing.ppm --frames 90
+          # the packaged game itself
+          cd "$RUNNER_TEMP/projects/CI Sample/Builds/Linux/CI Sample"
+          LUXORA_SCREENSHOT=$GITHUB_WORKSPACE/shots/game.ppm LUXORA_SCREENSHOT_FRAME=60 xvfb-run -a -s "-screen 0 1280x720x24" "./CI Sample"
+
+      - name: Convert screenshots
+        if: always()
+        run: |
+          python3 -c "import glob; from PIL import Image; [Image.open(f).save(f[:-4]+'.png') for f in glob.glob('shots/*.ppm')]"
+          ls -la shots || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots
+          path: shots/*.png
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luxora-linux
+          path: |
+            build/luxora_editor
+            build/luxora_player
+            build/luxora_tests
+
+  windows:
+    name: Windows (MSVC)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Unit tests
+        run: build\Release\luxora_tests.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luxora-windows
+          path: |
+            build/Release/luxora_editor.exe
+            build/Release/luxora_player.exe
+            build/Release/luxora_tests.exe
+
+  android:
+    name: Android (APK)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+      - name: Create the sample project and stage its data
+        run: |
+          sudo apt-get update && sudo apt-get install -y cmake ninja-build libx11-dev xvfb
+          cmake -S . -B host -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build host --target luxora_editor_nogpu
+          export HOME=$RUNNER_TEMP/home && mkdir -p $HOME
+          LUXORA_NO_AUDIO=1 xvfb-run -a ./host/luxora_editor_nogpu --new $RUNNER_TEMP/p "Android Sample" --screenshot /dev/null --frames 3
+          P="$RUNNER_TEMP/p/Android Sample"
+          mkdir -p "$RUNNER_TEMP/stage/Data"
+          cp -r "$P/Assets" "$RUNNER_TEMP/stage/Data/Assets"
+          cp "$P/project.lxproj" "$P/input.lxinput" "$RUNNER_TEMP/stage/Data/"
+      - name: Build APK
+        run: |
+          gradle -p android assembleDebug --no-daemon \
+            -PluxoraProject="$RUNNER_TEMP/p/Android Sample" -PluxoraAssets="$RUNNER_TEMP/stage" \
+            -PluxoraAppId=com.luxora.sample -PluxoraAppName="Luxora Sample" -PluxoraMinSdk=28 \
+            -PluxoraBuildDir="$RUNNER_TEMP/apkbuild"
+          ls -la $RUNNER_TEMP/apkbuild/outputs/apk/debug/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luxora-android-sample-apk
+          path: ${{ runner.temp }}/apkbuild/outputs/apk/debug/app-debug.apk

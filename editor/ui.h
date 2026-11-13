@@ -87,6 +87,7 @@ struct UiNode {
     char text[192];
     char hint[64];
     char tooltip[192];
+    char path[LX_PATH_MAX]; /* free storage for a file path / identifier (not drawn) */
     /* bindings */
     float *f;
     int *i;

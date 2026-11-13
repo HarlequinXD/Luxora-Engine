@@ -65,6 +65,10 @@ int lx_run(const LxAppDesc *d) {
     if (d->on_start) d->on_start(E.scene);
 
     double last = lx_time();
+    /* automation hook used by CI: LUXORA_SCREENSHOT=file.ppm LUXORA_SCREENSHOT_FRAME=N */
+    const char *shot = getenv("LUXORA_SCREENSHOT");
+    int shot_frame = getenv("LUXORA_SCREENSHOT_FRAME") ? atoi(getenv("LUXORA_SCREENSHOT_FRAME")) : 120;
+    int frame = 0;
     while (!E.quit && lx_platform_pump()) {
         double now = lx_time();
         float dt = (float)(now - last);
@@ -92,7 +96,10 @@ int lx_run(const LxAppDesc *d) {
             LxEntity cam = lx_scene_main_camera(E.scene);
             if (cam && lx_camera_view(E.scene, cam, w, h, &view)) lx_render_scene(E.scene, &view, NULL);
             lx_input_draw_touch_controls();
+            if (shot && frame == shot_frame) lx_renderer_screenshot(shot);
             lx_renderer_end_frame();
+            if (shot && frame > shot_frame) E.quit = true;
+            frame++;
         }
         int target = lx_graphics_settings()->target_fps;
         if (target > 0) {
@@ -102,10 +109,11 @@ int lx_run(const LxAppDesc *d) {
     }
     if (d->on_shutdown) d->on_shutdown();
     lx_renderer_wait_idle();
+    int validation = lx_renderer_validation_errors();
     lx_audio_shutdown();
     lx_scene_destroy(E.scene);
     lx_renderer_shutdown();
     lx_platform_shutdown();
     lx_jobs_shutdown();
-    return 0;
+    return validation ? 3 : 0;
 }

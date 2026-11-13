@@ -20,7 +20,7 @@ endif()
 if(MSVC)
   add_compile_options(/W3 /utf-8 /D_CRT_SECURE_NO_WARNINGS)
 else()
-  add_compile_options(-Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
+  add_compile_options(-Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wno-format-truncation)
   if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_compile_options(-O2)
   endif()
@@ -29,7 +29,7 @@ endif()
 # ------------------------------------------------------------------ engine library
 set(LUXORA_SOURCES
   src/core/core.c src/core/math.c src/core/jobs.c src/core/kv.c
-  src/gfx/vk_loader.c src/gfx/renderer.c src/gfx/mesh.c src/gfx/image.c src/gfx/assets.c
+  src/gfx/mesh.c src/gfx/image.c src/gfx/assets.c
   src/gi/bvh.c src/gi/photon_gi.c
   src/audio/audio.c
   src/crowd/crowd.c
@@ -47,7 +47,8 @@ else()
   list(APPEND LUXORA_SOURCES src/platform/platform_x11.c)
 endif()
 
-add_library(luxora STATIC ${LUXORA_SOURCES})
+set(LUXORA_GPU_SOURCES src/gfx/vk_loader.c src/gfx/renderer.c)
+add_library(luxora STATIC ${LUXORA_SOURCES} ${LUXORA_GPU_SOURCES})
 target_include_directories(luxora PUBLIC include third_party/vulkan PRIVATE src)
 if(WIN32)
   target_link_libraries(luxora PUBLIC winmm user32 shell32 gdi32)
@@ -120,4 +121,17 @@ if(LUXORA_BUILD_TESTS)
   target_include_directories(luxora_tests PRIVATE src)
   target_link_libraries(luxora_tests PRIVATE luxora)
   add_test(NAME luxora_tests COMMAND luxora_tests)
+
+  # The editor linked against a no-op renderer: runs its UI and logic without a GPU
+  # (used for smoke tests on machines without Vulkan, e.g. under Xvfb).
+  if(LUXORA_BUILD_EDITOR AND NOT WIN32 AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/editor/main.c)
+    add_library(luxora_nogpu STATIC ${LUXORA_SOURCES} tests/stub_renderer.c)
+    target_include_directories(luxora_nogpu PUBLIC include third_party/vulkan PRIVATE src)
+    target_link_libraries(luxora_nogpu PUBLIC ${X11_LIBRARIES} Threads::Threads ${CMAKE_DL_LIBS} m)
+    add_executable(luxora_editor_nogpu ${EDITOR_SOURCES})
+    target_include_directories(luxora_editor_nogpu PRIVATE src editor)
+    target_link_libraries(luxora_editor_nogpu PRIVATE luxora_nogpu)
+    target_compile_definitions(luxora_editor_nogpu PRIVATE LUXORA_ENGINE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+    luxora_add_game_scripts(luxora_editor_nogpu "")
+  endif()
 endif()

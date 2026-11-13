@@ -1,0 +1,48 @@
+// Luxora Android player. The editor's build pipeline (and CI) pass the game through -P properties:
+//   luxoraProject  project folder (its Assets/Scripts/*.c are compiled in)
+//   luxoraAssets   folder containing the staged Data/ directory
+//   luxoraAppId, luxoraAppName, luxoraMinSdk, luxoraOrientation, luxoraBuildDir
+plugins { id 'com.android.application' }
+
+def prop = { String name, def fallback -> project.hasProperty(name) ? project.property(name) : fallback }
+
+if (project.hasProperty('luxoraBuildDir')) {
+    layout.buildDirectory.set(file(project.property('luxoraBuildDir')))
+}
+
+android {
+    namespace 'com.luxora.player'
+    compileSdk 34
+    if (project.hasProperty('luxoraNdk')) ndkVersion project.property('luxoraNdk')
+
+    defaultConfig {
+        applicationId prop('luxoraAppId', 'com.luxora.sample')
+        minSdk(prop('luxoraMinSdk', '28') as int)
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+        manifestPlaceholders = [appName: prop('luxoraAppName', 'Luxora Game'), orientation: prop('luxoraOrientation', 'sensorLandscape')]
+        externalNativeBuild {
+            cmake {
+                arguments "-DLUXORA_GAME_PROJECT=${prop('luxoraProject', '')}", '-DLUXORA_BUILD_EDITOR=OFF', '-DLUXORA_BUILD_TESTS=OFF',
+                          '-DANDROID_STL=none'
+                targets 'luxora_player'
+            }
+        }
+        ndk { abiFilters 'arm64-v8a', 'x86_64' }
+    }
+    externalNativeBuild {
+        cmake {
+            path file('../../CMakeLists.txt')
+            version '3.22.1'
+        }
+    }
+    sourceSets {
+        main { assets.srcDirs = [prop('luxoraAssets', 'src/main/assets')] }
+    }
+    buildTypes {
+        debug { debuggable true; jniDebuggable false }
+        release { minifyEnabled false; signingConfig signingConfigs.debug }
+    }
+    androidResources { noCompress += ['lxscene', 'lxmat', 'lxproj', 'lxinput', 'wav'] }
+}

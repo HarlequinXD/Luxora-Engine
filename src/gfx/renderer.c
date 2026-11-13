@@ -571,6 +571,7 @@ static bool create_instance(void) {
     ci.enabledLayerCount = nl;
     ci.ppEnabledLayerNames = layers;
     VkResult r = vkCreateInstance(&ci, NULL, &R.instance);
+    if (r == VK_ERROR_INCOMPATIBLE_DRIVER) { LX_ERROR("No Vulkan driver found. Install or update your GPU driver (Vulkan 1.3)."); return false; }
     if (r != VK_SUCCESS) { LX_ERROR("vkCreateInstance failed: %s", lx_vk_result(r)); return false; }
     lx_vk_load_instance(R.instance);
     if (debug_utils && vkCreateDebugUtilsMessengerEXT) {
