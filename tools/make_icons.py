@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Draws the Windows application icons for Luxora.
 
-  resources/windows/luxora_editor.ico  - the editor (a lit cube on a dark tile)
+  resources/windows/luxora_editor.ico  - the Inferno editor (an ember flame on an obsidian tile)
   resources/windows/luxora_game.ico    - default icon for games (a game controller)
   editor/app_icon.h                    - the editor icon (title bar, Linux window icon) and the default game icon, as PNGs
   android/app/src/main/res/mipmap-*    - default Android launcher icon for games
@@ -29,7 +29,7 @@ def gradient(size, top, bottom):
     return g.resize((size, size), Image.BILINEAR)
 
 
-def tile(size, top, bottom, radius=0.22, inset=0.03):
+def tile(size, top, bottom, radius=0.22, inset=0.03, gloss=34, gloss_rgb=(255, 255, 255)):
     """Rounded-square background with a vertical gradient and a soft top highlight."""
     S = size
     m = Image.new("L", (S, S), 0)
@@ -40,39 +40,55 @@ def tile(size, top, bottom, radius=0.22, inset=0.03):
     img.paste(bg, (0, 0), m)
     # glossy rim at the top
     hl = Image.new("L", (S, S), 0)
-    ImageDraw.Draw(hl).rounded_rectangle([i, i, S - i - 1, int(S * 0.55)], int(S * radius), fill=34)
+    ImageDraw.Draw(hl).rounded_rectangle([i, i, S - i - 1, int(S * 0.55)], int(S * radius), fill=gloss)
     hl = Image.composite(hl, Image.new("L", (S, S), 0), m)
-    img = Image.alpha_composite(img, Image.merge("RGBA", (Image.new("L", (S, S), 255),) * 3 + (hl,)))
+    img = Image.alpha_composite(img, Image.merge("RGBA", tuple(Image.new("L", (S, S), c) for c in gloss_rgb) + (hl,)))
     return img, m
 
 
+def flame_points(cx, base, h, w, lean=0.0, n=120):
+    """A flame outline: round belly at the bottom, sides curling in to a leaning tip."""
+    import math
+    pts = []
+    for k in range(n + 1):
+        t = k / n  # 0 = tip, going clockwise down the right side, round the base, up the left
+        a = t * 2 * math.pi
+        # teardrop: x = sin(a) * width profile, y from tip (0) to base (1)
+        y = (1 - math.cos(a)) / 2                      # 0 at tip, 1 at bottom, back to 0
+        prof = math.sin(a) * (y ** 0.75) * (1.0 - 0.18 * math.sin(a * 3) * (1 - y))
+        x = cx + prof * w + lean * (1 - y) ** 2 * w
+        pts.append((x, base - h + y * h))
+    return pts
+
+
 def editor_icon(S):
-    img, mask = tile(S, (44, 50, 86, 255), (14, 15, 24, 255))
-    d = ImageDraw.Draw(img)
-    cx, cy, r = S * 0.5, S * 0.53, S * 0.29
-    # isometric cube: top, left and right faces
-    top = [(cx, cy - r), (cx + r * 0.866, cy - r * 0.5), (cx, cy), (cx - r * 0.866, cy - r * 0.5)]
-    left = [(cx - r * 0.866, cy - r * 0.5), (cx, cy), (cx, cy + r), (cx - r * 0.866, cy + r * 0.5)]
-    right = [(cx, cy), (cx + r * 0.866, cy - r * 0.5), (cx + r * 0.866, cy + r * 0.5), (cx, cy + r)]
-    # warm light from the top-left: bright top, mid left, cool shadowed right
+    """Inferno: an ember flame on an obsidian tile."""
+    img, mask = tile(S, (62, 18, 12, 255), (10, 6, 6, 255), gloss=16, gloss_rgb=(255, 140, 90))
+    # heat glow behind the flame
     glow = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    ImageDraw.Draw(glow).ellipse([cx - r * 1.35, cy - r * 1.45, cx + r * 1.35, cy + r * 1.1], fill=(255, 190, 90, 90))
-    glow = glow.filter(ImageFilter.GaussianBlur(S * 0.07))
+    ImageDraw.Draw(glow).ellipse([S * 0.18, S * 0.30, S * 0.82, S * 0.98], fill=(255, 70, 20, 150))
+    glow = glow.filter(ImageFilter.GaussianBlur(S * 0.09))
     glow.putalpha(Image.composite(glow.getchannel("A"), Image.new("L", (S, S), 0), mask))
     img = Image.alpha_composite(img, glow)
+
+    def layer(points, top, bottom):
+        m = Image.new("L", (S, S), 0)
+        ImageDraw.Draw(m).polygon(points, fill=255)
+        col = gradient(S, top, bottom)
+        out = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+        out.paste(col, (0, 0), m)
+        return out
+
+    cx, base = S * 0.5, S * 0.88
+    outer = layer(flame_points(cx, base, S * 0.74, S * 0.29, lean=0.35), (255, 150, 40, 255), (200, 24, 12, 255))
+    mid = layer(flame_points(cx + S * 0.01, base - S * 0.02, S * 0.50, S * 0.19, lean=-0.25), (255, 214, 90, 255), (255, 92, 24, 255))
+    core = layer(flame_points(cx, base - S * 0.04, S * 0.30, S * 0.10, lean=0.2), (255, 252, 225, 255), (255, 190, 70, 255))
+    for l in (outer, mid, core):
+        img = Image.alpha_composite(img, l)
+    # embers
     d = ImageDraw.Draw(img)
-    d.polygon(top, fill=(255, 214, 128, 255))
-    d.polygon(left, fill=(236, 128, 64, 255))
-    d.polygon(right, fill=(94, 92, 214, 255))
-    # crisp edges
-    w = max(1, int(S * 0.012))
-    for poly in (top, left, right):
-        d.line(poly + [poly[0]], fill=(255, 255, 255, 110), width=w, joint="curve")
-    # photon spark top-right
-    sx, sy, sr = S * 0.76, S * 0.24, S * 0.085
-    d.polygon([(sx, sy - sr), (sx + sr * 0.22, sy - sr * 0.22), (sx + sr, sy), (sx + sr * 0.22, sy + sr * 0.22),
-               (sx, sy + sr), (sx - sr * 0.22, sy + sr * 0.22), (sx - sr, sy), (sx - sr * 0.22, sy - sr * 0.22)],
-              fill=(255, 246, 220, 255))
+    for ex, ey, er in ((0.27, 0.30, 0.022), (0.74, 0.22, 0.018), (0.80, 0.40, 0.014)):
+        d.ellipse([S * (ex - er), S * (ey - er), S * (ex + er), S * (ey + er)], fill=(255, 150, 60, 230))
     return img
 
 
@@ -122,7 +138,7 @@ def save(fn, name):
 def embed_editor_icon():
     """64 px for the title bar (crisp at 2x UI scale) and 32 px for small uses."""
     import io
-    out = ["/* Generated by tools/make_icons.py - do not edit. The Luxora editor icon as PNG. */",
+    out = ["/* Generated by tools/make_icons.py - do not edit. The Inferno editor icon as PNG. */",
            "#ifndef LX_APP_ICON_H", "#define LX_APP_ICON_H", ""]
     for name, fn, size in (("app_icon_64", editor_icon, 64), ("app_icon_32", editor_icon, 32), ("game_icon_64", game_icon, 64)):
         b = io.BytesIO()

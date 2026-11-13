@@ -1,4 +1,4 @@
-/* Window chrome: Luxora draws its own title bar (Project Manager and editor), with the app icon,
+/* Window chrome: Inferno draws its own title bar (Project Manager and editor), with the app icon,
  * a draggable title, minimise / maximise / close, edge resizing and the save-before-closing prompt. */
 #include "editor.h"
 #include "app_icon.h"
@@ -70,11 +70,20 @@ static UiNode *caption_button(UiNode *row, UiIcon icon, const char *tip, void (*
     return b;
 }
 
+/* a thin ember line along the bottom of the title bar, brightest in the middle */
+static void titlebar_glow(UiNode *n, UiCtx *ui) {
+    const UiTheme *t = ui_theme(ui);
+    float h = lx_maxf(1.0f, ui_scale(ui)), y = n->y + n->ch - h, half = n->cw * 0.5f;
+    ui_draw_rect_gradient(ui, n->x, y, half, h, ui_alpha(t->glow, 0), ui_alpha(t->glow, 0.85f), 0, true);
+    ui_draw_rect_gradient(ui, n->x + half, y, half, h, ui_alpha(t->glow, 0.85f), ui_alpha(t->glow, 0), 0, true);
+}
+
 UiNode *ed_titlebar_begin(UiNode *parent) {
     UiCtx *ui = ED.ui;
     UiNode *bar = ui_box(ui, parent, UI_ROW);
     bar->h = TITLEBAR_H;
     bar->bg = ui_theme(ui)->header;
+    bar->on_draw = titlebar_glow;
     bar->cross_align = UI_ALIGN_CENTER;
     ui_pad(bar, 10, 0, 0, 0);
     bar->gap = 2;
@@ -173,5 +182,5 @@ void ed_request_quit(void) {
     if (ui_has_modal(ED.ui) && ED.save_prompt_open) return;   /* already asking */
     if (ED.mode == ED_MODE_EDITOR && ED.play != ED_EDIT) ed_stop();
     if (ED.mode != ED_MODE_EDITOR || !ED.dirty) { quit_now(); return; }
-    ed_save_prompt("closing Luxora", quit_now);
+    ed_save_prompt("closing Inferno", quit_now);
 }

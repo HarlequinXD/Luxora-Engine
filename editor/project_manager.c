@@ -67,7 +67,7 @@ static bool contains_ci(const char *hay, const char *needle) {
     return false;
 }
 
-/* ---- project icons: the game's icon from Build Settings, or the Luxora app icon ---- */
+/* ---- project icons: the game's icon from Build Settings, or the Inferno app icon ---- */
 static struct { char root[LX_PATH_MAX]; char icon[LX_REF_MAX]; uint32_t tex; } g_icons[ED_MAX_RECENT];
 static int g_icon_count;
 
@@ -345,7 +345,7 @@ static void browse_fill(void) {
         b->center_text = false;
         b->bg = 0;
         b->h = 26;
-        if (is_proj) lx_strcpy(b->hint, sizeof b->hint, "Luxora project");
+        if (is_proj) lx_strcpy(b->hint, sizeof b->hint, "Inferno project");
     }
     lx_free(e);
 }
@@ -367,7 +367,7 @@ static void open_project_dialog(UiNode *n) {
     UiNode *tf = ui_textfield(ui, row, g_open_path, sizeof g_open_path);
     tf->grow = 1;
     tf->on_change = path_typed;
-    UiNode *hint = ui_label(ui, body, "Double-click folders to browse. Projects are marked with the Luxora icon.");
+    UiNode *hint = ui_label(ui, body, "Double-click folders to browse. Projects are marked with the Inferno icon.");
     hint->font = UI_FONT_SMALL;
     hint->fg = t->text_dim;
     PM.browse_list = ui_box(ui, body, UI_COL);
@@ -404,7 +404,7 @@ void ed_project_manager_build(void) {
     UiNode *root = ui_root(ui);
     root->dir = UI_COL;
     UiNode *bar = ed_titlebar_begin(root);
-    ed_titlebar_end(bar, "Luxora Project Manager");
+    ed_titlebar_end(bar, "Inferno - Projects");
     UiNode *content = ui_box(ui, root, UI_ROW);
     content->grow = 1;
     /* sidebar */

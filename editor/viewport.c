@@ -513,7 +513,7 @@ static void draw_icons(UiCtx *ui) {
         if (!to_screen(wp, &s)) continue;
         UiIcon icon = ed_icon_for_entity(ED.scene, e);
         bool sel = e == ED.selected, hov = e == V.hover_icon;
-        ui_draw_circle(ui, s.x, s.y, sz * 0.62f, sel ? UI_RGBA(255, 140, 26, 200) : UI_RGBA(20, 22, 26, hov ? 220 : 160), 20);
+        ui_draw_circle(ui, s.x, s.y, sz * 0.62f, sel ? UI_RGBA(255, 140, 26, 200) : UI_RGBA(22, 13, 12, hov ? 220 : 160), 20);
         ui_draw_icon(ui, icon, s.x - sz * 0.4f, s.y - sz * 0.4f, sz * 0.8f, ed_color_for_icon(icon));
         /* direction hint for selected lights and cameras */
         uint32_t c = lx_entity_components(ED.scene, e);
@@ -535,7 +535,7 @@ static void draw_icons(UiCtx *ui) {
 static void draw_axis_triad(UiCtx *ui, UiNode *n) {
     float r = 30 * ui_scale(ui);
     float cx = n->x + n->cw - r - 16 * ui_scale(ui), cy = n->y + r + 16 * ui_scale(ui);
-    ui_draw_circle(ui, cx, cy, r + 8 * ui_scale(ui), UI_RGBA(20, 22, 26, 120), 28);
+    ui_draw_circle(ui, cx, cy, r + 8 * ui_scale(ui), UI_RGBA(22, 13, 12, 120), 28);
     const UiTheme *t = ui_theme(ui);
     uint32_t cols[3] = {t->axis_x, t->axis_y, t->axis_z};
     const char *labels[3] = {"X", "Y", "Z"};
@@ -545,7 +545,7 @@ static void draw_axis_triad(UiCtx *ui, UiNode *n) {
         float ex = cx + v.x * r, ey = cy - v.y * r;
         ui_draw_line(ui, cx, cy, ex, ey, 2 * ui_scale(ui), cols[a]);
         ui_draw_circle(ui, ex, ey, 7 * ui_scale(ui), cols[a], 14);
-        ui_draw_text(ui, UI_FONT_SMALL, ex - 3.5f * ui_scale(ui), ey - ui_line_height(ui, UI_FONT_SMALL) * 0.5f, labels[a], UI_HEX(0x101113));
+        ui_draw_text(ui, UI_FONT_SMALL, ex - 3.5f * ui_scale(ui), ey - ui_line_height(ui, UI_FONT_SMALL) * 0.5f, labels[a], UI_HEX(0x120a09));
     }
 }
 
@@ -575,21 +575,21 @@ static void viewport_draw(UiNode *n, UiCtx *ui) {
         else snprintf(msg, sizeof msg, "No camera in this scene - add one with Create > Camera");
         float tw = ui_text_width(ui, UI_FONT_BOLD, msg) + 44 * k;
         float bx = n->x + (n->cw - tw) * 0.5f, by = n->y + 8 * k;
-        ui_draw_rect(ui, bx, by, tw, 26 * k, cam ? UI_RGBA(20, 22, 26, 210) : ui_alpha(t->warning, 0.92f), 13 * k);
-        ui_draw_icon(ui, cam ? UI_ICON_CAMERA : UI_ICON_WARNING, bx + 12 * k, by + 5 * k, 16 * k, cam ? ed_color_for_icon(UI_ICON_CAMERA) : UI_HEX(0x101113));
-        ui_draw_text(ui, UI_FONT_BOLD, bx + 34 * k, by + (26 * k - ui_line_height(ui, UI_FONT_BOLD)) * 0.5f, msg, cam ? t->text : UI_HEX(0x101113));
+        ui_draw_rect(ui, bx, by, tw, 26 * k, cam ? UI_RGBA(22, 13, 12, 210) : ui_alpha(t->warning, 0.92f), 13 * k);
+        ui_draw_icon(ui, cam ? UI_ICON_CAMERA : UI_ICON_WARNING, bx + 12 * k, by + 5 * k, 16 * k, cam ? ed_color_for_icon(UI_ICON_CAMERA) : UI_HEX(0x120a09));
+        ui_draw_text(ui, UI_FONT_BOLD, bx + 34 * k, by + (26 * k - ui_line_height(ui, UI_FONT_BOLD)) * 0.5f, msg, cam ? t->text : UI_HEX(0x120a09));
     }
     if (ED.play != ED_EDIT) {
         ui_draw_border(ui, n->x, n->y, n->cw, n->ch, ED.play == ED_PAUSED ? t->warning : t->success, 0, 2 * ui_scale(ui));
         const char *msg = ED.play == ED_PAUSED ? "PAUSED" : (game ? "PLAYING · Game view" : "PLAYING · Scene view");
         float tw = ui_text_width(ui, UI_FONT_BOLD, msg) + 20 * ui_scale(ui);
         ui_draw_rect(ui, n->x + (n->cw - tw) * 0.5f, n->y + 8 * ui_scale(ui), tw, 24 * ui_scale(ui), ui_alpha(ED.play == ED_PAUSED ? t->warning : t->success, 0.9f), 12 * ui_scale(ui));
-        ui_draw_text(ui, UI_FONT_BOLD, n->x + (n->cw - tw) * 0.5f + 10 * ui_scale(ui), n->y + 8 * ui_scale(ui) + (24 * ui_scale(ui) - ui_line_height(ui, UI_FONT_BOLD)) * 0.5f, msg, UI_HEX(0x101113));
+        ui_draw_text(ui, UI_FONT_BOLD, n->x + (n->cw - tw) * 0.5f + 10 * ui_scale(ui), n->y + 8 * ui_scale(ui) + (24 * ui_scale(ui) - ui_line_height(ui, UI_FONT_BOLD)) * 0.5f, msg, UI_HEX(0x120a09));
     }
     if (V.nav == 1) {
         char buf[64];
         snprintf(buf, sizeof buf, "Fly · speed %.1f (scroll to change)", (double)ED.cam_speed);
-        ui_draw_rect(ui, n->x + 8 * ui_scale(ui), n->y + n->ch - 30 * ui_scale(ui), ui_text_width(ui, UI_FONT_SMALL, buf) + 16 * ui_scale(ui), 22 * ui_scale(ui), UI_RGBA(20, 22, 26, 200), 4 * ui_scale(ui));
+        ui_draw_rect(ui, n->x + 8 * ui_scale(ui), n->y + n->ch - 30 * ui_scale(ui), ui_text_width(ui, UI_FONT_SMALL, buf) + 16 * ui_scale(ui), 22 * ui_scale(ui), UI_RGBA(22, 13, 12, 200), 4 * ui_scale(ui));
         ui_draw_text(ui, UI_FONT_SMALL, n->x + 16 * ui_scale(ui), n->y + n->ch - 30 * ui_scale(ui) + (22 * ui_scale(ui) - ui_line_height(ui, UI_FONT_SMALL)) * 0.5f, buf, t->text);
     }
     if (ED.show_stats) {
@@ -597,7 +597,7 @@ static void viewport_draw(UiNode *n, UiCtx *ui) {
         char buf[256];
         snprintf(buf, sizeof buf, "%.0f fps   %d draws   %lld tris   %d instances (%d culled)   GI %d photons %.1f ms", (double)ED.fps, st->draw_calls,
                  (long long)st->triangles, st->instances_drawn, st->instances_culled, st->gi_photons_traced, (double)st->gi_ms);
-        ui_draw_rect(ui, n->x + 8 * ui_scale(ui), n->y + 8 * ui_scale(ui), ui_text_width(ui, UI_FONT_MONO, buf) + 16 * ui_scale(ui), 24 * ui_scale(ui), UI_RGBA(20, 22, 26, 200), 4 * ui_scale(ui));
+        ui_draw_rect(ui, n->x + 8 * ui_scale(ui), n->y + 8 * ui_scale(ui), ui_text_width(ui, UI_FONT_MONO, buf) + 16 * ui_scale(ui), 24 * ui_scale(ui), UI_RGBA(22, 13, 12, 200), 4 * ui_scale(ui));
         ui_draw_text(ui, UI_FONT_MONO, n->x + 16 * ui_scale(ui), n->y + 8 * ui_scale(ui) + (24 * ui_scale(ui) - ui_line_height(ui, UI_FONT_MONO)) * 0.5f, buf, t->text);
     }
     ui_pop_clip(ui);

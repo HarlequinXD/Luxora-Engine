@@ -60,6 +60,9 @@ typedef struct UiTheme {
     uint32_t text, text_dim, text_disabled, accent, accent_hover, accent_text, selection;
     uint32_t hover, active, danger, success, warning;
     uint32_t axis_x, axis_y, axis_z;
+    /* gradients: surfaces in these colours are drawn as a vertical blend from *_top to the colour */
+    uint32_t window_top, panel_alt_top, header_top, accent_top, accent_hover_top, selection_top;
+    uint32_t glow;                       /* ember glow lines (title bar, focused tab) */
 } UiTheme;
 
 struct UiNode {
@@ -155,6 +158,8 @@ UiNode *ui_slider(UiCtx *ui, UiNode *parent, float *value, float minv, float max
 UiNode *ui_dropdown(UiCtx *ui, UiNode *parent, int *value, const char *const *options, int count);
 UiNode *ui_image(UiCtx *ui, UiNode *parent, uint32_t texture);
 UiNode *ui_separator(UiCtx *ui, UiNode *parent);
+/* vertical (top -> bottom) or horizontal (left -> right) gradient rectangle */
+void ui_draw_rect_gradient(UiCtx *ui, float x, float y, float w, float h, uint32_t a, uint32_t b, float r, bool horizontal);
 UiNode *ui_color(UiCtx *ui, UiNode *parent, float *rgb, bool alpha);
 UiNode *ui_split(UiCtx *ui, UiNode *parent, int dir, float ratio);
 UiNode *ui_tabs(UiCtx *ui, UiNode *parent);

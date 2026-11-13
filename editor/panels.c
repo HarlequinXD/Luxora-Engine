@@ -8,25 +8,25 @@
  * ====================================================================== */
 uint32_t ed_color_for_icon(UiIcon icon) {
     switch (icon) {
-    case UI_ICON_FOLDER: case UI_ICON_FOLDER_OPEN: return UI_HEX(0xe8b84a);
-    case UI_ICON_SCENE: return UI_HEX(0x58a6ff);
-    case UI_ICON_MESH: case UI_ICON_CUBE: case UI_ICON_SPHERE: case UI_ICON_PLANE: case UI_ICON_CYLINDER: case UI_ICON_CAPSULE: return UI_HEX(0x7fb3ff);
-    case UI_ICON_MATERIAL: return UI_HEX(0xd2a8ff);
-    case UI_ICON_TEXTURE: return UI_HEX(0x56d4a8);
+    case UI_ICON_FOLDER: case UI_ICON_FOLDER_OPEN: return UI_HEX(0xe3a94b);
+    case UI_ICON_SCENE: return UI_HEX(0xff7043);
+    case UI_ICON_MESH: case UI_ICON_CUBE: case UI_ICON_SPHERE: case UI_ICON_PLANE: case UI_ICON_CYLINDER: case UI_ICON_CAPSULE: return UI_HEX(0xd8c3a5);
+    case UI_ICON_MATERIAL: return UI_HEX(0xd36be0);
+    case UI_ICON_TEXTURE: return UI_HEX(0x5fd3a0);
     case UI_ICON_SOUND: case UI_ICON_SPEAKER: case UI_ICON_LISTENER: return UI_HEX(0xffa657);
-    case UI_ICON_SCRIPT: case UI_ICON_BEHAVIOUR: return UI_HEX(0x7ee787);
-    case UI_ICON_CAMERA: return UI_HEX(0x79c0ff);
-    case UI_ICON_LIGHT: case UI_ICON_SUN: case UI_ICON_BULB: case UI_ICON_SPOT: return UI_HEX(0xf2cc60);
-    case UI_ICON_CROWD: return UI_HEX(0xff7b72);
+    case UI_ICON_SCRIPT: case UI_ICON_BEHAVIOUR: return UI_HEX(0x8fd46b);
+    case UI_ICON_CAMERA: return UI_HEX(0x9fb4c8);
+    case UI_ICON_LIGHT: case UI_ICON_SUN: case UI_ICON_BULB: case UI_ICON_SPOT: return UI_HEX(0xf5cf5f);
+    case UI_ICON_CROWD: return UI_HEX(0xff6b5e);
     case UI_ICON_PROBE: return UI_HEX(0x8be9fd);
-    case UI_ICON_COLLIDER: return UI_HEX(0x7ee787);
+    case UI_ICON_COLLIDER: return UI_HEX(0x8fd46b);
     case UI_ICON_RIGIDBODY: return UI_HEX(0xffa657);
-    case UI_ICON_CHARACTER: return UI_HEX(0x79c0ff);
+    case UI_ICON_CHARACTER: return UI_HEX(0x9fb4c8);
     case UI_ICON_PLAY: return UI_HEX(0x3fb950);
     case UI_ICON_TRASH: case UI_ICON_ERROR: return UI_HEX(0xe5534b);
     case UI_ICON_WARNING: return UI_HEX(0xe3b341);
-    case UI_ICON_GAMEPAD: case UI_ICON_KEYBOARD: case UI_ICON_MOUSE: case UI_ICON_TOUCH: return UI_HEX(0xa5d6ff);
-    default: return UI_HEX(0xb1b5bd);
+    case UI_ICON_GAMEPAD: case UI_ICON_KEYBOARD: case UI_ICON_MOUSE: case UI_ICON_TOUCH: return UI_HEX(0xc9b6ae);
+    default: return UI_HEX(0xb8a8a2);
     }
 }
 

@@ -79,30 +79,38 @@ uint32_t ui_lerp_color(uint32_t a, uint32_t b, float t) {
     return r;
 }
 
+/* Inferno: obsidian surfaces with a faint warmth, ember accents, and soft vertical gradients. */
 static void default_theme(UiTheme *t) {
-    t->window = UI_HEX(0x1b1c1f);
-    t->panel = UI_HEX(0x232428);
-    t->panel_alt = UI_HEX(0x28292e);
-    t->header = UI_HEX(0x1f2023);
-    t->field = UI_HEX(0x17181b);
-    t->field_hover = UI_HEX(0x1d1e22);
-    t->border = UI_HEX(0x34363c);
-    t->border_light = UI_HEX(0x45474e);
-    t->text = UI_HEX(0xdfe1e6);
-    t->text_dim = UI_HEX(0x8d919a);
-    t->text_disabled = UI_HEX(0x5c5f66);
-    t->accent = UI_HEX(0x3d7cf5);
-    t->accent_hover = UI_HEX(0x5a92ff);
-    t->accent_text = UI_HEX(0xffffff);
-    t->selection = UI_HEX(0x2b4a86);
-    t->hover = UI_HEX(0x2f3137);
-    t->active = UI_HEX(0x393c43);
-    t->danger = UI_HEX(0xe5534b);
-    t->success = UI_HEX(0x3fb950);
-    t->warning = UI_HEX(0xe3b341);
-    t->axis_x = UI_HEX(0xe0524d);
-    t->axis_y = UI_HEX(0x6cc04a);
-    t->axis_z = UI_HEX(0x4a8cf0);
+    t->window = UI_HEX(0x0d0909);
+    t->window_top = UI_HEX(0x150d0c);
+    t->panel = UI_HEX(0x161011);
+    t->panel_alt = UI_HEX(0x1c1415);
+    t->panel_alt_top = UI_HEX(0x261a19);
+    t->header = UI_HEX(0x110c0c);
+    t->header_top = UI_HEX(0x1b1110);
+    t->field = UI_HEX(0x0b0808);
+    t->field_hover = UI_HEX(0x120d0d);
+    t->border = UI_HEX(0x2c1e1d);
+    t->border_light = UI_HEX(0x4a2c27);
+    t->text = UI_HEX(0xf1e6e1);
+    t->text_dim = UI_HEX(0xa48f89);
+    t->text_disabled = UI_HEX(0x64504c);
+    t->accent = UI_HEX(0xd8391b);
+    t->accent_top = UI_HEX(0xff7a2e);
+    t->accent_hover = UI_HEX(0xec4a20);
+    t->accent_hover_top = UI_HEX(0xff9a45);
+    t->accent_text = UI_HEX(0xfff6ef);
+    t->selection = UI_HEX(0x4e1610);
+    t->selection_top = UI_HEX(0x7a2412);
+    t->hover = UI_HEX(0x241717);
+    t->active = UI_HEX(0x301d1b);
+    t->danger = UI_HEX(0xff3d3d);
+    t->success = UI_HEX(0x7cc24e);
+    t->warning = UI_HEX(0xffb03a);
+    t->axis_x = UI_HEX(0xf0503c);
+    t->axis_y = UI_HEX(0x86c84a);
+    t->axis_z = UI_HEX(0x4f8cf0);
+    t->glow = UI_HEX(0xff5a1f);
 }
 
 const UiTheme *ui_theme(UiCtx *ui) { return &ui->theme; }
@@ -250,21 +258,84 @@ void ui_draw_triangle(UiCtx *ui, float x0, float y0, float x1, float y1, float x
     tri_raw(ui, x0, y0, x1, y1, x2, y2, col);
 }
 
-void ui_draw_rect(UiCtx *ui, float x, float y, float w, float h, uint32_t col, float r) {
-    if (w <= 0 || h <= 0 || !(col >> 24)) return;
+/* colour of a gradient rectangle at a point */
+typedef struct Grad { float x, y, w, h; uint32_t a, b; bool horiz; } Grad;
+static uint32_t grad_at(const Grad *g, float px, float py) {
+    float t = g->horiz ? (px - g->x) / g->w : (py - g->y) / g->h;
+    return ui_lerp_color(g->a, g->b, lx_clampf(t, 0, 1));
+}
+static void grad_quad(UiCtx *ui, const Grad *g, float x0, float y0, float x1, float y1) {
+    begin_cmd(ui, 0);
+    ensure(ui, 4, 6);
+    uint32_t b = (uint32_t)ui->vcount;
+    LxUiVertex *v = ui->verts + ui->vcount;
+    float u = ui->white_u, w = ui->white_v;
+    v[0] = (LxUiVertex){x0, y0, u, w, grad_at(g, x0, y0)};
+    v[1] = (LxUiVertex){x1, y0, u, w, grad_at(g, x1, y0)};
+    v[2] = (LxUiVertex){x1, y1, u, w, grad_at(g, x1, y1)};
+    v[3] = (LxUiVertex){x0, y1, u, w, grad_at(g, x0, y1)};
+    ui->vcount += 4;
+    uint32_t *i = ui->idx + ui->icount;
+    i[0] = b; i[1] = b + 1; i[2] = b + 2; i[3] = b; i[4] = b + 2; i[5] = b + 3;
+    ui->icount += 6;
+    ui->cmds[ui->ccount - 1].index_count += 6;
+}
+static void grad_tri(UiCtx *ui, const Grad *g, float x0, float y0, float x1, float y1, float x2, float y2) {
+    begin_cmd(ui, 0);
+    ensure(ui, 3, 3);
+    uint32_t b = (uint32_t)ui->vcount;
+    LxUiVertex *v = ui->verts + ui->vcount;
+    v[0] = (LxUiVertex){x0, y0, ui->white_u, ui->white_v, grad_at(g, x0, y0)};
+    v[1] = (LxUiVertex){x1, y1, ui->white_u, ui->white_v, grad_at(g, x1, y1)};
+    v[2] = (LxUiVertex){x2, y2, ui->white_u, ui->white_v, grad_at(g, x2, y2)};
+    ui->vcount += 3;
+    ui->idx[ui->icount++] = b;
+    ui->idx[ui->icount++] = b + 1;
+    ui->idx[ui->icount++] = b + 2;
+    ui->cmds[ui->ccount - 1].index_count += 3;
+}
+
+static void rect_impl(UiCtx *ui, const Grad *g, float r) {
+    float x = g->x, y = g->y, w = g->w, h = g->h;
     r = lx_minf(r, lx_minf(w, h) * 0.5f);
-    if (r < 0.75f) { quad_uv(ui, x, y, x + w, y + h, ui->white_u, ui->white_v, ui->white_u, ui->white_v, col, 0); return; }
-    quad_uv(ui, x + r, y, x + w - r, y + h, ui->white_u, ui->white_v, ui->white_u, ui->white_v, col, 0);
-    quad_uv(ui, x, y + r, x + r, y + h - r, ui->white_u, ui->white_v, ui->white_u, ui->white_v, col, 0);
-    quad_uv(ui, x + w - r, y + r, x + w, y + h - r, ui->white_u, ui->white_v, ui->white_u, ui->white_v, col, 0);
+    if (r < 0.75f) { grad_quad(ui, g, x, y, x + w, y + h); return; }
+    grad_quad(ui, g, x + r, y, x + w - r, y + h);
+    grad_quad(ui, g, x, y + r, x + r, y + h - r);
+    grad_quad(ui, g, x + w - r, y + r, x + w, y + h - r);
     const int seg = 5;
     float cx[4] = {x + r, x + w - r, x + w - r, x + r}, cy[4] = {y + r, y + r, y + h - r, y + h - r};
     float start[4] = {LX_PI, 1.5f * LX_PI, 0, 0.5f * LX_PI};
     for (int c = 0; c < 4; c++)
         for (int s = 0; s < seg; s++) {
             float a0 = start[c] + (float)s / seg * 0.5f * LX_PI, a1 = start[c] + (float)(s + 1) / seg * 0.5f * LX_PI;
-            tri_raw(ui, cx[c], cy[c], cx[c] + cosf(a0) * r, cy[c] + sinf(a0) * r, cx[c] + cosf(a1) * r, cy[c] + sinf(a1) * r, col);
+            grad_tri(ui, g, cx[c], cy[c], cx[c] + cosf(a0) * r, cy[c] + sinf(a0) * r, cx[c] + cosf(a1) * r, cy[c] + sinf(a1) * r);
         }
+}
+
+void ui_draw_rect_gradient(UiCtx *ui, float x, float y, float w, float h, uint32_t a, uint32_t b, float r, bool horizontal) {
+    if (w <= 0 || h <= 0 || (!(a >> 24) && !(b >> 24))) return;
+    Grad g = {x, y, w, h, a, b, horizontal};
+    rect_impl(ui, &g, r);
+}
+
+/* Theme surfaces get their gradient automatically: anything filled with one of the theme's surface
+ * colours (taller than a hairline) blends down from its *_top companion. */
+static uint32_t gradient_top(UiCtx *ui, uint32_t col) {
+    const UiTheme *t = &ui->theme;
+    if (col == t->accent) return t->accent_top;
+    if (col == t->accent_hover) return t->accent_hover_top;
+    if (col == t->selection) return t->selection_top;
+    if (col == t->panel_alt) return t->panel_alt_top;
+    if (col == t->header) return t->header_top;
+    if (col == t->window) return t->window_top;
+    return col;
+}
+
+void ui_draw_rect(UiCtx *ui, float x, float y, float w, float h, uint32_t col, float r) {
+    if (w <= 0 || h <= 0 || !(col >> 24)) return;
+    uint32_t top = h > 6.0f ? gradient_top(ui, col) : col;
+    Grad g = {x, y, w, h, top, col, false};
+    rect_impl(ui, &g, r);
 }
 
 void ui_draw_line(UiCtx *ui, float x0, float y0, float x1, float y1, float th, uint32_t col) {
@@ -1946,8 +2017,9 @@ static void draw_node(UiCtx *ui, UiNode *n) {
         draw_field_bg(ui, n);
         float v = n->i ? (float)*n->i : (n->f ? *n->f : 0);
         float tt = lx_clampf((v - n->minv) / lx_maxf(1e-6f, n->maxv - n->minv), 0, 1);
-        ui_draw_rect(ui, n->x + S(ui, 1), n->y + S(ui, 1), (n->cw - S(ui, 2)) * tt, n->ch - S(ui, 2), ui_alpha(t->accent, n->hover ? 0.55f : 0.42f),
-                     S(ui, n->radius));
+        float fa = n->hover ? 0.78f : 0.62f;   /* ember fill: deep red rising to orange */
+        ui_draw_rect_gradient(ui, n->x + S(ui, 1), n->y + S(ui, 1), (n->cw - S(ui, 2)) * tt, n->ch - S(ui, 2), ui_alpha(UI_HEX(0x8a1f12), fa),
+                              ui_alpha(t->accent_top, fa), S(ui, n->radius), true);
         char buf[64];
         value_to_text(n, buf, sizeof buf);
         float tw = ui_text_width(ui, n->font, buf);
