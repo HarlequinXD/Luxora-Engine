@@ -1,0 +1,9 @@
+build/
+build-*/
+out/
+*.ppm
+.vs/
+.vscode/
+android/.gradle/
+android/app/build/
+android/local.properties
