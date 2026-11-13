@@ -494,6 +494,11 @@ static void build_geometry(Ctx *c, Obj *model, Obj *geo, int node_index, Obj **m
     int nbones = 0;
     char (*bone_names)[64] = NULL;
     LxMat4 *inv_bind = NULL;
+    LxMat4 mesh_world = lx_mat4_identity();
+    for (int n = node_index; n >= 0; n = c->m->nodes[n].parent) {
+        const ModelNode *mn = &c->m->nodes[n];
+        mesh_world = lx_mat4_mul(lx_mat4_trs(mn->pos, mn->rot, mn->scale), mesh_world);
+    }
     for (int i = 0; i < c->nconn; i++) {
         if (c->conns[i].parent != geo->id) continue;
         Obj *skin = find_obj(c, c->conns[i].child);
@@ -512,14 +517,15 @@ static void build_geometry(Ctx *c, Obj *model, Obj *geo, int node_index, Obj **m
             if (!bone) continue;
             c->m->nodes[bone->index].bone = true;
             FbxProp *idx = array_of(cl->node, "Indexes"), *wts = array_of(cl->node, "Weights");
-            LxMat4 tr = convert_global(c, read_matrix(cl->node, "Transform"));
             LxMat4 tl = convert_global(c, read_matrix(cl->node, "TransformLink"));
             int bi = nbones++;
             bone_names = lx_realloc(bone_names, sizeof *bone_names * (size_t)nbones);
             inv_bind = lx_realloc(inv_bind, sizeof(LxMat4) * (size_t)nbones);
             lx_strcpy(bone_names[bi], 64, c->m->nodes[bone->index].name);
-            /* stored vertex (node-local incl. geometric) -> bone space at bind */
-            inv_bind[bi] = lx_mat4_mul(lx_mat4_inverse(tl), lx_mat4_mul(tr, lx_mat4_inverse(geom)));
+            /* stored vertex (node-local, geometric transform applied) -> bone space at bind. The cluster's
+             * "Transform" isn't used: exporters disagree on what it holds (Mixamo stores something else), so the
+             * mesh's place at bind is its rest position in the hierarchy - the same as three.js and Blender do. */
+            inv_bind[bi] = lx_mat4_mul(lx_mat4_inverse(tl), mesh_world);
             for (uint32_t k = 0; idx && wts && k < idx->count && k < wts->count; k++) {
                 int cp = (int)fbx_arr_i(idx, k);
                 float w = (float)fbx_arr_d(wts, k);

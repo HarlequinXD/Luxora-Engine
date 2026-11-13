@@ -1143,6 +1143,26 @@ static void test_models(void) {
         CHECK(samba && beta, "Mixamo FBX files import");
         if (samba && beta) {
             CHECK(lx_model_bone_count(samba) > 50 && lx_model_clip_count(samba) == 1 && lx_model_mesh_count(samba) == 2, "Samba Dancing contents");
+            {   /* at rest, skinning leaves every vertex where the file has it */
+                LxScene *ks = lx_scene_create("Skin");
+                lx_model_instantiate(ks, "mixamo.fbx", lx_v3(0, 0, 0), 0);
+                lx_scene_update_skins(ks);
+                double err = 0;
+                int cnt = 0;
+                for (int i = 0; i < lx_scene_entity_count(ks); i++) {
+                    LxEntity x = lx_scene_entity_at(ks, i);
+                    LxMesh *sm = lx_skin_mesh_for(ks, x);
+                    LxMeshRenderer *mr = lx_get_mesh(ks, x);
+                    if (!sm || !mr) continue;
+                    LxMesh *src = lx_asset_mesh(mr->mesh);
+                    for (int k = 0; k < src->lods[0].vertex_count; k += 13, cnt++) {
+                        const LxVertex *p = &sm->lods[0].vertices[k], *q = &src->lods[0].vertices[k];
+                        err += fabs(p->px - q->px) + fabs(p->py - q->py) + fabs(p->pz - q->pz);
+                    }
+                }
+                CHECK(cnt > 1000 && err / cnt < 1e-4, "rest pose skins to the bind pose (mean error %g over %d)", cnt ? err / cnt : 0, cnt);
+                lx_scene_destroy(ks);
+            }
             LxAabb b = lx_model_bounds(samba);
             CHECK(b.max.y > 1.6f && b.max.y < 2.0f, "converted to metres (height %.2f)", b.max.y);
             char a1[LX_HB_COUNT][64], a2[LX_HB_COUNT][64];
