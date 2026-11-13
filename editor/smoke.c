@@ -17,6 +17,23 @@ static UiNode *find_node(UiNode *n, const void *bound_float, const char *text) {
     return NULL;
 }
 
+static void s_game_edit(void) {
+    ED.game_view = true;
+    SMOKE_CHECK(ed_viewport_showing_game(), "Game view shows the main camera in edit mode");
+}
+static void s_game_back(void) {
+    ED.game_view = false;
+    SMOKE_CHECK(!ed_viewport_showing_game(), "Scene view returns to the editor camera");
+}
+static void s_game_play(void) {
+    ed_play();
+    SMOKE_CHECK(ED.game_view && ed_viewport_showing_game(), "Play switches to the Game view");
+}
+static void s_game_stop(void) {
+    ed_stop();
+    SMOKE_CHECK(!ED.game_view, "Stop restores the Scene view");
+}
+
 static UiNode *g_first_widget;
 static void s_mat_select(void) {
     char p[LX_PATH_MAX];
@@ -158,6 +175,10 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {190, s_new_scene, "new scene"},
     {196, s_reopen, "reopen startup scene"},
     {202, s_layout, "rebuild layout"},
+    {206, s_game_edit, "game view in edit mode"},
+    {209, s_game_back, "scene view"},
+    {211, s_game_play, "play switches to game view"},
+    {214, s_game_stop, "stop restores scene view"},
 };
 
 bool ed_smoke_step(int frame) {
@@ -166,5 +187,5 @@ bool ed_smoke_step(int frame) {
             LX_INFO("[smoke] %s", STEPS[i].what);
             if (ED.mode == ED_MODE_EDITOR) STEPS[i].fn();
         }
-    return frame < 215;
+    return frame < 220;
 }

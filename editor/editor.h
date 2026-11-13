@@ -53,6 +53,7 @@ typedef struct Editor {
     bool gizmo_local, show_grid, show_icons, snap, show_stats;
     float snap_move, snap_rotate, snap_scale;
     bool game_view;                  /* render through the scene's main camera */
+    bool game_view_before_play;
 
     /* panels */
     UiNode *root, *menubar, *toolbar, *status;
@@ -99,6 +100,7 @@ void ed_close_project(void);
 void ed_build_shell(void);
 void ed_update(float dt);
 void ed_render(void);
+bool ed_viewport_showing_game(void);
 void ed_shortcuts(void);
 void ed_save_prefs(void);
 void ed_load_prefs(void);

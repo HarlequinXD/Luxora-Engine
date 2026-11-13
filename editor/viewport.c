@@ -19,6 +19,10 @@ static struct {
     LxEntity hover_icon;
 } V;
 
+/* The Game view looks through the scene's main camera, in edit mode and while playing. */
+static bool showing_game(void) { return ED.game_view && ED.scene && lx_scene_main_camera(ED.scene) != 0; }
+bool ed_viewport_showing_game(void) { return showing_game(); }
+
 /* ---------------- math helpers ---------------- */
 static LxQuat cam_rot(void) { return lx_quat_euler_deg(lx_v3(ED.cam_pitch, ED.cam_yaw, 0)); }
 
@@ -252,7 +256,7 @@ static void viewport_frame(UiNode *n) {
     V.view = n;
     LxRenderView rv;
     editor_view(&rv, (int)n->cw, (int)n->ch);
-    bool game = ED.game_view && ED.play != ED_EDIT;
+    bool game = showing_game();
     if (game) {
         LxEntity cam = lx_scene_main_camera(ED.scene);
         if (!cam || !lx_camera_view(ED.scene, cam, (int)n->cw, (int)n->ch, &rv)) game = false;
@@ -261,7 +265,7 @@ static void viewport_frame(UiNode *n) {
     V.proj_m = rv.proj;
     V.vp = lx_mat4_mul(rv.proj, rv.view);
     V.eye = rv.eye;
-    if (game) return; /* the game owns input while it is shown */
+    if (game) return; /* the Game view is what the player sees: no editor camera, picking or gizmos */
 
     bool inside = ui_is_inside(ui, n) && !ui_has_modal(ui) && !ui_popup_open(ui);
     bool hot = inside && (ui_is_hot(ui, n) || ui_active(ui) == n);
@@ -461,13 +465,26 @@ static void viewport_draw(UiNode *n, UiCtx *ui) {
     if (!ED.viewport_rt) return;
     ui_push_clip(ui, n->x, n->y, n->cw, n->ch);
     ui_draw_image(ui, lx_render_target_texture(ED.viewport_rt), n->x, n->y, n->cw, n->ch);
-    bool game = ED.game_view && ED.play != ED_EDIT;
+    bool game = showing_game();
     if (!game) {
         draw_icons(ui);
         draw_gizmo(ui);
         draw_axis_triad(ui, n);
     }
     const UiTheme *t = ui_theme(ui);
+    float k = ui_scale(ui);
+    if (ED.game_view && ED.play == ED_EDIT) {
+        /* badge naming the camera we're looking through, or why we can't */
+        LxEntity cam = lx_scene_main_camera(ED.scene);
+        char msg[LX_NAME_MAX + 48];
+        if (cam) snprintf(msg, sizeof msg, "GAME VIEW  ·  %s", lx_entity_name(ED.scene, cam));
+        else snprintf(msg, sizeof msg, "No camera in this scene - add one with Create > Camera");
+        float tw = ui_text_width(ui, UI_FONT_BOLD, msg) + 44 * k;
+        float bx = n->x + (n->cw - tw) * 0.5f, by = n->y + 8 * k;
+        ui_draw_rect(ui, bx, by, tw, 26 * k, cam ? UI_RGBA(20, 22, 26, 210) : ui_alpha(t->warning, 0.92f), 13 * k);
+        ui_draw_icon(ui, cam ? UI_ICON_CAMERA : UI_ICON_WARNING, bx + 12 * k, by + 5 * k, 16 * k, cam ? ed_color_for_icon(UI_ICON_CAMERA) : UI_HEX(0x101113));
+        ui_draw_text(ui, UI_FONT_BOLD, bx + 34 * k, by + (26 * k - ui_line_height(ui, UI_FONT_BOLD)) * 0.5f, msg, cam ? t->text : UI_HEX(0x101113));
+    }
     if (ED.play != ED_EDIT) {
         ui_draw_border(ui, n->x, n->y, n->cw, n->ch, ED.play == ED_PAUSED ? t->warning : t->success, 0, 2 * ui_scale(ui));
         const char *msg = ED.play == ED_PAUSED ? "PAUSED" : (game ? "PLAYING · Game view" : "PLAYING · Scene view");
@@ -560,7 +577,7 @@ UiNode *ed_viewport_panel(UiNode *parent) {
     b->tag = 1;
     b->h = 26;
     b->bg_active = t->selection;
-    lx_strcpy(b->tooltip, sizeof b->tooltip, "View through the scene's main camera while playing");
+    lx_strcpy(b->tooltip, sizeof b->tooltip, "See exactly what the player sees through the scene's main camera");
     ui_separator(ui, bar)->w = 10;
     UiNode *spd = ui_label(ui, bar, "Speed");
     spd->font = UI_FONT_SMALL;
@@ -598,7 +615,7 @@ void ed_render(void) {
     if (!ED.viewport_rt) ED.viewport_rt = lx_render_target_create(w, h);
     else lx_render_target_resize(ED.viewport_rt, w, h);
     LxRenderView rv;
-    bool game = ED.game_view && ED.play != ED_EDIT;
+    bool game = showing_game();
     if (!(game && lx_camera_view(ED.scene, lx_scene_main_camera(ED.scene), w, h, &rv))) {
         editor_view(&rv, w, h);
         rv.draw_grid = ED.show_grid;

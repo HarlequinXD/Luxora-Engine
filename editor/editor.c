@@ -514,7 +514,8 @@ void ed_play(void) {
     if (ED.change_pending) ed_commit();
     ED.play_snapshot = lx_scene_serialize(ED.scene);
     ED.play = ED_PLAYING;
-    ED.game_view = lx_scene_main_camera(ED.scene) != 0;
+    ED.game_view_before_play = ED.game_view;
+    ED.game_view = lx_scene_main_camera(ED.scene) != 0; /* play shows the game; Stop restores the previous view */
     LX_INFO("Play mode started");
     ed_update_title();
 }
@@ -542,7 +543,7 @@ void ed_stop(void) {
     lx_free(sel);
     ED.dirty = dirty;
     ED.play = ED_EDIT;
-    ED.game_view = false;
+    ED.game_view = ED.game_view_before_play;
     ED.hierarchy_hash = 0;
     ED.inspector_dirty = true;
     lx_gi_reset();
