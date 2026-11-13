@@ -418,9 +418,9 @@ void ed_project_manager_build(void) {
     brand->gap = 10;
     brand->cross_align = UI_ALIGN_CENTER;
     ed_app_icon(brand, 36);
-    UiNode *name = ui_label(ui, brand, "LUXORA");
+    UiNode *name = ui_label(ui, brand, "INFERNO");
     name->font = UI_FONT_TITLE;
-    UiNode *ver = ui_label(ui, side, "Engine " LX_VERSION_STRING " · Vulkan");
+    UiNode *ver = ui_label(ui, side, "Luxora Engine " LX_VERSION_STRING " · Vulkan");
     ver->font = UI_FONT_SMALL;
     ver->fg = t->text_dim;
     ver->h = 26;
