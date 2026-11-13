@@ -245,6 +245,11 @@ void ed_open_project(const char *root) {
     ED.project = p;
     ED.has_project = true;
     lx_engine_set_project(&p);
+    {   /* play mode keeps its save data inside the project, not with the real game's */
+        char save[LX_PATH_MAX];
+        lx_path_join(save, sizeof save, p.root, "Library/SaveData.txt");
+        lx_save_set_file(save);
+    }
     lx_renderer_set_vsync(p.graphics.vsync);
     ed_add_recent(p.root);
     lx_strcpy(ED.content_dir, sizeof ED.content_dir, p.assets);
@@ -592,7 +597,7 @@ void ed_select_asset(const char *abs_path) {
     if (ED.inspector_tabs) ED.inspector_tabs->tab_index = 0;
 }
 
-static LxVec3 spawn_point(void) {
+LxVec3 ed_spawn_point(void) {
     /* in front of the editor camera, on the ground if looking down */
     LxQuat q = lx_quat_euler_deg(lx_v3(ED.cam_pitch, ED.cam_yaw, 0));
     LxVec3 f = lx_quat_rotate(q, lx_v3(0, 0, -1));
@@ -609,7 +614,7 @@ static LxVec3 spawn_point(void) {
 LxEntity ed_create(const char *what) {
     if (!ED.scene) return 0;
     LxScene *s = ED.scene;
-    LxVec3 at = spawn_point();
+    LxVec3 at = ed_spawn_point();
     LxEntity e = 0;
     static const char *prims[] = {"Cube", "Sphere", "Plane", "Cylinder", "Capsule"};
     for (int i = 0; i < 5; i++)

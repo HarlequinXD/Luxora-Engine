@@ -36,7 +36,7 @@ set(LUXORA_SOURCES
   src/physics/physics.c
   src/gameui/gameui.c
   src/script/module.c src/script/script_api.c
-  src/scene/scene.c src/scene/serialize.c src/scene/behaviours.c
+  src/scene/scene.c src/scene/serialize.c src/scene/behaviours.c src/scene/gameplay.c
   src/project/project.c
   src/input/input.c
   src/engine.c)

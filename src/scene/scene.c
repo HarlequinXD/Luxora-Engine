@@ -65,6 +65,7 @@ void lx_scene_destroy(LxScene *s) {
     if (!s) return;
     lx_scene_stop_simulation(s);
     lx_physics_world_free(s);
+    lx_gameplay_free(s);
     for (int i = 1; i < s->count; i++)
         if (s->entities[i].crowd_sim) lx_crowd_destroy(s->entities[i].crowd_sim);
     lx_free(s->entities);
@@ -136,7 +137,10 @@ static void unlink_from_parent(LxScene *s, LxEntityData *d) {
 void lx_entity_destroy(LxScene *s, LxEntity e) {
     LxEntityData *d = lx_entity_data(s, e);
     if (!d) return;
+    if (lx_gameplay_defer_destroy(s, e)) return;   /* during a frame: removed when it ends */
+    lx_gameplay_entity_destroyed(s, e);
     while (d->first_child) lx_entity_destroy(s, d->first_child);
+    d = lx_entity_data(s, e);
     if (d->binst.desc && d->binst.desc->on_destroy && d->binst.started) {
         LxBehaviourCtx ctx = {s, e, d->binst.state, d->behaviour.params};
         d->binst.desc->on_destroy(&ctx);
@@ -171,6 +175,8 @@ static void copy_components(LxEntityData *dst, const LxEntityData *src) {
     dst->collider = src->collider;
     dst->body = src->body;
     dst->character = src->character;
+    memcpy(dst->tag, src->tag, sizeof dst->tag);
+    memcpy(dst->prefab, src->prefab, sizeof dst->prefab);
 }
 
 static LxEntity duplicate_rec(LxScene *s, LxEntity e, LxEntity parent) {

@@ -217,6 +217,14 @@ void ed_prompt(const char *title, const char *label, const char *initial, void (
 
 
 void ed_materials_flush(bool force);
+LxVec3 ed_spawn_point(void);              /* in front of the editor camera, on the ground */
+/* prefabs.c */
+LxEntity ed_prefab_root(LxEntity e);
+bool ed_prefab_create(LxEntity e, const char *dir);
+LxEntity ed_prefab_place(const char *ref, LxVec3 pos, LxEntity parent);
+void ed_prefab_apply(LxEntity e);
+void ed_prefab_unlink(LxEntity e);
+void ed_prefab_select_asset(LxEntity e);
 void ed_remember_scene(void);           /* editor.c: reopen this scene next time */   /* panels.c: write edited materials */
 
 /* scripts.c: compiling Assets/Scripts with the built-in compiler */

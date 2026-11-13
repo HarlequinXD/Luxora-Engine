@@ -19,6 +19,7 @@ uint32_t ed_color_for_icon(UiIcon icon) {
     case UI_ICON_LIGHT: case UI_ICON_SUN: case UI_ICON_BULB: case UI_ICON_SPOT: return UI_HEX(0xf5cf5f);
     case UI_ICON_CROWD: return UI_HEX(0xff6b5e);
     case UI_ICON_PROBE: return UI_HEX(0x8be9fd);
+    case UI_ICON_PREFAB: return UI_HEX(0x6fb7ff);
     case UI_ICON_COLLIDER: return UI_HEX(0x8fd46b);
     case UI_ICON_RIGIDBODY: return UI_HEX(0xffa657);
     case UI_ICON_CHARACTER: return UI_HEX(0x9fb4c8);
@@ -82,6 +83,7 @@ static const char *drag_type_for(UiIcon icon) {
     case UI_ICON_SOUND: return "sound";
     case UI_ICON_SCRIPT: return "script";
     case UI_ICON_FOLDER: return "folder";
+    case UI_ICON_PREFAB: return "prefab";
     default: return "file";
     }
 }
@@ -169,6 +171,22 @@ static void ctx_create_child(UiNode *n) {
     }
 }
 
+static void prefab_dir(char *out, size_t cap) {
+    /* the folder open in the Content Browser, else Assets/Prefabs */
+    if (ED.content_dir[0] && strcmp(ED.content_dir, ED.project.assets)) lx_strcpy(out, cap, ED.content_dir);
+    else lx_path_join(out, cap, ED.project.assets, "Prefabs");
+    lx_mkdir_p(out);
+}
+static void ctx_save_prefab(UiNode *n) {
+    LX_UNUSED(n);
+    char dir[LX_PATH_MAX];
+    prefab_dir(dir, sizeof dir);
+    ed_prefab_create(g_ctx_entity, dir);
+}
+static void ctx_apply_prefab(UiNode *n) { LX_UNUSED(n); ed_prefab_apply(g_ctx_entity); }
+static void ctx_select_prefab(UiNode *n) { LX_UNUSED(n); ed_prefab_select_asset(g_ctx_entity); }
+static void ctx_unlink_prefab(UiNode *n) { LX_UNUSED(n); ed_prefab_unlink(g_ctx_entity); }
+
 static void row_menu(UiNode *n) {
     g_ctx_entity = (LxEntity)n->tag;
     ed_select(g_ctx_entity);
@@ -179,6 +197,14 @@ static void row_menu(UiNode *n) {
     it = ui_menu_item(ED.ui, p, "Duplicate", "Ctrl+D", ctx_duplicate); it->icon = UI_ICON_COPY;
     it = ui_menu_item(ED.ui, p, "Focus", "F", ctx_focus); it->icon = UI_ICON_FOCUS;
     if (lx_entity_parent(ED.scene, g_ctx_entity)) { it = ui_menu_item(ED.ui, p, "Move to Root", NULL, ctx_unparent); it->icon = UI_ICON_UP; }
+    ui_menu_separator(ED.ui, p);
+    uint32_t pc = ed_color_for_icon(UI_ICON_PREFAB);
+    it = ui_menu_item(ED.ui, p, "Save as Prefab", NULL, ctx_save_prefab); it->icon = UI_ICON_PREFAB; it->icon_color = pc;
+    if (ed_prefab_root(g_ctx_entity)) {
+        it = ui_menu_item(ED.ui, p, "Apply to Prefab", NULL, ctx_apply_prefab); it->icon = UI_ICON_SAVE;
+        it = ui_menu_item(ED.ui, p, "Select Prefab Asset", NULL, ctx_select_prefab); it->icon = UI_ICON_PREFAB; it->icon_color = pc;
+        it = ui_menu_item(ED.ui, p, "Unlink Prefab", NULL, ctx_unlink_prefab); it->icon = UI_ICON_CLOSE;
+    }
     ui_menu_separator(ED.ui, p);
     static const char *kids[] = {"Empty", "Cube", "Sphere", "Point Light", "Audio Source"};
     static const UiIcon kid_icons[] = {UI_ICON_ENTITY, UI_ICON_CUBE, UI_ICON_SPHERE, UI_ICON_BULB, UI_ICON_SPEAKER};
@@ -213,11 +239,14 @@ static void row_drop(UiNode *n, const char *type, const char *payload) {
     } else if (!strcmp(type, "material")) {
         LxMeshRenderer *mr = lx_get_mesh(ED.scene, target);
         if (mr) { lx_strcpy(mr->material, sizeof mr->material, payload); ED.inspector_dirty = true; ed_mark_changed(); ed_commit(); }
+    } else if (!strcmp(type, "prefab")) {
+        ed_prefab_place(payload, lx_v3(0, 0, 0), target);   /* as a child of the row it's dropped on */
     }
 }
 
 static void list_drop(UiNode *n, const char *type, const char *payload) {
     LX_UNUSED(n);
+    if (!strcmp(type, "prefab")) { ed_prefab_place(payload, ed_spawn_point(), 0); return; }
     if (!strcmp(type, "entity")) {
         LxEntity e = (LxEntity)strtoul(payload, NULL, 10);
         if (e && lx_entity_valid(ED.scene, e) && lx_entity_parent(ED.scene, e)) {
@@ -256,6 +285,7 @@ static uint64_t hierarchy_hash(void) {
         h = (h ^ lx_entity_next_sibling(s, e)) * 1099511628211ull;
         h = (h ^ (uint64_t)lx_entity_active(s, e)) * 1099511628211ull;
         h = (h ^ lx_entity_components(s, e)) * 1099511628211ull;
+        h = (h ^ (uint64_t)(lx_entity_prefab(s, e)[0] != 0)) * 1099511628211ull;
         for (const char *c = name; *c; c++) h = (h ^ (uint8_t)*c) * 1099511628211ull;
     }
     for (const char *c = ED.hierarchy_search; *c; c++) h = (h ^ (uint8_t)*c) * 1099511628211ull;
@@ -290,7 +320,7 @@ static void add_rows(UiNode *list, LxEntity e, int depth) {
     row->drag_type = "entity";
     snprintf(row->drag_payload, sizeof row->drag_payload, "%u", e);
     lx_strcpy(row->text, sizeof row->text, lx_entity_name(s, e));
-    row->accept = "entity,material";
+    row->accept = "entity,material,prefab";
     row->on_drop = row_drop;
     row->selected = e == ED.selected;
     row->cross_align = UI_ALIGN_CENTER;
@@ -306,12 +336,14 @@ static void add_rows(UiNode *list, LxEntity e, int depth) {
     chev->bg = 0;
     if (!first_child) chev->disabled = true;
     bool active = lx_entity_active(s, e);
-    UiIcon icon = ed_icon_for_entity(s, e);
+    bool prefab = lx_entity_prefab(s, e)[0] != 0;
+    UiIcon icon = prefab ? UI_ICON_PREFAB : ed_icon_for_entity(s, e);
     UiNode *l = ui_label(ui, row, lx_entity_name(s, e));
     l->icon = icon;
     l->icon_size = 15;
     l->icon_color = active ? ed_color_for_icon(icon) : t->text_disabled;
-    l->fg = active ? t->text : t->text_disabled;
+    l->fg = !active ? t->text_disabled : prefab ? ui_lerp_color(t->text, ed_color_for_icon(UI_ICON_PREFAB), 0.55f) : t->text;
+    if (prefab) snprintf(l->tooltip, sizeof l->tooltip, "Prefab: %s", lx_entity_prefab(s, e));
     l->grow = 1;
     UiNode *eye = ui_icon_button(ui, row, active ? UI_ICON_EYE : UI_ICON_EYE_OFF, active ? "Disable" : "Enable", row_toggle_active);
     eye->tag = (intptr_t)e;
@@ -342,7 +374,7 @@ static void hierarchy_frame(UiNode *list) {
     for (LxEntity r = lx_scene_root_first(ED.scene); r; r = lx_entity_next_sibling(ED.scene, r)) add_rows(list, r, 0);
     UiNode *tail = ui_box(ED.ui, list, UI_COL);
     tail->h = 60;
-    tail->accept = "entity,mesh";
+    tail->accept = "entity,mesh,prefab";
     tail->on_drop = list_drop;
     tail->on_right_click = list_menu;
 }
@@ -373,7 +405,7 @@ UiNode *ed_hierarchy_panel(UiNode *parent) {
     ui_pad(list, 4, 2, 4, 4);
     list->gap = 1;
     list->on_frame = hierarchy_frame;
-    list->accept = "entity,mesh";
+    list->accept = "entity,mesh,prefab";
     list->on_drop = list_drop;
     list->on_right_click = list_menu;
     ED.hierarchy_list = list;
@@ -645,6 +677,10 @@ static bool material_is_file(const char *ref);
 static void build_material_editor(UiNode *parent, const char *ref);
 static void make_material_editable(UiNode *n);
 
+static void insp_prefab_select(UiNode *n) { LX_UNUSED(n); ed_prefab_select_asset(ED.inspector_entity); }
+static void insp_prefab_apply(UiNode *n) { LX_UNUSED(n); ed_prefab_apply(ED.inspector_entity); }
+static void insp_prefab_unlink(UiNode *n) { LX_UNUSED(n); ed_prefab_unlink(ED.inspector_entity); }
+
 static void build_entity_inspector(UiNode *body) {
     UiCtx *ui = ED.ui;
     const UiTheme *t = ui_theme(ui);
@@ -671,6 +707,41 @@ static void build_entity_inspector(UiNode *body) {
     name->h = 28;
     name->font = UI_FONT_BOLD;
     name->on_change = name_changed;
+
+    /* tag */
+    UiNode *tag_row = ed_prop_row(body, "Tag");
+    ui_pad(tag_row, 12, 0, 10, 0);
+    UiNode *tag = ui_textfield(ui, tag_row, d->tag, sizeof d->tag);
+    tag->grow = 1;
+    tag->h = 22;
+    lx_strcpy(tag->hint, sizeof tag->hint, "Untagged");
+    lx_strcpy(tag->tooltip, sizeof tag->tooltip, "A label scripts can find objects by (lx_entity_find_with_tag), e.g. Player, Enemy, Pickup");
+    tag->on_change = ed_field_changed;
+
+    /* prefab instance: where it came from, and apply / select / unlink */
+    LxEntity proot = ed_prefab_root(e);
+    if (proot) {
+        UiNode *pb = ui_box(ui, body, UI_ROW);
+        pb->h = 30;
+        ui_pad(pb, 10, 3, 10, 3);
+        pb->gap = 4;
+        pb->cross_align = UI_ALIGN_CENTER;
+        pb->bg = ui_alpha(ed_color_for_icon(UI_ICON_PREFAB), 0.12f);
+        pb->radius = 5;
+        UiNode *pl = ui_label(ui, pb, lx_path_filename(lx_entity_prefab(s, proot)));
+        pl->icon = UI_ICON_PREFAB;
+        pl->icon_color = ed_color_for_icon(UI_ICON_PREFAB);
+        pl->grow = 1;
+        snprintf(pl->tooltip, sizeof pl->tooltip, "%s %s", proot == e ? "Prefab:" : "Part of prefab", lx_entity_prefab(s, proot));
+        UiNode *b = ui_button(ui, pb, "Select", insp_prefab_select);
+        b->h = 24;
+        b = ui_button(ui, pb, "Apply", insp_prefab_apply);
+        b->h = 24;
+        lx_strcpy(b->tooltip, sizeof b->tooltip, "Save these changes to the prefab and every copy of it in the scene");
+        b = ui_icon_button(ui, pb, UI_ICON_CLOSE, "Unlink from the prefab", insp_prefab_unlink);
+        b->w = 24;
+        b->h = 24;
+    }
 
     UiNode *sec = comp_section(body, UI_ICON_MOVE, "Transform", &g_open_transform, 0);
     ed_vec3_row(sec, "Position", &d->position.x, 0.05f, transform_changed);
@@ -1039,6 +1110,8 @@ static void make_material_editable(UiNode *n) {
 
 static void open_external(UiNode *n) { LX_UNUSED(n); lx_platform_open_folder(ED.inspector_asset); }
 
+static void prefab_add_click(UiNode *n) { ed_prefab_place(n->path, ed_spawn_point(), 0); }
+
 static void build_asset_inspector(UiNode *body) {
     UiCtx *ui = ED.ui;
     const UiTheme *t = ui_theme(ui);
@@ -1062,7 +1135,57 @@ static void build_asset_inspector(UiNode *body) {
     pl->font = UI_FONT_SMALL;
     pl->fg = t->text_dim;
     ui_pad(pl, 12, 0, 8, 0);
-    if (icon == UI_ICON_MATERIAL) {
+    if (icon == UI_ICON_PREFAB) {
+        /* what's inside: every object (indented by depth) and its components */
+        static bool g_open_prefab = true;
+        UiNode *sec = ed_section(body, UI_ICON_PREFAB, "Prefab", &g_open_prefab, NULL);
+        char *text = lx_file_read(path, NULL);
+        LxScene *tmp = lx_scene_create("prefab");
+        LxEntity root = text ? lx_scene_deserialize_into(tmp, text, 0) : 0;
+        lx_free(text);
+        int objects = lx_scene_entity_count(tmp);
+        for (int i = 0; i < objects && i < 40; i++) {
+            LxEntity x = lx_scene_entity_at(tmp, i);
+            int depth = 0;
+            for (LxEntity p = lx_entity_parent(tmp, x); p; p = lx_entity_parent(tmp, p)) depth++;
+            UiNode *row = ui_label(ui, sec, lx_entity_name(tmp, x));
+            row->icon = ed_icon_for_entity(tmp, x);
+            row->icon_color = ed_color_for_icon(row->icon);
+            ui_pad(row, depth * 14.0f, 0, 0, 0);
+            row->h = 22;
+            uint32_t c = lx_entity_components(tmp, x);
+            char comps[160] = "";
+            static const struct { uint32_t bit; const char *name; } K[] = {
+                {LX_COMP_MESH, "Mesh"}, {LX_COMP_LIGHT, "Light"}, {LX_COMP_CAMERA, "Camera"}, {LX_COMP_AUDIO_SOURCE, "Audio"},
+                {LX_COMP_BEHAVIOUR, "Behaviour"}, {LX_COMP_COLLIDER, "Collider"}, {LX_COMP_RIGIDBODY, "Rigidbody"},
+                {LX_COMP_CHARACTER, "Character"}, {LX_COMP_REFLECTION_PROBE, "Probe"}, {LX_COMP_CROWD, "Crowd"}};
+            for (size_t k = 0; k < sizeof K / sizeof K[0]; k++)
+                if (c & K[k].bit) {
+                    if (comps[0]) lx_strcpy(comps + strlen(comps), sizeof comps - strlen(comps), ", ");
+                    lx_strcpy(comps + strlen(comps), sizeof comps - strlen(comps), K[k].name);
+                }
+            lx_strcpy(row->tooltip, sizeof row->tooltip, comps[0] ? comps : "No components");
+        }
+        UiNode *info = ui_label(ui, sec, "");
+        ui_set_text(info, "%d object%s%s%s", objects, objects == 1 ? "" : "s", root && lx_entity_tag(tmp, root)[0] ? " · tag " : "",
+                    root ? lx_entity_tag(tmp, root) : "");
+        info->font = UI_FONT_SMALL;
+        info->fg = t->text_dim;
+        lx_scene_destroy(tmp);
+        UiNode *row = ui_box(ui, body, UI_ROW);
+        ui_pad(row, 12, 8, 12, 8);
+        row->h = 46;
+        UiNode *b = ui_button(ui, row, "Add to Scene", prefab_add_click);
+        b->icon = UI_ICON_PLUS;
+        b->grow = 1;
+        b->bg = t->accent;
+        b->fg = t->accent_text;
+        lx_strcpy(b->path, sizeof b->path, ref);
+        UiNode *hint = ui_label(ui, body, "Or drag it into the Scene view or Hierarchy.");
+        hint->font = UI_FONT_SMALL;
+        hint->fg = t->text_dim;
+        ui_pad(hint, 12, 0, 8, 0);
+    } else if (icon == UI_ICON_MATERIAL) {
         UiNode *sec = ed_section(body, UI_ICON_MATERIAL, "Material", &g_open_material, NULL);
         build_material_editor(sec, ref);
         UiNode *hint = ui_label(ui, body, "Changes show instantly and are saved automatically.");
@@ -1445,6 +1568,10 @@ static void tile_open(UiNode *n) {
         if (ED.play != ED_EDIT) { ui_notify(ED.ui, "Stop play mode first"); return; }
         ed_relative_asset(g_scene_to_open, sizeof g_scene_to_open, path);
         if (ed_confirm_discard(open_scene_now)) open_scene_now();
+    } else if (icon == UI_ICON_PREFAB) {
+        char ref[LX_REF_MAX];
+        ed_relative_asset(ref, sizeof ref, path);
+        ed_prefab_place(ref, ed_spawn_point(), 0);
     } else if (icon == UI_ICON_SCRIPT || icon == UI_ICON_FILE) lx_platform_open_folder(path);
     else tile_click(n);
 }
@@ -1593,9 +1720,20 @@ static void tile_menu(UiNode *n) {
     it = ui_menu_item(ED.ui, p, "Delete", NULL, m_delete_asset); it->icon = UI_ICON_TRASH; it->icon_color = ui_theme(ED.ui)->danger;
 }
 
+static void grid_drop(UiNode *n, const char *type, const char *payload) {
+    LX_UNUSED(n);
+    if (strcmp(type, "entity")) return;
+    LxEntity e = (LxEntity)strtoul(payload, NULL, 10);
+    ed_prefab_create(e, ED.content_dir);
+}
+
 static void folder_drop(UiNode *n, const char *type, const char *payload) {
-    LX_UNUSED(type);
     char from[LX_PATH_MAX], dir[LX_PATH_MAX], to[LX_PATH_MAX];
+    if (!strcmp(type, "entity")) {   /* an object from the Hierarchy: save it as a prefab in this folder */
+        lx_path_join(dir, sizeof dir, ED.content_dir, n->text);
+        ed_prefab_create((LxEntity)strtoul(payload, NULL, 10), dir);
+        return;
+    }
     lx_asset_path(from, sizeof from, payload);
     lx_path_join(dir, sizeof dir, ED.content_dir, n->text);
     lx_path_join(to, sizeof to, dir, lx_path_filename(from));
@@ -1713,7 +1851,7 @@ static void content_frame(UiNode *panel) {
         lx_strcpy(tl->drag_payload, sizeof tl->drag_payload, ref);
         tl->selected = !strcmp(ED.selected_asset, full);
         lx_strcpy(tl->tooltip, sizeof tl->tooltip, ref);
-        if (e[i].is_dir) { tl->accept = "mesh,material,texture,sound,scene,script,file,folder"; tl->on_drop = folder_drop; }
+        if (e[i].is_dir) { tl->accept = "mesh,material,texture,sound,scene,script,file,folder,prefab,entity"; tl->on_drop = folder_drop; }
         float thumb_aspect = 1.0f;
         uint32_t thumb = icon == UI_ICON_TEXTURE ? thumbnail(full, e[i].size, &thumb_aspect) : 0;
         if (ED.content_list_view) {
@@ -1818,6 +1956,8 @@ UiNode *ed_content_panel(UiNode *parent) {
     ui_pad(grid, 8, 8, 8, 8);
     grid->gap = 6;
     grid->on_right_click = grid_menu;
+    grid->accept = "entity";           /* drop objects from the Hierarchy here to make prefabs */
+    grid->on_drop = grid_drop;
     ED.content_grid = grid;
     ED.content_dirty = true;
     return p;

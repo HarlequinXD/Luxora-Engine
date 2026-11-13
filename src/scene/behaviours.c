@@ -206,9 +206,12 @@ static void late_update(LxScene *s, float dt) {
     }
 }
 
-void lx_scene_simulate(LxScene *s, float dt) {
+void lx_scene_simulate(LxScene *s, float real_dt) {
+    float dt = lx_gameplay_scale_dt(real_dt);   /* time scale: pause, slow motion */
     s->simulating = true;
     s->last_dt = dt;
+    s->in_update = true;
+    lx_gameplay_begin_frame(s, dt, real_dt);
     int n = s->count;
     for (int i = 1; i < n; i++) {
         LxEntityData *d = &s->entities[i];
@@ -251,9 +254,12 @@ void lx_scene_simulate(LxScene *s, float dt) {
             lx_crowd_update(c, dt);
         }
     }
+    lx_gameplay_after_update(s, dt);
     lx_scene_update_transforms(s);
     lx_physics_simulate(s, dt);
     late_update(s, dt);
+    s->in_update = false;
+    lx_gameplay_end_frame(s);
     lx_scene_update_transforms(s);
 }
 
@@ -270,5 +276,7 @@ void lx_scene_stop_simulation(LxScene *s) {
         memset(&d->phys, 0, sizeof d->phys);
     }
     lx_physics_world_free(s);
+    lx_gameplay_free(s);
+    lx_time_set_scale(1.0f);
     s->simulating = false;
 }

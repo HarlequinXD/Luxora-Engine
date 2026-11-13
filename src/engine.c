@@ -17,7 +17,35 @@ bool lx_load_scene(const char *ref) {
     return true;
 }
 
+/* where a game keeps its save data: the user's app-data folder, per game */
+static void default_save_file(const LxProject *p) {
+    char game[LX_NAME_MAX], company[LX_NAME_MAX], base[LX_PATH_MAX], dir[LX_PATH_MAX], path[LX_PATH_MAX];
+    const char *src[2] = {p->name[0] ? p->name : "Game", p->company[0] ? p->company : "Luxora"};
+    char *dst[2] = {game, company};
+    for (int k = 0; k < 2; k++) {
+        size_t n = 0;
+        for (const char *c = src[k]; *c && n < LX_NAME_MAX - 1; c++)
+            dst[k][n++] = (strchr("\\/:*?\"<>|", *c) || (unsigned char)*c < 32) ? '_' : *c;
+        dst[k][n] = 0;
+    }
+#if LX_OS_WINDOWS
+    const char *app = getenv("APPDATA");
+    snprintf(base, sizeof base, "%s/%s", app && app[0] ? app : lx_home_dir(), company);
+#elif LX_OS_ANDROID
+    lx_strcpy(base, sizeof base, lx_home_dir());
+#else
+    const char *xdg = getenv("XDG_DATA_HOME");
+    if (xdg && xdg[0]) lx_strcpy(base, sizeof base, xdg);
+    else lx_path_join(base, sizeof base, lx_home_dir(), ".local/share");
+#endif
+    lx_path_join(dir, sizeof dir, base, game);
+    lx_path_join(path, sizeof path, dir, "save.txt");
+    lx_save_set_file(path);
+}
+
 void lx_engine_set_project(const LxProject *p) {
+    lx_prefab_cache_clear();
+    default_save_file(p);
     E.project = *p;
     E.has_project = true;
     lx_assets_set_root(p->assets);

@@ -869,6 +869,140 @@ static void test_scripts(void) {
 }
 #endif
 
+/* ---- gameplay: prefabs, tags, messages, timers, tweens, time scale, deferred destroy, save data ---- */
+typedef struct MsgState { int got; float last; char name[32]; int updates; bool destroy_self; } MsgState;
+static void msg_on(LxBehaviourCtx *c, const char *m, float v, LxEntity sender) {
+    MsgState *st = c->state; LX_UNUSED(sender);
+    st->got++; st->last = v; lx_strcpy(st->name, sizeof st->name, m);
+    if (!strcmp(m, "die")) lx_entity_destroy(c->scene, c->self);
+}
+static void msg_update(LxBehaviourCtx *c, float dt) { LX_UNUSED(dt); ((MsgState *)c->state)->updates++; }
+static int g_timer_hits;
+static void timer_hit(LxScene *s, LxEntity owner, void *user) { LX_UNUSED(s); LX_UNUSED(owner); g_timer_hits += *(int *)user; }
+static float g_event_sum;
+static void on_score(const char *e, float v, void *u) { LX_UNUSED(e); LX_UNUSED(u); g_event_sum += v; }
+
+static void test_gameplay(void) {
+    printf("gameplay\n");
+    LxBehaviourDesc d = {0};
+    d.name = "TestListener";
+    d.state_size = sizeof(MsgState);
+    d.on_update = msg_update;
+    d.on_message = msg_on;
+    lx_register_behaviour(&d);
+
+    LxScene *s = lx_scene_create("Gameplay");
+    /* prefab: a parent with a child, components and tags */
+    LxEntity crate = lx_spawn_primitive(s, LX_PRIM_CUBE, "Crate", lx_v3(5, 1, 5));
+    lx_entity_set_tag(s, crate, "Pickup");
+    lx_add_rigidbody(s, crate)->mass = 3.5f;
+    LxEntity lid = lx_entity_create(s, "Lid");
+    lx_entity_set_parent(s, lid, crate);
+    lx_entity_set_position(s, lid, lx_v3(0, 0.6f, 0));
+    lx_add_behaviour(s, lid, "TestListener");
+    char path[LX_PATH_MAX];
+    lx_path_join(path, sizeof path, tmpdir(), "luxora_test.lxprefab");
+    CHECK(lx_prefab_save(s, crate, path), "prefab saved");
+    char *text = lx_file_read(path, NULL);
+    LxEntity inst = text ? lx_prefab_instantiate_text(s, text, lx_v3(-2, 0, 3), 0) : 0;
+    lx_free(text);
+    CHECK(inst && inst != crate, "prefab instantiated");
+    CHECK(NEAR(lx_entity_world_position(s, inst).x, -2, 1e-5f) && NEAR(lx_entity_world_position(s, inst).z, 3, 1e-5f), "placed where spawned");
+    LxEntity inst_lid = lx_entity_find_child(s, inst, "Lid");
+    CHECK(inst_lid && NEAR(lx_entity_world_position(s, inst_lid).y, 0.6f, 1e-4f), "children come along");
+    CHECK(lx_get_rigidbody(s, inst) && NEAR(lx_get_rigidbody(s, inst)->mass, 3.5f, 1e-5f) && lx_get_mesh(s, inst), "components come along");
+    CHECK(lx_entity_has_tag(s, inst, "Pickup"), "tag comes along");
+    LxEntity found[4];
+    CHECK(lx_entities_with_tag(s, "Pickup", found, 4) == 2 && lx_entity_find_with_tag(s, "Pickup"), "find by tag");
+    lx_entity_set_prefab(s, inst, "Prefabs/Crate.lxprefab");
+    char *scene_text = lx_scene_serialize(s);
+    LxScene *s2 = lx_scene_deserialize(scene_text);
+    lx_free(scene_text);
+    LxEntity again = lx_entity_find_with_tag(s2, "Pickup");
+    int prefabbed = 0;
+    for (int i = 0; i < 2 && again; i++) { LxEntity all[4]; int n = lx_entities_with_tag(s2, "Pickup", all, 4); for (int k = 0; k < n; k++) prefabbed += !strcmp(lx_entity_prefab(s2, all[k]), "Prefabs/Crate.lxprefab"); break; }
+    CHECK(prefabbed == 1, "scenes remember tags and prefab links");
+    lx_scene_destroy(s2);
+
+    /* messages */
+    lx_scene_simulate(s, 1.0f / 60);
+    MsgState *st = lx_behaviour_state(s, inst_lid);
+    CHECK(st && st->updates == 1, "behaviour state reachable from outside");
+    CHECK(lx_send_message(s, inst_lid, "hello", 4.0f, crate) && st->got == 1 && !strcmp(st->name, "hello") && NEAR(st->last, 4, 0), "send message");
+    CHECK(lx_broadcast(s, "all", 1.0f, 0) == 2, "broadcast reaches both listeners");
+    CHECK(!lx_send_message(s, crate, "x", 0, 0), "objects without on_message don't receive");
+    int lid_id = lx_event_listen("score", on_score, NULL);
+    CHECK(lx_event_emit("score", 10) == 1 && lx_event_emit("other", 5) == 0 && NEAR(g_event_sum, 10, 0), "global events");
+    lx_event_unlisten(lid_id);
+    CHECK(lx_event_emit("score", 10) == 0, "unlisten");
+
+    /* timers (game time) */
+    int one = 1, ten = 10;
+    lx_timer_start(s, 0, 0.1f, 0, timer_hit, &one);
+    lx_timer_start(s, 0, 0.05f, 0.05f, timer_hit, &ten);
+    int owned = lx_timer_start(s, crate, 0.01f, 0, timer_hit, &ten);
+    LX_UNUSED(owned);
+    lx_send_message_after(s, inst_lid, "later", 7.0f, 0.12f);
+    lx_entity_destroy(s, crate);   /* outside a frame: immediate, its timer is cancelled */
+    for (int i = 0; i < 10; i++) lx_scene_simulate(s, 1.0f / 60);   /* 0.167 s */
+    CHECK(g_timer_hits == 1 + 30, "timers fired once / repeated (%d)", g_timer_hits);
+    CHECK(!strcmp(st->name, "later") && NEAR(st->last, 7, 0), "delayed message");
+
+    /* time scale */
+    lx_time_set_scale(0);
+    float t0 = lx_game_time(s);
+    lx_scene_simulate(s, 0.5f);
+    CHECK(NEAR(lx_game_time(s), t0, 1e-6f), "time scale 0 pauses game time");
+    lx_time_set_scale(1);
+
+    /* tweens */
+    int tw = lx_tween_position(s, inst, lx_v3(2, 0, 3), 0.5f, LX_EASE_IN_OUT);
+    lx_tween_set_done_message(s, tw, "arrived");
+    for (int i = 0; i < 15; i++) lx_scene_simulate(s, 1.0f / 60);
+    float mid = lx_entity_position(s, inst).x;
+    CHECK(mid > -2 && mid < 2, "tween moving (%g)", mid);
+    for (int i = 0; i < 30; i++) lx_scene_simulate(s, 1.0f / 60);
+    CHECK(NEAR(lx_entity_position(s, inst).x, 2, 1e-4f), "tween arrived");
+    CHECK(NEAR(lx_ease(LX_EASE_BOUNCE_OUT, 1), 1, 1e-4f) && NEAR(lx_ease(LX_EASE_BACK_OUT, 0), 0, 1e-4f), "easing ends");
+    float fv = 0;
+    lx_tween_float(s, inst, &fv, 10, 0.1f, LX_EASE_LINEAR);
+    for (int i = 0; i < 12; i++) lx_scene_simulate(s, 1.0f / 60);
+    CHECK(NEAR(fv, 10, 1e-4f), "float tween");
+
+    /* destroying during the frame waits until the frame ends */
+    lx_send_message_after(s, inst_lid, "die", 0, 0);
+    lx_scene_simulate(s, 1.0f / 60);
+    CHECK(!lx_entity_valid(s, inst_lid), "destroyed at the end of the frame");
+    CHECK(lx_entity_valid(s, inst), "parent survives");
+
+    /* random */
+    lx_random_seed(42);
+    bool in_range = true;
+    for (int i = 0; i < 1000; i++) { int r = lx_random_int(3, 6); float f = lx_random_range(-1, 1); in_range &= r >= 3 && r <= 6 && f >= -1 && f <= 1; }
+    CHECK(in_range, "random ranges");
+
+    /* save data */
+    char save[LX_PATH_MAX];
+    lx_path_join(save, sizeof save, tmpdir(), "luxora_test_save.txt");
+    lx_path_remove(save);
+    lx_save_set_file(save);
+    lx_save_set_int("coins", 42);
+    lx_save_set_float("volume", 0.25f);
+    lx_save_set_string("name", "Grim");
+    lx_scene_simulate(s, 1.0f / 60);   /* written at the end of the frame */
+    lx_save_set_file("");
+    lx_save_set_file(save);            /* read back from disk */
+    CHECK(lx_save_get_int("coins", 0) == 42 && NEAR(lx_save_get_float("volume", 0), 0.25f, 1e-6f) &&
+          !strcmp(lx_save_get_string("name", ""), "Grim") && !lx_save_has("nope") && lx_save_get_int("nope", 7) == 7, "save data survives");
+    lx_save_delete("coins");
+    CHECK(!lx_save_has("coins"), "delete key");
+    lx_path_remove(save);
+    lx_save_set_file("");
+    lx_path_remove(path);
+    lx_scene_stop_simulation(s);
+    lx_scene_destroy(s);
+}
+
 int main(void) {
     lx_jobs_init(0);
     lx_register_builtin_behaviours();
@@ -908,6 +1042,7 @@ int main(void) {
     test_icon_images();
     test_physics();
     test_game_ui();
+    test_gameplay();
 #if LUXORA_SCRIPT_COMPILER
     test_scripts();
 #endif

@@ -864,7 +864,7 @@ static int cmp_pair(const void *a, const void *b) {
 }
 
 static void dispatch_events(LxScene *s, LxPhysicsWorld *w) {
-    qsort(w->pairs, (size_t)w->np, sizeof(Pair), cmp_pair);
+    if (w->np > 1) qsort(w->pairs, (size_t)w->np, sizeof(Pair), cmp_pair);
     /* enter: in pairs, not in prev; exit: in prev, not in pairs */
     int i = 0, j = 0;
     Pair *enter = NULL, *exitp = NULL;

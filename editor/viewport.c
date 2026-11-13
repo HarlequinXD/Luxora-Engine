@@ -619,6 +619,13 @@ static void viewport_drop(UiNode *n, const char *type, const char *payload) {
         ed_select(e);
         ed_mark_changed();
         ed_commit();
+    } else if (!strcmp(type, "prefab")) {
+        float dist;
+        LxEntity hit = lx_scene_raycast(ED.scene, r, 1000, &dist);
+        LxVec3 p;
+        if (hit) p = lx_madd3(r.origin, r.dir, dist);
+        else if (!ray_plane(r, lx_v3(0, 0, 0), lx_v3(0, 1, 0), &p)) p = lx_madd3(r.origin, r.dir, 10);
+        ed_prefab_place(payload, p, 0);
     } else if (!strcmp(type, "material")) {
         float dist;
         LxEntity hit = lx_scene_raycast(ED.scene, r, 1000, &dist);
@@ -696,7 +703,7 @@ UiNode *ed_viewport_panel(UiNode *parent) {
     v->grow = 1;
     v->on_frame = viewport_frame;
     v->on_draw = viewport_draw;
-    v->accept = "mesh,material,scene";
+    v->accept = "mesh,material,scene,prefab";
     v->on_drop = viewport_drop;
     V.view = v;
     V.axis = -1;

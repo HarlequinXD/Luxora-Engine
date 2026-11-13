@@ -135,6 +135,63 @@ static void s_material_shot(void) {
     lx_path_join(path, sizeof path, dir[0] ? dir : ".", "material_inspector.ppm");
     lx_renderer_screenshot(path);
 }
+/* prefabs: make one from an object, place copies, edit one and apply to all */
+#define NEAR_SMOKE(a, b) (fabsf((a) - (b)) < 1e-3f)
+static LxEntity g_pf_src, g_pf_a, g_pf_b;
+static char g_pf_ref[LX_REF_MAX];
+static void s_prefab_make(void) {
+    g_pf_src = ed_create("Cube");
+    lx_entity_set_name(ED.scene, g_pf_src, "Barrel");
+    lx_entity_set_tag(ED.scene, g_pf_src, "Prop");
+    LxEntity kid = ed_create("Sphere");
+    lx_entity_set_parent(ED.scene, kid, g_pf_src);
+    char dir[LX_PATH_MAX];
+    lx_path_join(dir, sizeof dir, ED.project.assets, "Prefabs");
+    SMOKE_CHECK(ed_prefab_create(g_pf_src, dir), "Save as Prefab");
+    lx_strcpy(g_pf_ref, sizeof g_pf_ref, lx_entity_prefab(ED.scene, g_pf_src));
+    char path[LX_PATH_MAX];
+    lx_asset_path(path, sizeof path, g_pf_ref);
+    SMOKE_CHECK(lx_file_exists(path) && !strcmp(g_pf_ref, "Prefabs/Barrel.lxprefab"), "prefab file written (%s)", g_pf_ref);
+    /* the drag-and-drop targets are wired up */
+    SMOKE_CHECK(ED.content_grid && ED.content_grid->accept && strstr(ED.content_grid->accept, "entity"), "Content Browser accepts objects from the Hierarchy");
+    SMOKE_CHECK(ED.hierarchy_list && strstr(ED.hierarchy_list->accept, "prefab"), "Hierarchy accepts prefabs");
+}
+static void s_prefab_place(void) {
+    g_pf_a = ed_prefab_place(g_pf_ref, lx_v3(4, 0, 0), 0);
+    g_pf_b = ed_prefab_place(g_pf_ref, lx_v3(-4, 0, 0), 0);
+    SMOKE_CHECK(g_pf_a && g_pf_b && lx_entity_first_child(ED.scene, g_pf_a) && lx_entity_has_tag(ED.scene, g_pf_b, "Prop"),
+                "placed prefab copies keep children and tags");
+    SMOKE_CHECK(NEAR_SMOKE(lx_entity_position(ED.scene, g_pf_a).x, 4), "placed where dropped");
+    lx_entity_set_scale(ED.scene, g_pf_a, lx_v3(2, 3, 2));
+    LxEntity extra = ed_create("Point Light");
+    lx_entity_set_parent(ED.scene, extra, g_pf_a);
+    ed_prefab_apply(g_pf_a);
+}
+static void s_prefab_applied(void) {
+    int copies = 0, lights = 0;
+    int n = lx_scene_entity_count(ED.scene);
+    for (int i = 0; i < n; i++) {
+        LxEntity x = lx_scene_entity_at(ED.scene, i);
+        if (strcmp(lx_entity_prefab(ED.scene, x), g_pf_ref)) continue;
+        copies++;
+        for (LxEntity c = lx_entity_first_child(ED.scene, x); c; c = lx_entity_next_sibling(ED.scene, c)) lights += lx_get_light(ED.scene, c) != NULL;
+    }
+    SMOKE_CHECK(copies == 3 && lights == 3, "Apply updates every copy (%d copies, %d with the new light)", copies, lights);
+    SMOKE_CHECK(ED.selected && ed_prefab_root(ED.selected) && !strcmp(lx_entity_prefab(ED.scene, ed_prefab_root(ED.selected)), g_pf_ref),
+                "the selection is still part of a copy");
+    char path[LX_PATH_MAX];
+    lx_asset_path(path, sizeof path, g_pf_ref);
+    ED.selected = 0;
+    ed_select_asset(path);
+}
+static void s_prefab_shot(void) {
+    const char *shot = getenv("LUXORA_SMOKE_SHOT");
+    if (!shot || !shot[0]) return;
+    char dir[LX_PATH_MAX], path[LX_PATH_MAX];
+    lx_path_parent(dir, sizeof dir, shot);
+    lx_path_join(path, sizeof path, dir[0] ? dir : ".", "prefabs.ppm");
+    lx_renderer_screenshot(path);
+}
 static void s_quit_cancel(void) {
     UiNode *cancel = find_node(ui_root(ED.ui), NULL, "Cancel");
     extern UiNode *ui_modal_node(UiCtx *ui);
@@ -365,6 +422,10 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {238, s_parallax_shot, "screenshot of parallax mapping"},
     {239, s_material_view, "inspect the cobblestone material"},
     {243, s_material_shot, "screenshot of the material inspector"},
+    {245, s_prefab_make, "save an object as a prefab"},
+    {248, s_prefab_place, "place prefab copies, edit one and apply"},
+    {251, s_prefab_applied, "every copy updated"},
+    {255, s_prefab_shot, "screenshot of prefabs"},
 };
 
 bool ed_smoke_step(int frame) {
@@ -373,5 +434,5 @@ bool ed_smoke_step(int frame) {
             LX_INFO("[smoke] %s", STEPS[i].what);
             if (ED.mode == ED_MODE_EDITOR || frame >= 216) STEPS[i].fn(); /* the last steps run in the Project Manager */
         }
-    return frame < 246;
+    return frame < 258;
 }

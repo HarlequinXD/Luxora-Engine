@@ -8,11 +8,14 @@ static LxLightType light_type_parse(const char *s) {
     return !strcmp(s, "point") ? LX_LIGHT_POINT : !strcmp(s, "spot") ? LX_LIGHT_SPOT : LX_LIGHT_DIRECTIONAL;
 }
 
-static void write_entity(LxStrBuf *sb, const LxScene *s, LxEntity e, int id_of_parent, int *next_id) {
+static void write_entity(LxStrBuf *sb, const LxScene *s, LxEntity e, int id_of_parent, int *next_id, bool prefab_root) {
     const LxEntityData *d = lx_entity_data(s, e);
     int id = (*next_id)++;
     lx_sb_printf(sb, "\n[entity]\nid = %d\nparent = %d\nname = %s\nactive = %d\n", id, id_of_parent, d->name, d->active);
-    lx_sb_printf(sb, "position = %.6g %.6g %.6g\n", d->position.x, d->position.y, d->position.z);
+    if (d->tag[0]) lx_sb_printf(sb, "tag = %s\n", d->tag);
+    if (d->prefab[0] && !prefab_root) lx_sb_printf(sb, "prefab = %s\n", d->prefab);
+    if (prefab_root) lx_sb_printf(sb, "position = 0 0 0\n");   /* a prefab is placed where it's spawned */
+    else lx_sb_printf(sb, "position = %.6g %.6g %.6g\n", d->position.x, d->position.y, d->position.z);
     lx_sb_printf(sb, "rotation = %.6g %.6g %.6g\n", d->euler.x, d->euler.y, d->euler.z);
     lx_sb_printf(sb, "scale = %.6g %.6g %.6g\n", d->scale.x, d->scale.y, d->scale.z);
     if (d->comps & LX_COMP_CAMERA) {
@@ -74,7 +77,7 @@ static void write_entity(LxStrBuf *sb, const LxScene *s, LxEntity e, int id_of_p
         lx_sb_printf(sb, "probe.size = %g %g %g\nprobe.intensity = %g\nprobe.blend = %g\nprobe.box = %d\nprobe.realtime = %d\n", p->size.x,
                      p->size.y, p->size.z, p->intensity, p->blend_distance, p->box_projection, p->realtime);
     }
-    for (LxEntity c = d->first_child; c; c = lx_entity_next_sibling(s, c)) write_entity(sb, s, c, id, next_id);
+    for (LxEntity c = d->first_child; c; c = lx_entity_next_sibling(s, c)) write_entity(sb, s, c, id, next_id, false);
 }
 
 char *lx_scene_serialize(const LxScene *s) {
@@ -87,13 +90,24 @@ char *lx_scene_serialize(const LxScene *s) {
     lx_sb_printf(&sb, "ambient = %g\nexposure = %g\nfog_color = %g %g %g\nfog_density = %g\n", e->ambient_intensity, e->exposure,
                  e->fog_color.x, e->fog_color.y, e->fog_color.z, e->fog_density);
     int next_id = 1;
-    for (LxEntity r = s->first_root; r; r = lx_entity_next_sibling(s, r)) write_entity(&sb, s, r, 0, &next_id);
+    for (LxEntity r = s->first_root; r; r = lx_entity_next_sibling(s, r)) write_entity(&sb, s, r, 0, &next_id, false);
     if (!sb.data) lx_sb_printf(&sb, "");
     return sb.data;
 }
 
-LxScene *lx_scene_deserialize(const char *text) {
-    LxScene *s = lx_scene_create("Untitled");
+char *lx_entity_serialize(const LxScene *s, LxEntity root) {
+    const LxEntityData *d = lx_entity_data(s, root);
+    if (!d) return NULL;
+    LxStrBuf sb = {0};
+    lx_sb_printf(&sb, "# Luxora prefab v1\n[prefab]\nname = %s\n", d->name);
+    int next_id = 1;
+    write_entity(&sb, s, root, 0, &next_id, true);
+    return sb.data;
+}
+
+/* Reads scene or prefab text into `s`. Entities without a parent in the text go under `attach`. */
+static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) {
+    LxEntity first_root = 0;
     const char *cur = text;
     char k[96], v[1024];
     int r;
@@ -104,8 +118,11 @@ LxScene *lx_scene_deserialize(const char *text) {
     while ((r = lx_kv_next(&cur, k, sizeof k, v, sizeof v))) {
         if (r == 2) {
             in_scene = !strcmp(k, "scene");
-            if (!strcmp(k, "entity")) cur_e = lx_entity_create(s, "Entity");
-            else cur_e = 0;
+            if (!strcmp(k, "entity")) {
+                cur_e = lx_entity_create(s, "Entity");
+                if (attach) lx_entity_set_parent(s, cur_e, attach);
+                if (!first_root) first_root = cur_e;
+            } else cur_e = 0;
             continue;
         }
         if (in_scene) {
@@ -138,6 +155,8 @@ LxScene *lx_scene_deserialize(const char *text) {
             int pid = atoi(v);
             if (pid > 0 && pid < ids_cap && ids[pid]) lx_entity_set_parent(s, cur_e, ids[pid]);
         } else if (!strcmp(k, "name")) lx_strcpy(d->name, sizeof d->name, v);
+        else if (!strcmp(k, "tag")) lx_strcpy(d->tag, sizeof d->tag, v);
+        else if (!strcmp(k, "prefab")) lx_strcpy(d->prefab, sizeof d->prefab, v);
         else if (!strcmp(k, "active")) d->active = lx_parse_bool(v);
         else if (!strcmp(k, "position")) d->position = lx_parse_vec3(v);
         else if (!strcmp(k, "rotation")) lx_entity_set_euler(s, cur_e, lx_parse_vec3(v));
@@ -244,6 +263,14 @@ LxScene *lx_scene_deserialize(const char *text) {
     }
     lx_free(ids);
     lx_scene_update_transforms(s);
+    return first_root;
+}
+
+LxEntity lx_scene_deserialize_into(LxScene *s, const char *text, LxEntity parent) { return deserialize_into(s, text, parent); }
+
+LxScene *lx_scene_deserialize(const char *text) {
+    LxScene *s = lx_scene_create("Untitled");
+    deserialize_into(s, text, 0);
     return s;
 }
 

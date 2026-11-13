@@ -533,6 +533,8 @@ typedef struct LxBehaviourDesc {
     void (*on_collision_exit)(LxBehaviourCtx *ctx, LxEntity other);
     void (*on_trigger_enter)(LxBehaviourCtx *ctx, LxEntity other);
     void (*on_trigger_exit)(LxBehaviourCtx *ctx, LxEntity other);
+    /* messages sent with lx_send_message / lx_broadcast / lx_send_message_after / finished tweens */
+    void (*on_message)(LxBehaviourCtx *ctx, const char *message, float value, LxEntity sender);
 } LxBehaviourDesc;
 
 void lx_register_behaviour(const LxBehaviourDesc *desc);
@@ -549,6 +551,93 @@ void lx_register_builtin_behaviours(void);
 /* Runs behaviours (start on first tick), physics and crowds for a scene. */
 void lx_scene_simulate(LxScene *s, float dt);
 void lx_scene_stop_simulation(LxScene *s);
+
+/* ===================================================================
+ *  Gameplay: prefabs, tags, messages, timers, tweens, time, random, save data
+ * =================================================================== */
+
+/* Prefabs (.lxprefab): a saved object with its children and components, spawned any number of times.
+ * The root is saved without its position; instances remember which prefab they came from. */
+bool lx_prefab_save(const LxScene *s, LxEntity root, const char *path);
+LxEntity lx_prefab_instantiate(LxScene *s, const char *prefab_ref, LxVec3 position, LxEntity parent);
+LxEntity lx_prefab_instantiate_text(LxScene *s, const char *text, LxVec3 position, LxEntity parent);
+const char *lx_entity_prefab(const LxScene *s, LxEntity e);           /* "" when not a prefab instance */
+void lx_entity_set_prefab(LxScene *s, LxEntity e, const char *prefab_ref);
+char *lx_entity_serialize(const LxScene *s, LxEntity root);           /* prefab text; free with lx_free */
+
+LxEntity lx_entity_find_child(const LxScene *s, LxEntity parent, const char *name);   /* searches all descendants */
+
+/* Tags: one short label per object ("Player", "Enemy", "Pickup") for finding things quickly. */
+#define LX_TAG_MAX 32
+void lx_entity_set_tag(LxScene *s, LxEntity e, const char *tag);
+const char *lx_entity_tag(const LxScene *s, LxEntity e);
+bool lx_entity_has_tag(const LxScene *s, LxEntity e, const char *tag);
+LxEntity lx_entity_find_with_tag(const LxScene *s, const char *tag);     /* first one, or 0 */
+int lx_entities_with_tag(const LxScene *s, const char *tag, LxEntity *out, int max);
+
+/* Messages: call on_message on an object's behaviour. Returns true if a behaviour received it. */
+bool lx_send_message(LxScene *s, LxEntity target, const char *message, float value, LxEntity sender);
+int lx_broadcast(LxScene *s, const char *message, float value, LxEntity sender);   /* every object; returns receivers */
+int lx_send_message_to_tag(LxScene *s, const char *tag, const char *message, float value, LxEntity sender);
+/* Global events for systems that aren't objects (score, game state, UI). */
+typedef void (*LxEventFn)(const char *event, float value, void *user);
+int lx_event_listen(const char *event, LxEventFn fn, void *user);   /* returns an id for lx_event_unlisten */
+void lx_event_unlisten(int id);
+int lx_event_emit(const char *event, float value);                  /* returns listeners called */
+
+/* Timers run on game time (paused, slowed or sped up with the time scale). A timer that belongs to an
+ * object is cancelled when the object is destroyed. interval 0 = once, else repeats. */
+typedef void (*LxTimerFn)(LxScene *s, LxEntity owner, void *user);
+int lx_timer_start(LxScene *s, LxEntity owner, float delay, float interval, LxTimerFn fn, void *user);
+int lx_send_message_after(LxScene *s, LxEntity target, const char *message, float value, float delay);
+void lx_timer_cancel(LxScene *s, int timer);
+
+/* Tweens: animate a value over time with easing. The object gets the message (if set) when it finishes. */
+typedef enum LxEase {
+    LX_EASE_LINEAR, LX_EASE_IN, LX_EASE_OUT, LX_EASE_IN_OUT, LX_EASE_BACK_OUT, LX_EASE_ELASTIC_OUT, LX_EASE_BOUNCE_OUT
+} LxEase;
+float lx_ease(LxEase ease, float t);
+int lx_tween_position(LxScene *s, LxEntity e, LxVec3 to, float seconds, LxEase ease);
+int lx_tween_scale(LxScene *s, LxEntity e, LxVec3 to, float seconds, LxEase ease);
+int lx_tween_euler(LxScene *s, LxEntity e, LxVec3 to_degrees, float seconds, LxEase ease);
+int lx_tween_float(LxScene *s, LxEntity owner, float *value, float to, float seconds, LxEase ease);
+void lx_tween_set_done_message(LxScene *s, int tween, const char *message);
+void lx_tween_set_loop(LxScene *s, int tween, bool ping_pong);      /* repeats forever (back and forth) */
+void lx_tween_cancel(LxScene *s, int tween);
+void lx_tweens_cancel_for(LxScene *s, LxEntity e);
+
+/* Time */
+void lx_time_set_scale(float scale);   /* 0 = paused, 0.5 = slow motion, 1 = normal */
+float lx_time_scale(void);
+float lx_game_time(const LxScene *s);  /* game-time seconds since play started */
+float lx_delta_unscaled(const LxScene *s);
+
+/* Random numbers (one shared generator; seed it for repeatable runs) */
+void lx_random_seed(uint64_t seed);
+float lx_random(void);                         /* 0 .. 1 */
+float lx_random_range(float min, float max);
+int lx_random_int(int min, int max);           /* min .. max inclusive */
+LxVec3 lx_random_in_sphere(float radius);
+bool lx_random_chance(float probability);
+
+/* Save data: named values kept between runs of the game (written at the end of each frame they change). */
+void lx_save_set_int(const char *key, int value);
+void lx_save_set_float(const char *key, float value);
+void lx_save_set_string(const char *key, const char *value);
+int lx_save_get_int(const char *key, int fallback);
+float lx_save_get_float(const char *key, float fallback);
+const char *lx_save_get_string(const char *key, const char *fallback);
+bool lx_save_has(const char *key);
+void lx_save_delete(const char *key);
+void lx_save_clear(void);
+bool lx_save_write(void);                       /* write now (it also happens automatically) */
+void lx_save_set_file(const char *path);        /* where save data lives (set up by the engine) */
+const char *lx_save_file(void);
+
+/* Another object's behaviour */
+void *lx_behaviour_state(LxScene *s, LxEntity e);   /* its state block (NULL before it starts) */
+float *lx_behaviour_params(LxScene *s, LxEntity e);
+const char *lx_behaviour_name(const LxScene *s, LxEntity e);
 
 /* ===================================================================
  *  Physics

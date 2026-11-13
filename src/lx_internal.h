@@ -274,6 +274,9 @@ typedef struct LxEntityData {
     LxCrowd *crowd_sim;
     int audio_voice;  /* runtime voice index or -1 */
     uint32_t order;   /* creation order key */
+    char tag[LX_TAG_MAX];
+    char prefab[LX_REF_MAX];  /* the prefab this object was made from ("" = none) */
+    bool pending_destroy;     /* destroyed during the frame: removed when the frame ends */
 } LxEntityData;
 
 struct LxScene {
@@ -292,7 +295,21 @@ struct LxScene {
     bool order_dirty;
     struct LxPhysicsWorld *physics;  /* created when simulation starts */
     float last_dt;                   /* last simulate() delta */
+    struct LxGameplay *gameplay;     /* timers, tweens, deferred destroys (src/scene/gameplay.c) */
+    bool in_update;                  /* inside lx_scene_simulate: destroys are deferred */
 };
+
+/* gameplay (src/scene/gameplay.c) */
+void lx_gameplay_begin_frame(LxScene *s, float dt, float unscaled_dt);   /* timers */
+void lx_gameplay_after_update(LxScene *s, float dt);                     /* tweens */
+void lx_gameplay_end_frame(LxScene *s);                                  /* deferred destroys, save data */
+void lx_gameplay_entity_destroyed(LxScene *s, LxEntity e);
+void lx_gameplay_free(LxScene *s);
+bool lx_gameplay_defer_destroy(LxScene *s, LxEntity e);   /* true: queued until the frame ends */
+void lx_prefab_cache_clear(void);                          /* after a prefab file changes */
+/* serialize.c: entities from scene/prefab text added to an existing scene; returns the first root */
+LxEntity lx_scene_deserialize_into(LxScene *s, const char *text, LxEntity parent);
+float lx_gameplay_scale_dt(float dt);
 
 /* physics (src/physics) */
 void lx_physics_simulate(LxScene *s, float dt);   /* fixed steps + events; called by lx_scene_simulate */
