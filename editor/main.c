@@ -84,9 +84,9 @@ void ed_set_mode(EdMode mode) {
 
 void ed_update_title(void) {
     char t[256];
-    if (ED.mode == ED_MODE_PROJECT_MANAGER || !ED.has_project) snprintf(t, sizeof t, "Inferno - Projects");
+    if (ED.mode == ED_MODE_PROJECT_MANAGER || !ED.has_project) snprintf(t, sizeof t, "Inferno Editor - Projects");
     else
-        snprintf(t, sizeof t, "Inferno - %s - %s%s%s", ED.project.name, ED.scene ? lx_scene_name(ED.scene) : "", ED.dirty ? " *" : "",
+        snprintf(t, sizeof t, "Inferno Editor - %s - %s%s%s", ED.project.name, ED.scene ? lx_scene_name(ED.scene) : "", ED.dirty ? " *" : "",
                  ED.play != ED_EDIT ? "  [PLAYING]" : "");
     lx_platform_set_title(t);
     ed_titlebar_set_title(t);
@@ -118,18 +118,18 @@ int main(int argc, char **argv) {
     ED.console_show[0] = ED.console_show[1] = ED.console_show[2] = true;
     ED.console_autoscroll = true;
     lx_log_add_sink(ed_log_sink, NULL);
-    LX_INFO("Inferno %s (Luxora Engine)", LX_VERSION_STRING);
+    LX_INFO("Inferno Editor %s (Luxora Engine)", LX_VERSION_STRING);
     lx_jobs_init(0);
     lx_register_builtin_behaviours();
     extern void lx_game_register_scripts(void);
     lx_game_register_scripts();
     ed_load_prefs();
 
-    LxWindowDesc wd = {"Inferno", 1600, 940, true, true, false, true};   /* borderless: Inferno draws its own title bar */
+    LxWindowDesc wd = {"Inferno Editor", 1600, 940, true, true, false, true};   /* borderless: Inferno draws its own title bar */
     if (!lx_platform_init(&wd)) return 1;
     if (!lx_renderer_init()) {
         lx_platform_shutdown();
-        fprintf(stderr, "Inferno needs a GPU with Vulkan 1.3 (or 1.2 + dynamic rendering).\n");
+        fprintf(stderr, "Inferno Editor needs a GPU with Vulkan 1.3 (or 1.2 + dynamic rendering).\n");
         return 2;
     }
     lx_audio_init();

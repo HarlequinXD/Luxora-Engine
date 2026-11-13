@@ -201,7 +201,7 @@ if(LUXORA_BUILD_EDITOR AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/editor/main.c)
   if(WIN32)
     set_target_properties(luxora_editor PROPERTIES WIN32_EXECUTABLE TRUE)
     target_link_options(luxora_editor PRIVATE $<$<C_COMPILER_ID:MSVC>:/ENTRY:mainCRTStartup>)
-    luxora_windows_app(luxora_editor "Inferno" "Inferno" "Inferno - Luxora Engine Editor" "Inferno"
+    luxora_windows_app(luxora_editor "InfernoEditor" "Inferno Editor" "Inferno Editor" "Inferno"
                        "${PROJECT_VERSION}" "${CMAKE_CURRENT_SOURCE_DIR}/resources/windows/luxora_editor.ico")
   endif()
   luxora_add_game_scripts(luxora_editor "")

@@ -915,7 +915,7 @@ static void play_menu(UiNode *a) {
 static void help_menu(UiNode *a) {
     UiNode *p = menu_at(a);
     item(p, "Keyboard Shortcuts", "F1", UI_ICON_KEYBOARD, m_shortcuts);
-    item(p, "About Inferno", NULL, UI_ICON_INFO, m_about);
+    item(p, "About Inferno Editor", NULL, UI_ICON_INFO, m_about);
 }
 
 /* ======================================================================

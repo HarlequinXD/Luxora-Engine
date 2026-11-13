@@ -1100,7 +1100,7 @@ static void close_modal(UiNode *n) { LX_UNUSED(n); ui_close_modal(ED.ui); }
 void ed_about(void) {
     UiCtx *ui = ED.ui;
     const UiTheme *t = ui_theme(ui);
-    UiNode *body = ui_modal(ui, "About Inferno", 520, 404);
+    UiNode *body = ui_modal(ui, "About Inferno Editor", 520, 404);
     UiNode *row = ui_box(ui, body, UI_ROW);
     row->h = 56;
     row->gap = 12;
@@ -1108,7 +1108,7 @@ void ed_about(void) {
     ed_app_icon(row, 52);
     UiNode *col = ui_box(ui, row, UI_COL);
     col->grow = 1;
-    ui_label(ui, col, "Inferno")->font = UI_FONT_TITLE;
+    ui_label(ui, col, "Inferno Editor")->font = UI_FONT_TITLE;
     UiNode *v = ui_label(ui, col, "Luxora Engine " LX_VERSION_STRING " · written in C11 · Vulkan 1.3");
     v->fg = t->text_dim;
     static const char *lines[] = {"Physically based rendering with cascaded shadows",

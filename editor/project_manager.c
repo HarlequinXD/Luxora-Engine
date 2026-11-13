@@ -404,7 +404,7 @@ void ed_project_manager_build(void) {
     UiNode *root = ui_root(ui);
     root->dir = UI_COL;
     UiNode *bar = ed_titlebar_begin(root);
-    ed_titlebar_end(bar, "Inferno - Projects");
+    ed_titlebar_end(bar, "Inferno Editor - Projects");
     UiNode *content = ui_box(ui, root, UI_ROW);
     content->grow = 1;
     /* sidebar */
@@ -420,7 +420,7 @@ void ed_project_manager_build(void) {
     ed_app_icon(brand, 36);
     UiNode *name = ui_label(ui, brand, "INFERNO");
     name->font = UI_FONT_TITLE;
-    UiNode *ver = ui_label(ui, side, "Luxora Engine " LX_VERSION_STRING " · Vulkan");
+    UiNode *ver = ui_label(ui, side, "Editor · Luxora Engine " LX_VERSION_STRING);
     ver->font = UI_FONT_SMALL;
     ver->fg = t->text_dim;
     ver->h = 26;

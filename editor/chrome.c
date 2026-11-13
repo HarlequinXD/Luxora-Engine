@@ -182,5 +182,5 @@ void ed_request_quit(void) {
     if (ui_has_modal(ED.ui) && ED.save_prompt_open) return;   /* already asking */
     if (ED.mode == ED_MODE_EDITOR && ED.play != ED_EDIT) ed_stop();
     if (ED.mode != ED_MODE_EDITOR || !ED.dirty) { quit_now(); return; }
-    ed_save_prompt("closing Inferno", quit_now);
+    ed_save_prompt("closing Inferno Editor", quit_now);
 }
