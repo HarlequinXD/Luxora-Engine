@@ -291,5 +291,11 @@ bool lx_project_create(LxProject *p, const char *parent, const char *name, LxPro
     lx_path_join(dp, sizeof dp, p->assets, "Materials/Default.lxmat");
     lx_material_save(&def, dp);
     write_text(p->root, ".gitignore", "Builds/\nLibrary/\n");
+    LxInputMap *im = lx_alloc(sizeof *im);
+    lx_input_map_defaults(im);
+    char ip[LX_PATH_MAX];
+    lx_path_join(ip, sizeof ip, p->root, "input.lxinput");
+    lx_input_map_save(im, ip);
+    lx_free(im);
     return ok && lx_project_save(p);
 }

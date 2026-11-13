@@ -35,6 +35,7 @@ set(LUXORA_SOURCES
   src/crowd/crowd.c
   src/scene/scene.c src/scene/serialize.c src/scene/behaviours.c
   src/project/project.c
+  src/input/input.c
   src/engine.c)
 
 if(WIN32)

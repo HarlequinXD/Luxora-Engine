@@ -335,6 +335,79 @@ static void test_wav(void) {
     lx_free(w);
 }
 
+static void test_input(void) {
+    printf("input\n");
+    LxInputMap *m = lx_input_map();
+    lx_input_map_defaults(m);
+    CHECK(lx_input_find(m, "Jump") && lx_input_find(m, "MoveX") && m->touch_count == 4, "default map");
+    /* keyboard */
+    memset(&g_lx_input, 0, sizeof g_lx_input);
+    g_lx_input.width = 1280; g_lx_input.height = 720;
+    lx_input_update(0.016f);
+    CHECK(!lx_action_down("Jump"), "jump idle");
+    g_lx_input.keys[LX_KEY_SPACE] = true;
+    g_lx_input.keys[LX_KEY_D] = true;
+    lx_input_update(0.016f);
+    CHECK(lx_action_pressed("Jump") && lx_action_down("Jump"), "jump pressed");
+    CHECK(NEAR(lx_axis("MoveX"), 1.0f, 1e-4f), "MoveX from D = %g", lx_axis("MoveX"));
+    lx_input_update(0.016f);
+    CHECK(lx_action_down("Jump") && !lx_action_pressed("Jump"), "pressed only one frame");
+    g_lx_input.keys[LX_KEY_SPACE] = false;
+    g_lx_input.keys[LX_KEY_D] = false;
+    lx_input_update(0.016f);
+    CHECK(lx_action_released("Jump"), "released");
+    /* gamepad with dead zone + trigger as button */
+    g_lx_pads[0].connected = true;
+    g_lx_pads[0].axes[LX_PAD_LEFT_Y] = 0.1f;
+    lx_input_update(0.016f);
+    CHECK(lx_axis("MoveY") == 0.0f, "inside dead zone");
+    g_lx_pads[0].axes[LX_PAD_LEFT_Y] = 1.0f;
+    g_lx_pads[0].axes[LX_PAD_LEFT_X] = 1.0f;
+    g_lx_pads[0].axes[LX_PAD_RT] = 0.9f;
+    lx_input_update(0.016f);
+    CHECK(NEAR(lx_axis("MoveY"), 1.0f, 1e-4f), "full stick %g", lx_axis("MoveY"));
+    LxVec2 mv = lx_axis2("MoveX", "MoveY");
+    CHECK(NEAR(sqrtf(mv.x * mv.x + mv.y * mv.y), 1.0f, 1e-3f), "diagonal normalised");
+    CHECK(lx_action_down("Fire") && lx_input_last_device() == LX_DEVICE_GAMEPAD, "trigger fires");
+    memset(&g_lx_pads[0], 0, sizeof g_lx_pads[0]);
+    /* touch: stick + button */
+    LxTouchControl *stick = &m->touch[0], *jump = &m->touch[2];
+    float r = stick->size * 720.0f;
+    g_lx_input.touch_count = 2;
+    g_lx_input.touches[0] = lx_v2(stick->x * 1280 + r, stick->y * 720);
+    g_lx_input.touches[1] = lx_v2(jump->x * 1280, jump->y * 720);
+    lx_input_update(0.016f);
+    CHECK(NEAR(lx_axis("MoveX"), 1.0f, 1e-3f) && lx_action_down("Jump") && lx_input_last_device() == LX_DEVICE_TOUCH, "touch stick %g + button",
+          lx_axis("MoveX"));
+    CHECK(!lx_action_down("Fire"), "touch does not leak into mouse bindings");
+    g_lx_input.touch_count = 0;
+    /* save / load round trip */
+    char path[LX_PATH_MAX];
+    snprintf(path, sizeof path, "%s/luxora_input_test.lxinput", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+    LxInputAction *custom = lx_input_add_action(m, "Throw Grenade", false);
+    lx_input_add_binding(custom, (LxBinding){LX_BIND_KEY, LX_KEY_G, 0, 1});
+    lx_input_add_binding(custom, (LxBinding){LX_BIND_PAD_BUTTON, LX_PAD_RB, 0, 1});
+    CHECK(lx_input_map_save(m, path), "save input");
+    LxInputMap *copy = lx_alloc(sizeof *copy);
+    CHECK(lx_input_map_load(copy, path), "load input");
+    CHECK(copy->action_count == m->action_count && copy->touch_count == m->touch_count, "counts %d/%d", copy->action_count, m->action_count);
+    int diff = 0;
+    for (int i = 0; i < m->action_count; i++) {
+        LxInputAction *a = &m->actions[i], *b = lx_input_find(copy, a->name);
+        if (!b || b->binding_count != a->binding_count || b->is_axis != a->is_axis) { diff++; continue; }
+        for (int k = 0; k < a->binding_count; k++)
+            if (a->bindings[k].type != b->bindings[k].type || a->bindings[k].code != b->bindings[k].code ||
+                a->bindings[k].code2 != b->bindings[k].code2 || fabsf(a->bindings[k].scale - b->bindings[k].scale) > 1e-4f) diff++;
+    }
+    CHECK(diff == 0, "bindings round trip (%d differences)", diff);
+    char desc[64];
+    lx_binding_describe(m, &custom->bindings[1], desc, sizeof desc);
+    CHECK(!strcmp(desc, "Gamepad RB"), "describe: %s", desc);
+    lx_free(copy);
+    lx_path_remove(path);
+    memset(&g_lx_input, 0, sizeof g_lx_input);
+}
+
 int main(void) {
     lx_jobs_init(0);
     lx_register_builtin_behaviours();
@@ -349,6 +422,7 @@ int main(void) {
     test_crowd();
     test_project();
     test_wav();
+    test_input();
     lx_assets_clear();
     lx_jobs_shutdown();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

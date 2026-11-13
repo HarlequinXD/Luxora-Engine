@@ -23,6 +23,9 @@ void lx_engine_set_project(const LxProject *p) {
     lx_assets_set_root(p->assets);
     *lx_graphics_settings() = p->graphics;
     *lx_audio_settings() = p->audio;
+    char input[LX_PATH_MAX];
+    lx_path_join(input, sizeof input, p->root, "input.lxinput");
+    if (!lx_input_map_load(lx_input_map(), input)) lx_input_map_defaults(lx_input_map());
 }
 
 static LxScene *load_scene_ref(const char *ref) {
@@ -78,6 +81,7 @@ int lx_run(const LxAppDesc *d) {
                 if (d->on_start) d->on_start(E.scene);
             }
         }
+        lx_input_update(dt);
         lx_scene_simulate(E.scene, dt);
         if (d->on_update) d->on_update(E.scene, dt);
         lx_audio_update(E.scene, dt);
@@ -87,6 +91,7 @@ int lx_run(const LxAppDesc *d) {
             LxRenderView view;
             LxEntity cam = lx_scene_main_camera(E.scene);
             if (cam && lx_camera_view(E.scene, cam, w, h, &view)) lx_render_scene(E.scene, &view, NULL);
+            lx_input_draw_touch_controls();
             lx_renderer_end_frame();
         }
         int target = lx_graphics_settings()->target_fps;

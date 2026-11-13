@@ -105,6 +105,120 @@ void lx_window_size(int *w, int *h);
 float lx_dpi_scale(void);
 
 /* ===================================================================
+ *  Input manager
+ *  Name what the player does (actions like "Jump", axes like "MoveX"), bind each name to
+ *  any number of keys, mouse buttons/axes, gamepad buttons/sticks and touch controls, and
+ *  read it in game code with one call:
+ *
+ *      if (lx_action_pressed("Jump")) jump();
+ *      LxVec2 move = lx_axis2("MoveX", "MoveY");
+ *
+ *  Bindings live in the project (ProjectSettings/input.lxinput) and are edited in the
+ *  editor's Input Manager window. New projects start with sensible defaults.
+ * =================================================================== */
+typedef enum LxGamepadButton {
+    LX_PAD_A, LX_PAD_B, LX_PAD_X, LX_PAD_Y, LX_PAD_LB, LX_PAD_RB, LX_PAD_BACK, LX_PAD_START,
+    LX_PAD_LSTICK, LX_PAD_RSTICK, LX_PAD_UP, LX_PAD_DOWN, LX_PAD_LEFT, LX_PAD_RIGHT, LX_PAD_GUIDE,
+    LX_PAD_BUTTON_COUNT
+} LxGamepadButton;
+
+typedef enum LxGamepadAxis {
+    LX_PAD_LEFT_X, LX_PAD_LEFT_Y, LX_PAD_RIGHT_X, LX_PAD_RIGHT_Y, LX_PAD_LT, LX_PAD_RT, LX_PAD_AXIS_COUNT
+} LxGamepadAxis; /* sticks: -1..1 with +Y = up; triggers: 0..1 */
+
+typedef enum LxMouseAxis { LX_MOUSE_AXIS_X, LX_MOUSE_AXIS_Y, LX_MOUSE_AXIS_WHEEL } LxMouseAxis;
+
+typedef enum LxBindingType {
+    LX_BIND_KEY,            /* code = LxKey */
+    LX_BIND_KEY_AXIS,       /* code = positive key, code2 = negative key */
+    LX_BIND_MOUSE_BUTTON,   /* code = LxMouseButton */
+    LX_BIND_MOUSE_AXIS,     /* code = LxMouseAxis (per-frame delta) */
+    LX_BIND_PAD_BUTTON,     /* code = LxGamepadButton */
+    LX_BIND_PAD_AXIS,       /* code = LxGamepadAxis */
+    LX_BIND_TOUCH_BUTTON,   /* code = touch control index */
+    LX_BIND_TOUCH_STICK_X,  /* code = touch control index */
+    LX_BIND_TOUCH_STICK_Y,
+    LX_BIND_TYPE_COUNT
+} LxBindingType;
+
+typedef struct LxBinding {
+    LxBindingType type;
+    int code, code2;
+    float scale;            /* multiplier, negative to invert */
+} LxBinding;
+
+#define LX_MAX_ACTIONS 64
+#define LX_MAX_ACTION_BINDINGS 8
+#define LX_MAX_TOUCH_CONTROLS 16
+
+typedef struct LxInputAction {
+    char name[32];
+    bool is_axis;           /* false = button action, true = analog axis (-1..1) */
+    LxBinding bindings[LX_MAX_ACTION_BINDINGS];
+    int binding_count;
+    float dead_zone;        /* axes: values below this read as 0 */
+    float sensitivity;      /* axes: overall multiplier */
+} LxInputAction;
+
+typedef enum LxTouchControlType { LX_TOUCH_BUTTON, LX_TOUCH_STICK, LX_TOUCH_LOOK_AREA } LxTouchControlType;
+typedef struct LxTouchControl {
+    char name[32];
+    LxTouchControlType type;
+    float x, y;             /* centre, 0..1 of the screen (look areas: left/top corner) */
+    float size;             /* radius as a fraction of the screen's short side (look areas: width) */
+    float height;           /* look areas only: height fraction */
+} LxTouchControl;
+
+typedef struct LxInputMap {
+    LxInputAction actions[LX_MAX_ACTIONS];
+    int action_count;
+    LxTouchControl touch[LX_MAX_TOUCH_CONTROLS];
+    int touch_count;
+    float trigger_threshold;    /* analog value that counts as "pressed" for button actions */
+    int touch_controls_mode;    /* 0 auto (touch devices), 1 always, 2 never */
+} LxInputMap;
+
+typedef enum LxInputDevice { LX_DEVICE_KEYBOARD_MOUSE, LX_DEVICE_GAMEPAD, LX_DEVICE_TOUCH } LxInputDevice;
+
+/* game API */
+bool lx_action_down(const char *action);
+bool lx_action_pressed(const char *action);   /* this frame */
+bool lx_action_released(const char *action);
+float lx_axis(const char *axis);                 /* -1..1 (mouse axes may exceed) */
+LxVec2 lx_axis2(const char *x_axis, const char *y_axis);  /* with radial dead zone */
+LxInputDevice lx_input_last_device(void);       /* for showing the right button prompts */
+
+/* gamepads (up to 4) */
+int lx_gamepad_count(void);
+bool lx_gamepad_connected(int pad);
+const char *lx_gamepad_name(int pad);
+bool lx_gamepad_button(int pad, LxGamepadButton b);
+float lx_gamepad_axis(int pad, LxGamepadAxis a);
+void lx_gamepad_rumble(int pad, float low, float high, float seconds);
+
+/* mapping */
+LxInputMap *lx_input_map(void);
+void lx_input_map_defaults(LxInputMap *map);
+bool lx_input_map_save(const LxInputMap *map, const char *path);
+bool lx_input_map_load(LxInputMap *map, const char *path);
+LxInputAction *lx_input_find(LxInputMap *map, const char *name);
+LxInputAction *lx_input_add_action(LxInputMap *map, const char *name, bool is_axis);
+bool lx_input_add_binding(LxInputAction *a, LxBinding b);
+void lx_input_update(float dt);                  /* called by the engine once per frame */
+bool lx_input_touch_controls_visible(void);
+void lx_input_draw_touch_controls(void);         /* runtime overlay on touch devices */
+/* names for display and file storage */
+const char *lx_key_name(LxKey k);
+const char *lx_pad_button_name(LxGamepadButton b);
+const char *lx_pad_axis_name(LxGamepadAxis a);
+const char *lx_mouse_button_name(LxMouseButton b);
+const char *lx_mouse_axis_name(LxMouseAxis a);
+const char *lx_binding_type_name(LxBindingType t);
+void lx_binding_describe(const LxInputMap *map, const LxBinding *b, char *out, size_t cap);
+/* "press any input" capture for rebinding UIs: returns true and fills `out` when something is pressed */
+bool lx_input_capture(LxBinding *out, bool want_axis);
+
+/* ===================================================================
  *  Assets
  *  References are strings: "builtin:cube", "Meshes/rock.obj",
  *  "Materials/stone.lxmat", "Textures/stone.png", "Sounds/step.wav".

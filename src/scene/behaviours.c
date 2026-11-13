@@ -45,36 +45,26 @@ static void fly_start(LxBehaviourCtx *c) {
     s->pitch = e.x;
 }
 static void fly_update(LxBehaviourCtx *c, float dt) {
+    /* driven by the project's Input Manager: MoveX/MoveY/LookX/LookY + Sprint (keyboard, gamepad and touch) */
     FlyState *s = c->state;
-    float speed = c->params[0] * (lx_key_down(LX_KEY_SHIFT) ? 3.0f : 1.0f);
-    float look = c->params[1];
-    bool looking = lx_mouse_down(LX_MOUSE_RIGHT) || c->params[2] > 0.5f;
-    if (looking) {
-        LxVec2 d = lx_mouse_delta();
-        s->yaw -= d.x * look;
-        s->pitch = lx_clampf(s->pitch - d.y * look, -89.0f, 89.0f);
-    }
-    /* touch: left half moves, right half looks */
-    int w, h;
-    lx_window_size(&w, &h);
-    LxVec3 move = lx_v3(0, 0, 0);
-    for (int i = 0; i < lx_touch_count(); i++) {
-        LxVec2 t = lx_touch_pos(i);
-        if (t.x < w * 0.5f) { move.x += (t.x - w * 0.25f) / (w * 0.25f); move.z += (t.y - h * 0.5f) / (h * 0.5f); }
-    }
+    float speed = c->params[0] * (lx_action_down("Sprint") ? 3.0f : 1.0f);
+    float look = c->params[1] * 10.0f;
+    bool mouse_look = lx_mouse_down(LX_MOUSE_RIGHT) || c->params[2] > 0.5f || lx_input_last_device() != LX_DEVICE_KEYBOARD_MOUSE;
+    float lx = lx_axis("LookX"), ly = lx_axis("LookY");
+    if (lx_input_last_device() == LX_DEVICE_KEYBOARD_MOUSE && !mouse_look) lx = ly = 0;
+    /* mouse deltas are per frame; stick values are rates */
+    float rate = lx_input_last_device() == LX_DEVICE_GAMEPAD ? dt * 60.0f : 1.0f;
+    s->yaw -= lx * look * rate;
+    s->pitch = lx_clampf(s->pitch + ly * look * rate, -89.0f, 89.0f);
     lx_entity_set_euler(c->scene, c->self, lx_v3(s->pitch, s->yaw, 0));
     LxQuat q = lx_entity_rotation(c->scene, c->self);
     LxVec3 fwd = lx_quat_rotate(q, lx_v3(0, 0, -1)), right = lx_quat_rotate(q, lx_v3(1, 0, 0));
-    if (lx_key_down(LX_KEY_W)) move.z -= 1;
-    if (lx_key_down(LX_KEY_S)) move.z += 1;
-    if (lx_key_down(LX_KEY_A)) move.x -= 1;
-    if (lx_key_down(LX_KEY_D)) move.x += 1;
-    if (lx_key_down(LX_KEY_E)) move.y += 1;
-    if (lx_key_down(LX_KEY_Q)) move.y -= 1;
+    LxVec2 mv = lx_axis2("MoveX", "MoveY");
+    float up = (lx_key_down(LX_KEY_E) ? 1.0f : 0.0f) - (lx_key_down(LX_KEY_Q) ? 1.0f : 0.0f);
     LxVec3 p = lx_entity_position(c->scene, c->self);
-    p = lx_madd3(p, fwd, -move.z * speed * dt);
-    p = lx_madd3(p, right, move.x * speed * dt);
-    p.y += move.y * speed * dt;
+    p = lx_madd3(p, fwd, mv.y * speed * dt);
+    p = lx_madd3(p, right, mv.x * speed * dt);
+    p.y += up * speed * dt;
     lx_entity_set_position(c->scene, c->self, p);
 }
 

@@ -96,6 +96,16 @@ typedef struct LxInputState {
     float dpi_scale;
 } LxInputState;
 extern LxInputState g_lx_input;
+
+/* gamepad state written by platform layers (Android) or polled by the input module */
+#define LX_MAX_PADS 4
+typedef struct LxPadState {
+    bool connected;
+    char name[64];
+    bool buttons[LX_PAD_BUTTON_COUNT], prev_buttons[LX_PAD_BUTTON_COUNT];
+    float axes[LX_PAD_AXIS_COUNT];
+} LxPadState;
+extern LxPadState g_lx_pads[LX_MAX_PADS];
 void lx_input_begin_frame(void); /* copy current->prev, clear per-frame data */
 void lx_input_push_char(uint32_t cp);
 
@@ -121,6 +131,7 @@ typedef struct LxUiDrawList {
 void lx_renderer_set_font_atlas(const uint8_t *alpha, int w, int h);
 uint32_t lx_ui_texture_from_rgba(const uint8_t *rgba, int w, int h); /* thumbnails/icons */
 void lx_ui_texture_free(uint32_t id);
+uint32_t lx_ui_white_texture(void);              /* 1x1 white, for solid shapes */
 void lx_renderer_draw_ui(const LxUiDrawList *list); /* draws onto the swapchain image */
 /* Reads back the last presented swapchain image as RGBA8 (for screenshots/tests). */
 bool lx_renderer_screenshot(const char *ppm_path);

@@ -1183,6 +1183,15 @@ uint32_t lx_ui_texture_from_rgba(const uint8_t *rgba, int w, int h) {
     return ui_tex_register(&img, true, 1);
 }
 
+uint32_t lx_ui_white_texture(void) {
+    static uint32_t id;
+    if (!id && R.ready) {
+        if (!R.ui_tex[0].used) { R.ui_tex[0].used = true; R.ui_tex[0].set = VK_NULL_HANDLE; }
+        id = ui_tex_register(&R.white, false, 1);
+    }
+    return id;
+}
+
 void lx_ui_texture_free(uint32_t id) {
     if (id == 0 || id >= MAX_UI_TEXTURES || !R.ui_tex[id].used) return;
     vkDeviceWaitIdle(R.device);
@@ -1929,7 +1938,7 @@ void lx_renderer_draw_ui(const LxUiDrawList *list) {
     if (vb_bytes) memcpy(fr->ui_vb.mapped, list->vertices, vb_bytes);
     if (ib_bytes) memcpy(fr->ui_ib.mapped, list->indices, ib_bytes);
     begin_swap_pass(cmd, true, list->clear_color);
-    if (list->cmd_count && R.ui_tex[0].set) {
+    if (list->cmd_count) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.ui);
         VkDeviceSize off = 0;
         vkCmdBindVertexBuffers(cmd, 0, 1, &fr->ui_vb.buf, &off);
@@ -1940,6 +1949,7 @@ void lx_renderer_draw_ui(const LxUiDrawList *list) {
             const LxUiCmd *c = &list->cmds[i];
             if (!c->index_count) continue;
             uint32_t tex = (c->texture < MAX_UI_TEXTURES && R.ui_tex[c->texture].used && R.ui_tex[c->texture].set) ? c->texture : 0;
+            if (!R.ui_tex[tex].set) continue;
             if (tex != bound) {
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.ui_layout, 0, 1, &R.ui_tex[tex].set, 0, NULL);
                 float pc[4] = {2.0f / sw, 2.0f / sh, (float)R.ui_tex[tex].mode, 0};
