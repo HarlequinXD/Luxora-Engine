@@ -36,7 +36,7 @@ static struct {
     int js_fd[LX_MAX_PADS];
     bool js_init;
 #endif
-} IN;
+} INP;
 
 /* ======================================================================
  *  names
@@ -120,8 +120,8 @@ void lx_binding_describe(const LxInputMap *map, const LxBinding *b, char *out, s
  *  map editing
  * ====================================================================== */
 LxInputMap *lx_input_map(void) {
-    if (!IN.map_ready) { lx_input_map_defaults(&IN.map); IN.map_ready = true; }
-    return &IN.map;
+    if (!INP.map_ready) { lx_input_map_defaults(&INP.map); INP.map_ready = true; }
+    return &INP.map;
 }
 
 LxInputAction *lx_input_find(LxInputMap *m, const char *name) {
@@ -346,8 +346,8 @@ bool lx_input_map_load(LxInputMap *m, const char *path) {
         }
     }
     lx_free(text);
-    if (m == &IN.map) IN.map_ready = true;
-    memset(IN.state, 0, sizeof IN.state);
+    if (m == &INP.map) INP.map_ready = true;
+    memset(INP.state, 0, sizeof INP.state);
     return true;
 }
 
@@ -379,8 +379,8 @@ static void poll_pads(void) {
     }
     if (!g_xget) return;
     /* polling disconnected slots is slow on some systems: only re-check them every second */
-    bool rescan = lx_time() >= IN.next_scan;
-    if (rescan) IN.next_scan = lx_time() + 1.0;
+    bool rescan = lx_time() >= INP.next_scan;
+    if (rescan) INP.next_scan = lx_time() + 1.0;
     for (int i = 0; i < LX_MAX_PADS; i++) {
         LxPadState *p = &g_lx_pads[i];
         if (!p->connected && !rescan) continue;
@@ -425,26 +425,26 @@ static bool looks_like_gamepad(int fd, const char *name) {
 }
 
 static void poll_pads(void) {
-    if (!IN.js_init) {
-        for (int i = 0; i < LX_MAX_PADS; i++) IN.js_fd[i] = -1;
-        IN.js_init = true;
+    if (!INP.js_init) {
+        for (int i = 0; i < LX_MAX_PADS; i++) INP.js_fd[i] = -1;
+        INP.js_init = true;
     }
-    if (lx_time() >= IN.next_scan) {
-        IN.next_scan = lx_time() + 2.0;
+    if (lx_time() >= INP.next_scan) {
+        INP.next_scan = lx_time() + 2.0;
         for (int i = 0; i < LX_MAX_PADS; i++) {
-            if (IN.js_fd[i] >= 0 || IN.js_fd[i] == -2) continue;
+            if (INP.js_fd[i] >= 0 || INP.js_fd[i] == -2) continue;
             char path[32];
             snprintf(path, sizeof path, "/dev/input/js%d", i);
             int fd = open(path, O_RDONLY | O_NONBLOCK);
             if (fd < 0) continue;
-            IN.js_fd[i] = fd;
+            INP.js_fd[i] = fd;
             LxPadState *p = &g_lx_pads[i];
             memset(p, 0, sizeof *p);
             if (ioctl(fd, LX_JSIOCGNAME(sizeof p->name), p->name) < 0) snprintf(p->name, sizeof p->name, "Joystick %d", i + 1);
             if (!looks_like_gamepad(fd, p->name)) {
                 LX_INFO("Ignoring non-gamepad joystick device: %s", p->name);
                 close(fd);
-                IN.js_fd[i] = -2; /* never retry this slot during this run */
+                INP.js_fd[i] = -2; /* never retry this slot during this run */
                 memset(p, 0, sizeof *p);
                 continue;
             }
@@ -453,7 +453,7 @@ static void poll_pads(void) {
         }
     }
     for (int i = 0; i < LX_MAX_PADS; i++) {
-        int fd = IN.js_fd[i];
+        int fd = INP.js_fd[i];
         if (fd < 0) continue;
         LxPadState *p = &g_lx_pads[i];
         if (!p->connected) continue;
@@ -483,7 +483,7 @@ static void poll_pads(void) {
         }
         if (got < 0 && errno != EAGAIN) {
             close(fd);
-            IN.js_fd[i] = -1;
+            INP.js_fd[i] = -1;
             LX_INFO("Gamepad disconnected: %s", p->name);
             memset(p, 0, sizeof *p);
         }
@@ -507,7 +507,7 @@ float lx_gamepad_axis(int pad, LxGamepadAxis a) { return (lx_gamepad_connected(p
 void lx_gamepad_rumble(int pad, float low, float high, float seconds) {
     if (!lx_gamepad_connected(pad)) return;
     set_rumble(pad, low, high);
-    IN.rumble_time[pad] = seconds;
+    INP.rumble_time[pad] = seconds;
 }
 
 /* ======================================================================
@@ -520,7 +520,7 @@ bool lx_input_touch_controls_visible(void) {
 #if LX_OS_ANDROID
     return true;
 #else
-    return IN.last_device == LX_DEVICE_TOUCH;
+    return INP.last_device == LX_DEVICE_TOUCH;
 #endif
 }
 
@@ -529,7 +529,7 @@ static void update_touch(void) {
     int w = g_lx_input.width, h = g_lx_input.height;
     float shortest = (float)(w < h ? w : h);
     for (int c = 0; c < m->touch_count; c++) {
-        TouchState *ts = &IN.touch[c];
+        TouchState *ts = &INP.touch[c];
         const LxTouchControl *tc = &m->touch[c];
         ts->pressed = false;
         ts->stick = lx_v2(0, 0);
@@ -594,7 +594,7 @@ void lx_input_draw_touch_controls(void) {
         const LxTouchControl *tc = &m->touch[c];
         if (tc->type == LX_TOUCH_LOOK_AREA) continue;
         float cx = tc->x * (float)w, cy = tc->y * (float)h, r = tc->size * shortest;
-        const TouchState *ts = &IN.touch[c];
+        const TouchState *ts = &INP.touch[c];
         uint32_t base = ts->pressed || ts->stick.x != 0 || ts->stick.y != 0 ? 0x70ffffffu : 0x38ffffffu;
         CIRCLE(cx, cy, r, base);
         if (tc->type == LX_TOUCH_STICK) {
@@ -637,25 +637,25 @@ static float read_binding(const LxInputMap *m, const LxBinding *b, bool *digital
             if (fabsf(a) > fabsf(v)) v = a;
         }
         break;
-    case LX_BIND_TOUCH_BUTTON: if (b->code >= 0 && b->code < m->touch_count) { v = IN.touch[b->code].pressed ? 1.0f : 0.0f; *digital = true; } break;
-    case LX_BIND_TOUCH_STICK_X: if (b->code >= 0 && b->code < m->touch_count) v = IN.touch[b->code].stick.x; break;
-    case LX_BIND_TOUCH_STICK_Y: if (b->code >= 0 && b->code < m->touch_count) v = IN.touch[b->code].stick.y; break;
+    case LX_BIND_TOUCH_BUTTON: if (b->code >= 0 && b->code < m->touch_count) { v = INP.touch[b->code].pressed ? 1.0f : 0.0f; *digital = true; } break;
+    case LX_BIND_TOUCH_STICK_X: if (b->code >= 0 && b->code < m->touch_count) v = INP.touch[b->code].stick.x; break;
+    case LX_BIND_TOUCH_STICK_Y: if (b->code >= 0 && b->code < m->touch_count) v = INP.touch[b->code].stick.y; break;
     default: break;
     }
     return v * b->scale;
 }
 
 static void note_device(void) {
-    if (g_lx_input.touch_count > 0) { IN.last_device = LX_DEVICE_TOUCH; return; }
+    if (g_lx_input.touch_count > 0) { INP.last_device = LX_DEVICE_TOUCH; return; }
     for (int p = 0; p < LX_MAX_PADS; p++) {
         if (!g_lx_pads[p].connected) continue;
-        for (int b = 0; b < LX_PAD_BUTTON_COUNT; b++) if (g_lx_pads[p].buttons[b]) { IN.last_device = LX_DEVICE_GAMEPAD; return; }
-        for (int a = 0; a < LX_PAD_AXIS_COUNT; a++) if (fabsf(g_lx_pads[p].axes[a]) > 0.4f) { IN.last_device = LX_DEVICE_GAMEPAD; return; }
+        for (int b = 0; b < LX_PAD_BUTTON_COUNT; b++) if (g_lx_pads[p].buttons[b]) { INP.last_device = LX_DEVICE_GAMEPAD; return; }
+        for (int a = 0; a < LX_PAD_AXIS_COUNT; a++) if (fabsf(g_lx_pads[p].axes[a]) > 0.4f) { INP.last_device = LX_DEVICE_GAMEPAD; return; }
     }
     LxVec2 d = lx_mouse_delta();
     bool key = false;
     for (int k = 1; k < LX_KEY_COUNT && !key; k++) key = g_lx_input.keys[k];
-    if (key || fabsf(d.x) + fabsf(d.y) > 2 || g_lx_input.mouse[0] || g_lx_input.mouse[1]) IN.last_device = LX_DEVICE_KEYBOARD_MOUSE;
+    if (key || fabsf(d.x) + fabsf(d.y) > 2 || g_lx_input.mouse[0] || g_lx_input.mouse[1]) INP.last_device = LX_DEVICE_KEYBOARD_MOUSE;
 }
 
 void lx_input_update(float dt) {
@@ -663,12 +663,12 @@ void lx_input_update(float dt) {
     for (int p = 0; p < LX_MAX_PADS; p++) memcpy(g_lx_pads[p].prev_buttons, g_lx_pads[p].buttons, sizeof g_lx_pads[p].buttons);
     poll_pads();
     for (int p = 0; p < LX_MAX_PADS; p++)
-        if (IN.rumble_time[p] > 0 && (IN.rumble_time[p] -= dt) <= 0) set_rumble(p, 0, 0);
+        if (INP.rumble_time[p] > 0 && (INP.rumble_time[p] -= dt) <= 0) set_rumble(p, 0, 0);
     update_touch();
     note_device();
     for (int i = 0; i < m->action_count; i++) {
         const LxInputAction *a = &m->actions[i];
-        ActionState *st = &IN.state[i];
+        ActionState *st = &INP.state[i];
         st->prev = st->down;
         float best = 0;
         bool down = false;
@@ -701,14 +701,14 @@ static int action_index(const char *name) {
     return -1;
 }
 
-bool lx_action_down(const char *n) { int i = action_index(n); return i >= 0 && IN.state[i].down; }
-bool lx_action_pressed(const char *n) { int i = action_index(n); return i >= 0 && IN.state[i].down && !IN.state[i].prev; }
-bool lx_action_released(const char *n) { int i = action_index(n); return i >= 0 && !IN.state[i].down && IN.state[i].prev; }
+bool lx_action_down(const char *n) { int i = action_index(n); return i >= 0 && INP.state[i].down; }
+bool lx_action_pressed(const char *n) { int i = action_index(n); return i >= 0 && INP.state[i].down && !INP.state[i].prev; }
+bool lx_action_released(const char *n) { int i = action_index(n); return i >= 0 && !INP.state[i].down && INP.state[i].prev; }
 float lx_axis(const char *n) {
     int i = action_index(n);
     if (i < 0) return 0.0f;
     LxInputAction *a = &lx_input_map()->actions[i];
-    return a->is_axis ? IN.state[i].value : (IN.state[i].down ? 1.0f : 0.0f);
+    return a->is_axis ? INP.state[i].value : (INP.state[i].down ? 1.0f : 0.0f);
 }
 LxVec2 lx_axis2(const char *x, const char *y) {
     LxVec2 v = lx_v2(lx_axis(x), lx_axis(y));
@@ -716,7 +716,7 @@ LxVec2 lx_axis2(const char *x, const char *y) {
     if (l > 1.0f) { v.x /= l; v.y /= l; } /* keep diagonals from being faster */
     return v;
 }
-LxInputDevice lx_input_last_device(void) { return IN.last_device; }
+LxInputDevice lx_input_last_device(void) { return INP.last_device; }
 
 bool lx_input_capture(LxBinding *out, bool want_axis) {
     memset(out, 0, sizeof *out);
