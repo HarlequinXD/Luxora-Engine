@@ -36,7 +36,9 @@ typedef struct GpuImage {
 } GpuImage;
 
 typedef struct MeshGpu { GpuBuffer vb[LX_MAX_LODS], ib[LX_MAX_LODS]; } MeshGpu;
-typedef struct TexGpu { GpuImage img; } TexGpu;
+/* A texture can be colour (sRGB: albedo) or data (linear: normal, roughness, height...). The same
+ * image used both ways gets one GPU copy per interpretation, never the wrong one. */
+typedef struct TexGpu { GpuImage img[2]; bool has[2]; } TexGpu;   /* [0] linear, [1] sRGB */
 
 struct LxRenderTarget {
     int w, h;              /* output size */
@@ -65,7 +67,8 @@ typedef struct FrameData {
     uint32_t gi_uploaded_version;
 } FrameData;
 
-typedef struct MatSet { const LxTexture *albedo, *normal; VkDescriptorSet set; } MatSet;
+#define MAT_TEXTURES 6
+typedef struct MatSet { const LxTexture *tex[MAT_TEXTURES]; VkDescriptorSet set; } MatSet;
 
 typedef struct SceneUBO {
     LxMat4 view, proj, view_proj, inv_view_proj;
@@ -1025,9 +1028,9 @@ static void create_static_resources(void) {
         {3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
         {4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL}};
     R.scene_layout = set_layout(sb, 5);
-    VkDescriptorSetLayoutBinding mb[2] = {{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
-                                          {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL}};
-    R.material_layout = set_layout(mb, 2);
+    VkDescriptorSetLayoutBinding mb[MAT_TEXTURES];
+    for (uint32_t i = 0; i < MAT_TEXTURES; i++) mb[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+    R.material_layout = set_layout(mb, MAT_TEXTURES);
     VkDescriptorSetLayoutBinding tb = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
     R.tex_layout = set_layout(&tb, 1);
     VkDescriptorSetLayoutBinding pb = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, PROBE_SLOTS, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
@@ -1043,7 +1046,7 @@ static void create_static_resources(void) {
     R.gspec_format = VK_FORMAT_R8G8B8A8_UNORM;
 
     VkDescriptorSetLayout pbr_sets[3] = {R.scene_layout, R.material_layout, R.probe_layout};
-    R.pbr_layout = pipe_layout(pbr_sets, 3, 48, VK_SHADER_STAGE_FRAGMENT_BIT);
+    R.pbr_layout = pipe_layout(pbr_sets, 3, 64, VK_SHADER_STAGE_FRAGMENT_BIT);
     VkDescriptorSetLayout ssr_sets[3] = {R.scene_layout, R.ssr_layout, R.probe_layout};
     R.ssr_pipe_layout = pipe_layout(ssr_sets, 3, 32, VK_SHADER_STAGE_FRAGMENT_BIT);
     R.filter_layout = pipe_layout(&R.tex_layout, 1, 16, VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -1298,33 +1301,41 @@ void lx_renderer_mesh_release(LxMesh *m) {
     for (int i = 0; i < g_live_mesh_count; i++) if (g_live_meshes[i] == m) { g_live_meshes[i] = g_live_meshes[--g_live_mesh_count]; break; }
 }
 
-static TexGpu *texture_gpu(LxTexture *t, bool srgb) {
-    if (t->gpu) return t->gpu;
-    TexGpu *g = lx_calloc(1, sizeof *g);
+static GpuImage *texture_gpu(LxTexture *t, bool srgb) {
+    TexGpu *g = t->gpu;
+    if (!g) {
+        g = lx_calloc(1, sizeof *g);
+        t->gpu = g;
+        LX_VEC_PUSH(g_live_tex, g_live_tex_count, g_live_tex_cap, t);
+    }
+    int k = srgb ? 1 : 0;
+    if (g->has[k]) return &g->img[k];
     VkFormat fmt = srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
     uint32_t mips = 1;
     bool can_blit = format_supports(fmt, VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
-    if (can_blit) for (uint32_t s = (uint32_t)(t->width > t->height ? t->width : t->height); s > 1; s >>= 1) mips++;
+    if (can_blit) for (uint32_t sz = (uint32_t)(t->width > t->height ? t->width : t->height); sz > 1; sz >>= 1) mips++;
     ImageDesc d = {(uint32_t)t->width, (uint32_t)t->height, 1, 1, mips, fmt,
                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                    VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_2D, false};
-    image_create(&g->img, &d);
-    image_upload_2d(&g->img, t->pixels, (size_t)t->width * (size_t)t->height * 4, mips > 1);
-    t->gpu = g;
-    LX_VEC_PUSH(g_live_tex, g_live_tex_count, g_live_tex_cap, t);
-    return g;
+    image_create(&g->img[k], &d);
+    image_upload_2d(&g->img[k], t->pixels, (size_t)t->width * (size_t)t->height * 4, mips > 1);
+    g->has[k] = true;
+    return &g->img[k];
 }
 
 void lx_renderer_texture_release(LxTexture *t) {
     if (!t || !t->gpu || !R.device) return;
     vkDeviceWaitIdle(R.device);
-    for (int i = 0; i < R.mat_set_count; i++)
-        if (R.mat_sets[i].albedo == t || R.mat_sets[i].normal == t) {
+    for (int i = 0; i < R.mat_set_count; i++) {
+        bool uses = false;
+        for (int k = 0; k < MAT_TEXTURES; k++) uses |= R.mat_sets[i].tex[k] == t;
+        if (uses) {
             vkFreeDescriptorSets(R.device, R.desc_pool, 1, &R.mat_sets[i].set);
             R.mat_sets[i--] = R.mat_sets[--R.mat_set_count];
         }
+    }
     TexGpu *g = t->gpu;
-    image_destroy(&g->img);
+    for (int k = 0; k < 2; k++) if (g->has[k]) image_destroy(&g->img[k]);
     lx_free(g);
     t->gpu = NULL;
     for (int i = 0; i < g_live_tex_count; i++) if (g_live_tex[i] == t) { g_live_tex[i] = g_live_tex[--g_live_tex_count]; break; }
@@ -1336,13 +1347,19 @@ static void release_all_meshes_textures(void) {
 }
 
 static VkDescriptorSet material_set(const LxMaterial *m) {
-    LxTexture *albedo = m->albedo_map[0] ? lx_asset_texture(m->albedo_map) : NULL;
-    LxTexture *normal = m->normal_map[0] ? lx_asset_texture(m->normal_map) : NULL;
+    const char *refs[MAT_TEXTURES] = {m->albedo_map, m->normal_map, m->roughness_map, m->metallic_map, m->ao_map, m->height_map};
+    LxTexture *tex[MAT_TEXTURES];
+    for (int k = 0; k < MAT_TEXTURES; k++) tex[k] = refs[k][0] ? lx_asset_texture(refs[k]) : NULL;
     for (int i = 0; i < R.mat_set_count; i++)
-        if (R.mat_sets[i].albedo == albedo && R.mat_sets[i].normal == normal) return R.mat_sets[i].set;
-    MatSet ms = {albedo, normal, alloc_set(R.material_layout)};
-    write_image(ms.set, 0, albedo ? texture_gpu(albedo, true)->img.view : R.white.view, R.linear_repeat, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    write_image(ms.set, 1, normal ? texture_gpu(normal, false)->img.view : R.flat_normal.view, R.linear_repeat, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        if (!memcmp(R.mat_sets[i].tex, tex, sizeof tex)) return R.mat_sets[i].set;
+    MatSet ms;
+    memcpy(ms.tex, tex, sizeof tex);
+    ms.set = alloc_set(R.material_layout);
+    for (int k = 0; k < MAT_TEXTURES; k++) {
+        VkImageView fallback = k == 1 ? R.flat_normal.view : R.white.view;
+        VkImageView view = tex[k] ? texture_gpu(tex[k], k == 0)->view : fallback;   /* only albedo is colour */
+        write_image(ms.set, (uint32_t)k, view, R.linear_repeat, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
     LX_VEC_PUSH(R.mat_sets, R.mat_set_count, R.mat_set_cap, ms);
     return ms.set;
 }
@@ -1754,10 +1771,14 @@ static void draw_batches(VkCommandBuffer cmd, const DrawList *dl, VkBuffer inst,
             const LxMaterial *m = bt->mat;
             VkDescriptorSet sets[2] = {scene_set, material_set(m)};
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.pbr_layout, 0, 2, sets, 1, &ubo_off);
-            float pc[12] = {m->albedo.x, m->albedo.y, m->albedo.z, m->albedo.w,
-                            m->metallic, m->roughness, m->uv_scale > 0 ? m->uv_scale : 1.0f, m->normal_map[0] ? 1.0f : 0.0f,
-                            m->emissive.x, m->emissive.y, m->emissive.z, m->emissive_strength};
-            vkCmdPushConstants(cmd, R.pbr_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, pc);
+            float nstr = m->normal_map[0] ? lx_maxf(m->normal_strength, 0.001f) * (m->normal_flip_green ? -1.0f : 1.0f) : 0.0f;
+            int flags = (m->roughness_map[0] ? 1 : 0) | (m->metallic_map[0] ? 2 : 0) | (m->ao_map[0] ? 4 : 0) |
+                        (m->roughness_is_smoothness ? 8 : 0) | (m->parallax_shadows ? 16 : 0);
+            float pc[16] = {m->albedo.x, m->albedo.y, m->albedo.z, m->albedo.w,
+                            m->metallic, m->roughness, m->uv_scale > 0 ? m->uv_scale : 1.0f, nstr,
+                            m->emissive.x, m->emissive.y, m->emissive.z, m->emissive_strength,
+                            m->height_map[0] ? lx_maxf(m->height_scale, 0.0f) : 0.0f, m->ao_strength, (float)flags, 0};
+            vkCmdPushConstants(cmd, R.pbr_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 64, pc);
         }
         vkCmdDrawIndexed(cmd, (uint32_t)bt->mesh->lods[bt->lod].index_count, bt->count, 0, 0, bt->first);
         R.stats.draw_calls++;

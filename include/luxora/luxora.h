@@ -242,7 +242,17 @@ typedef struct LxMaterial {
     float emissive_strength;
     char albedo_map[LX_REF_MAX];
     char normal_map[LX_REF_MAX];
+    char roughness_map[LX_REF_MAX];  /* green channel (a grayscale map, or the G of an AO/rough/metal pack) x roughness */
+    char metallic_map[LX_REF_MAX];   /* blue channel x metallic */
+    char ao_map[LX_REF_MAX];         /* red channel: ambient occlusion */
+    char height_map[LX_REF_MAX];     /* red channel, white = high: parallax occlusion mapping */
     float uv_scale;
+    float normal_strength;           /* 1 = as authored */
+    bool normal_flip_green;          /* DirectX-style normal maps (green points down) */
+    bool roughness_is_smoothness;    /* the roughness map is a gloss/smoothness map */
+    float ao_strength;               /* 0..1 */
+    float height_scale;              /* parallax depth in UV units (0.02 - 0.1 typical) */
+    bool parallax_shadows;           /* the height field shadows itself from the sun */
     /* acoustics: fraction of sound energy absorbed on reflection (0..1) and blocked on transmission */
     float acoustic_absorption;
     float acoustic_transmission;

@@ -250,6 +250,95 @@ static const char *SAMPLE_BEHAVIOUR =
     "    lx_register_behaviour(&d);\n"
     "}\n";
 
+/* ---- the sample's cobblestone material: procedurally generated, tileable texture set ----
+ * Height (for parallax occlusion mapping), normal, albedo, roughness and AO maps from one Voronoi
+ * pattern, so the sample shows every material map working together. */
+static bool write_png(const char *dir, const char *rel, const uint8_t *rgba, int w, int h) {
+    size_t n;
+    uint8_t *png = lx_png_encode(rgba, w, h, &n);
+    if (!png) return false;
+    char path[LX_PATH_MAX];
+    lx_path_join(path, sizeof path, dir, rel);
+    bool ok = lx_file_write(path, png, n);
+    lx_free(png);
+    return ok;
+}
+
+static bool write_cobblestone_textures(const char *assets) {
+    enum { S = 256, G = 8 };   /* image size, stones per row */
+    float cx[G][G], cy[G][G], tone[G][G];
+    LxRng rng = lx_rng_seed(7, 3);
+    for (int j = 0; j < G; j++)
+        for (int i = 0; i < G; i++) {
+            cx[j][i] = ((float)i + 0.2f + 0.6f * lx_rng_f(&rng)) * (float)S / G;
+            cy[j][i] = ((float)j + 0.2f + 0.6f * lx_rng_f(&rng)) * (float)S / G;
+            tone[j][i] = lx_rng_f(&rng);
+        }
+    float *height = lx_alloc(sizeof(float) * S * S);
+    uint8_t *alb = lx_alloc(S * S * 4), *nrm = lx_alloc(S * S * 4), *rough = lx_alloc(S * S * 4), *ao = lx_alloc(S * S * 4),
+            *hmap = lx_alloc(S * S * 4);
+    float *mask = lx_alloc(sizeof(float) * S * S), *ctone = lx_alloc(sizeof(float) * S * S);
+    for (int y = 0; y < S; y++)
+        for (int x = 0; x < S; x++) {
+            float f1 = 1e9f, f2 = 1e9f, t = 0;
+            int gi = x * G / S, gj = y * G / S;
+            for (int dj = -2; dj <= 2; dj++)
+                for (int di = -2; di <= 2; di++) {
+                    int i = gi + di, j = gj + dj;
+                    float ox = 0, oy = 0;
+                    int wi = (i % G + G) % G, wj = (j % G + G) % G;   /* wrap: the texture tiles */
+                    ox = (float)(i - wi) * S / G; oy = (float)(j - wj) * S / G;
+                    float dx = cx[wj][wi] + ox - ((float)x + 0.5f), dy = cy[wj][wi] + oy - ((float)y + 0.5f);
+                    float d = sqrtf(dx * dx + dy * dy);
+                    if (d < f1) { f2 = f1; f1 = d; t = tone[wj][wi]; }
+                    else if (d < f2) f2 = d;
+                }
+            float edge = f2 - f1;
+            float m = lx_clampf((edge - 2.0f) / 5.0f, 0, 1);
+            m = m * m * (3 - 2 * m);
+            float dome = sqrtf(lx_clampf((edge - 2.0f) / 14.0f, 0, 1));   /* rounded stone tops */
+            float grain = 0.5f + 0.5f * sinf((float)x * 0.9f + t * 20.0f) * sinf((float)y * 0.7f + t * 9.0f);
+            height[y * S + x] = 0.1f + m * (0.3f + 0.55f * dome + 0.02f * grain);
+            mask[y * S + x] = m;
+            ctone[y * S + x] = t;
+        }
+    for (int y = 0; y < S; y++)
+        for (int x = 0; x < S; x++) {
+            int i = y * S + x;
+            float h = height[i], m = mask[i], t = ctone[i];
+            /* normal (OpenGL convention: green = +V, i.e. down the image) */
+            float hl = height[y * S + (x + S - 1) % S], hr = height[y * S + (x + 1) % S];
+            float hu = height[((y + S - 1) % S) * S + x], hd = height[((y + 1) % S) * S + x];
+            LxVec3 n = lx_norm3(lx_v3(-(hr - hl) * 6.0f, -(hd - hu) * 6.0f, 1.0f));
+            nrm[i * 4 + 0] = (uint8_t)(n.x * 127.5f + 127.5f);
+            nrm[i * 4 + 1] = (uint8_t)(n.y * 127.5f + 127.5f);
+            nrm[i * 4 + 2] = (uint8_t)(n.z * 127.5f + 127.5f);
+            nrm[i * 4 + 3] = 255;
+            float r = 0.46f + 0.16f * t, g = 0.43f + 0.12f * t, b = 0.39f + 0.08f * t;
+            float shade = 0.75f + 0.25f * h;
+            LxVec3 stone = lx_v3(r * shade, g * shade, b * shade), mortar = lx_v3(0.30f, 0.27f, 0.22f);
+            LxVec3 c = lx_v3(mortar.x + (stone.x - mortar.x) * m, mortar.y + (stone.y - mortar.y) * m, mortar.z + (stone.z - mortar.z) * m);
+            alb[i * 4 + 0] = (uint8_t)(lx_clampf(c.x, 0, 1) * 255.0f);
+            alb[i * 4 + 1] = (uint8_t)(lx_clampf(c.y, 0, 1) * 255.0f);
+            alb[i * 4 + 2] = (uint8_t)(lx_clampf(c.z, 0, 1) * 255.0f);
+            alb[i * 4 + 3] = 255;
+            uint8_t rv = (uint8_t)(255.0f * (0.95f - m * (0.3f + 0.15f * t)));
+            rough[i * 4 + 0] = rough[i * 4 + 1] = rough[i * 4 + 2] = rv; rough[i * 4 + 3] = 255;
+            uint8_t av = (uint8_t)(255.0f * lx_clampf(0.45f + 0.55f * (h - 0.12f) / 0.6f, 0, 1));
+            ao[i * 4 + 0] = ao[i * 4 + 1] = ao[i * 4 + 2] = av; ao[i * 4 + 3] = 255;
+            uint8_t hv = (uint8_t)(lx_clampf(h, 0, 1) * 255.0f);
+            hmap[i * 4 + 0] = hmap[i * 4 + 1] = hmap[i * 4 + 2] = hv; hmap[i * 4 + 3] = 255;
+        }
+    bool ok = write_png(assets, "Textures/Cobblestone_Albedo.png", alb, S, S) &&
+              write_png(assets, "Textures/Cobblestone_Normal.png", nrm, S, S) &&
+              write_png(assets, "Textures/Cobblestone_Roughness.png", rough, S, S) &&
+              write_png(assets, "Textures/Cobblestone_AO.png", ao, S, S) &&
+              write_png(assets, "Textures/Cobblestone_Height.png", hmap, S, S);
+    lx_free(height); lx_free(mask); lx_free(ctone);
+    lx_free(alb); lx_free(nrm); lx_free(rough); lx_free(ao); lx_free(hmap);
+    return ok;
+}
+
 bool lx_project_create(LxProject *p, const char *parent, const char *name, LxProjectTemplate tpl) {
     defaults(p);
     lx_strcpy(p->name, sizeof p->name, name);
@@ -317,6 +406,26 @@ bool lx_project_create(LxProject *p, const char *parent, const char *name, LxPro
         chrome.roughness = 0.06f;
         lx_path_join(mp, sizeof mp, p->assets, "Materials/Chrome.lxmat");
         lx_material_save(&chrome, mp);
+        /* a cobblestone patch: albedo, normal, roughness, AO and height (parallax occlusion) maps */
+        if (write_cobblestone_textures(p->assets)) {
+            LxMaterial cob = lx_material_default();
+            lx_strcpy(cob.name, sizeof cob.name, "Cobblestone");
+            lx_strcpy(cob.albedo_map, sizeof cob.albedo_map, "Textures/Cobblestone_Albedo.png");
+            lx_strcpy(cob.normal_map, sizeof cob.normal_map, "Textures/Cobblestone_Normal.png");
+            lx_strcpy(cob.roughness_map, sizeof cob.roughness_map, "Textures/Cobblestone_Roughness.png");
+            lx_strcpy(cob.ao_map, sizeof cob.ao_map, "Textures/Cobblestone_AO.png");
+            lx_strcpy(cob.height_map, sizeof cob.height_map, "Textures/Cobblestone_Height.png");
+            cob.roughness = 1.0f;
+            cob.albedo = lx_v4(1, 1, 1, 1);
+            cob.uv_scale = 0.25f;
+            cob.height_scale = 0.05f;
+            cob.acoustic_absorption = 0.08f;
+            lx_path_join(mp, sizeof mp, p->assets, "Materials/Cobblestone.lxmat");
+            lx_material_save(&cob, mp);
+            LxEntity path = lx_spawn_primitive(s, LX_PRIM_PLANE, "Cobblestone Path", lx_v3(1.0f, 0.01f, 2.5f));
+            lx_entity_set_scale(s, path, lx_v3(0.45f, 1, 0.45f));
+            lx_strcpy(lx_get_mesh(s, path)->material, LX_REF_MAX, "Materials/Cobblestone.lxmat");
+        }
         /* a reflection probe over the play area: box-projected reflections of the walls and floor */
         LxEntity probe = lx_entity_create(s, "Reflection Probe");
         lx_entity_set_position(s, probe, lx_v3(0, 1.5f, 0));

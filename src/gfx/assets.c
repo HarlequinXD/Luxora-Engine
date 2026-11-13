@@ -78,6 +78,10 @@ LxMaterial lx_material_default(void) {
     m.metallic = 0.0f;
     m.roughness = 0.5f;
     m.uv_scale = 1.0f;
+    m.normal_strength = 1.0f;
+    m.ao_strength = 1.0f;
+    m.height_scale = 0.05f;
+    m.parallax_shadows = true;
     m.acoustic_absorption = 0.1f;
     m.acoustic_transmission = 0.02f;
     return m;
@@ -90,6 +94,11 @@ bool lx_material_save(const LxMaterial *m, const char *path) {
     lx_sb_printf(&sb, "metallic = %g\nroughness = %g\n", m->metallic, m->roughness);
     lx_sb_printf(&sb, "emissive = %g %g %g\nemissive_strength = %g\n", m->emissive.x, m->emissive.y, m->emissive.z, m->emissive_strength);
     lx_sb_printf(&sb, "albedo_map = %s\nnormal_map = %s\nuv_scale = %g\n", m->albedo_map, m->normal_map, m->uv_scale);
+    lx_sb_printf(&sb, "normal_strength = %g\nnormal_flip_green = %d\n", m->normal_strength, m->normal_flip_green);
+    lx_sb_printf(&sb, "roughness_map = %s\nroughness_is_smoothness = %d\nmetallic_map = %s\n", m->roughness_map,
+                 m->roughness_is_smoothness, m->metallic_map);
+    lx_sb_printf(&sb, "ao_map = %s\nao_strength = %g\n", m->ao_map, m->ao_strength);
+    lx_sb_printf(&sb, "height_map = %s\nheight_scale = %g\nparallax_shadows = %d\n", m->height_map, m->height_scale, m->parallax_shadows);
     lx_sb_printf(&sb, "acoustic_absorption = %g\nacoustic_transmission = %g\n", m->acoustic_absorption, m->acoustic_transmission);
     bool ok = lx_file_write(path, sb.data, sb.len);
     lx_free(sb.data);
@@ -114,6 +123,16 @@ bool lx_material_load(LxMaterial *m, const char *path) {
         else if (!strcmp(k, "albedo_map")) lx_strcpy(m->albedo_map, sizeof m->albedo_map, v);
         else if (!strcmp(k, "normal_map")) lx_strcpy(m->normal_map, sizeof m->normal_map, v);
         else if (!strcmp(k, "uv_scale")) m->uv_scale = (float)atof(v);
+        else if (!strcmp(k, "normal_strength")) m->normal_strength = (float)atof(v);
+        else if (!strcmp(k, "normal_flip_green")) m->normal_flip_green = atoi(v) != 0;
+        else if (!strcmp(k, "roughness_map")) lx_strcpy(m->roughness_map, sizeof m->roughness_map, v);
+        else if (!strcmp(k, "roughness_is_smoothness")) m->roughness_is_smoothness = atoi(v) != 0;
+        else if (!strcmp(k, "metallic_map")) lx_strcpy(m->metallic_map, sizeof m->metallic_map, v);
+        else if (!strcmp(k, "ao_map")) lx_strcpy(m->ao_map, sizeof m->ao_map, v);
+        else if (!strcmp(k, "ao_strength")) m->ao_strength = (float)atof(v);
+        else if (!strcmp(k, "height_map")) lx_strcpy(m->height_map, sizeof m->height_map, v);
+        else if (!strcmp(k, "height_scale")) m->height_scale = (float)atof(v);
+        else if (!strcmp(k, "parallax_shadows")) m->parallax_shadows = atoi(v) != 0;
         else if (!strcmp(k, "acoustic_absorption")) m->acoustic_absorption = (float)atof(v);
         else if (!strcmp(k, "acoustic_transmission")) m->acoustic_transmission = (float)atof(v);
     }

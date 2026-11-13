@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include "lx_internal.h"
 #include "png_fixtures.h"
+#include "png_fixtures2.h"
 
 static int g_fail, g_pass;
 #define CHECK(cond, ...)                                              \
@@ -365,6 +366,26 @@ static LxScene *make_room(bool with_wall) {
     }
     lx_scene_update_transforms(s);
     return s;
+}
+
+static void test_png_formats(void) {
+    printf("png formats\n");
+    int w, h;
+    uint8_t *p = lx_png_decode(PNG_RGB16, sizeof PNG_RGB16, &w, &h);
+    CHECK(p && w == 3 && h == 2, "16-bit RGB decodes");
+    if (p) CHECK(p[(1 * 3 + 2) * 4 + 0] == 200 && p[(1 * 3 + 2) * 4 + 1] == 200 && p[(1 * 3 + 2) * 4 + 2] == 77 && p[3] == 255, "16-bit values");
+    lx_free(p);
+    p = lx_png_decode(PNG_PAL4, sizeof PNG_PAL4, &w, &h);
+    CHECK(p && w == 5 && h == 1, "4-bit palette decodes");
+    if (p) CHECK(p[3 * 4] == 150 && p[3 * 4 + 1] == 10 && p[2 * 4 + 3] == 128 && p[4 * 4 + 3] == 255, "palette colours and tRNS alpha");
+    lx_free(p);
+    p = lx_png_decode(PNG_ADAM7, sizeof PNG_ADAM7, &w, &h);
+    CHECK(p && w == 9 && h == 9, "interlaced decodes");
+    bool good = p != NULL;
+    for (int y = 0; p && y < 9; y++)
+        for (int x = 0; x < 9; x++) good &= p[(y * 9 + x) * 4] == (uint8_t)(x * 20 + y);
+    CHECK(good, "interlaced pixels in the right places");
+    lx_free(p);
 }
 
 static void test_bvh(void) {
@@ -856,6 +877,25 @@ int main(void) {
     test_scene();
     test_meshes();
     test_png();
+    test_png_formats();
+    {
+        printf("material maps\n");
+        LxMaterial m = lx_material_default(), r;
+        lx_strcpy(m.height_map, sizeof m.height_map, "Textures/H.png");
+        lx_strcpy(m.ao_map, sizeof m.ao_map, "Textures/AO.png");
+        lx_strcpy(m.roughness_map, sizeof m.roughness_map, "Textures/R.png");
+        lx_strcpy(m.metallic_map, sizeof m.metallic_map, "Textures/M.png");
+        m.normal_strength = 1.5f; m.normal_flip_green = true; m.roughness_is_smoothness = true;
+        m.height_scale = 0.07f; m.parallax_shadows = false; m.ao_strength = 0.5f;
+        char path[LX_PATH_MAX];
+        lx_path_join(path, sizeof path, tmpdir(), "luxora_mat_test.lxmat");
+        CHECK(lx_material_save(&m, path) && lx_material_load(&r, path), "material saves");
+        CHECK(!strcmp(r.height_map, m.height_map) && !strcmp(r.ao_map, m.ao_map) && !strcmp(r.roughness_map, m.roughness_map) &&
+              !strcmp(r.metallic_map, m.metallic_map), "map references survive");
+        CHECK(NEAR(r.normal_strength, 1.5f, 1e-5f) && r.normal_flip_green && r.roughness_is_smoothness && NEAR(r.height_scale, 0.07f, 1e-5f) &&
+              !r.parallax_shadows && NEAR(r.ao_strength, 0.5f, 1e-5f), "map settings survive");
+        lx_path_remove(path);
+    }
     test_bvh();
     test_gi();
     test_gi_convergence();

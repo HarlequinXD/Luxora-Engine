@@ -94,6 +94,22 @@ static void s_prompt_shot(void) {
     const char *shot = getenv("LUXORA_SMOKE_SHOT");   /* CI: picture of the save prompt + title bar */
     if (shot && shot[0]) lx_renderer_screenshot(shot);
 }
+/* CI: a close, low-angle look at the sample's cobblestone path (parallax occlusion, normal, AO maps) */
+static void s_parallax_view(void) {
+    ED.game_view = false;
+    ED.selected = 0;
+    ED.cam_pos = lx_v3(1.0f, 0.75f, 5.3f);
+    ED.cam_yaw = 0.0f;
+    ED.cam_pitch = -20.0f;
+}
+static void s_parallax_shot(void) {
+    const char *shot = getenv("LUXORA_SMOKE_SHOT");
+    if (!shot || !shot[0]) return;
+    char dir[LX_PATH_MAX], path[LX_PATH_MAX];
+    lx_path_parent(dir, sizeof dir, shot);
+    lx_path_join(path, sizeof path, dir[0] ? dir : ".", "parallax.ppm");
+    lx_renderer_screenshot(path);
+}
 static void s_quit_cancel(void) {
     UiNode *cancel = find_node(ui_root(ED.ui), NULL, "Cancel");
     extern UiNode *ui_modal_node(UiCtx *ui);
@@ -320,6 +336,8 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {228, s_quit_prompt, "close the window with unsaved changes"},
     {229, s_prompt_shot, "screenshot of the save prompt"},
     {231, s_quit_cancel, "cancel the save prompt"},
+    {233, s_parallax_view, "look at the cobblestone path"},
+    {238, s_parallax_shot, "screenshot of parallax mapping"},
 };
 
 bool ed_smoke_step(int frame) {
@@ -328,5 +346,5 @@ bool ed_smoke_step(int frame) {
             LX_INFO("[smoke] %s", STEPS[i].what);
             if (ED.mode == ED_MODE_EDITOR || frame >= 216) STEPS[i].fn(); /* the last steps run in the Project Manager */
         }
-    return frame < 236;
+    return frame < 241;
 }

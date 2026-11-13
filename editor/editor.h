@@ -216,6 +216,9 @@ void ed_confirm(const char *title, const char *message, const char *ok_text, voi
 void ed_prompt(const char *title, const char *label, const char *initial, void (*on_ok)(const char *text));
 
 
+void ed_materials_flush(bool force);
+void ed_remember_scene(void);           /* editor.c: reopen this scene next time */   /* panels.c: write edited materials */
+
 /* scripts.c: compiling Assets/Scripts with the built-in compiler */
 bool ed_scripts_compile(const char *out_path, bool *had_scripts);
 bool ed_scripts_compile_dir(const char *assets, const char *sdk_dir, const char *out_path, bool *had_scripts);

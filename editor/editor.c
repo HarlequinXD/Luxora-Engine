@@ -252,12 +252,46 @@ void ed_open_project(const char *root) {
     ED.selected = 0;
     ED.selected_asset[0] = 0;
     ED.play = ED_EDIT;
-    if (!ed_open_scene(p.startup_scene)) ed_new_scene("Main");
     ED.cam_pos = lx_v3(4.5f, 3.2f, 7.5f);
     ED.cam_yaw = 31.0f;
     ED.cam_pitch = -16.0f;
+    /* reopen where you left off: the last scene you worked on and the view of it */
+    char state[LX_PATH_MAX], last[LX_REF_MAX] = "";
+    lx_path_join(state, sizeof state, p.root, "Library/EditorState.txt");
+    char *st = lx_file_read(state, NULL);
+    if (st) {
+        const char *cur = st;
+        char k[64], v[LX_REF_MAX];
+        int r;
+        while ((r = lx_kv_next(&cur, k, sizeof k, v, sizeof v))) {
+            if (r != 1) continue;
+            if (!strcmp(k, "scene")) lx_strcpy(last, sizeof last, v);
+            else if (!strcmp(k, "camera")) {
+                float a, b, c, yaw, pitch;
+                if (sscanf(v, "%f %f %f %f %f", &a, &b, &c, &yaw, &pitch) == 5) {
+                    ED.cam_pos = lx_v3(a, b, c);
+                    ED.cam_yaw = yaw;
+                    ED.cam_pitch = pitch;
+                }
+            }
+        }
+        lx_free(st);
+    }
+    if (!(last[0] && ed_open_scene(last)) && !ed_open_scene(p.startup_scene)) ed_new_scene("Main");
     ed_set_mode(ED_MODE_EDITOR);
     LX_INFO("Opened project '%s' (%s)", p.name, p.root);
+}
+
+/* Library/EditorState.txt: the scene you were working on and the editor camera */
+void ed_remember_scene(void) {
+    if (!ED.has_project || !ED.scene_ref[0]) return;
+    char path[LX_PATH_MAX], dir[LX_PATH_MAX], text[LX_REF_MAX + 160];
+    lx_path_join(dir, sizeof dir, ED.project.root, "Library");
+    lx_mkdir_p(dir);
+    lx_path_join(path, sizeof path, dir, "EditorState.txt");
+    snprintf(text, sizeof text, "scene = %s\ncamera = %g %g %g %g %g\n", ED.scene_ref, ED.cam_pos.x, ED.cam_pos.y, ED.cam_pos.z,
+             ED.cam_yaw, ED.cam_pitch);
+    lx_file_write(path, text, strlen(text));
 }
 
 void ed_request_close_project(void) {
@@ -283,6 +317,8 @@ void ed_run_pending(void) {
 void ed_close_project(void) {
     if (!ED.has_project) return;
     if (ED.play != ED_EDIT) ed_stop();
+    ed_materials_flush(true);
+    ed_remember_scene();
     lx_audio_stop_all();
     if (ED.scene) lx_scene_destroy(ED.scene);
     ED.scene = NULL;
@@ -327,6 +363,7 @@ bool ed_open_scene(const char *ref) {
     LxScene *s = lx_scene_load(path);
     if (!s) return false;
     ed_set_scene(s, ref);
+    ed_remember_scene();
     LX_INFO("Opened scene %s", ref);
     return true;
 }
@@ -363,7 +400,9 @@ bool ed_save_scene(void) {
     if (!ED.scene_ref[0]) { ed_save_scene_as_dialog(); return false; }
     char path[LX_PATH_MAX];
     lx_asset_path(path, sizeof path, ED.scene_ref);
+    ed_materials_flush(true);
     if (!lx_scene_save(ED.scene, path)) { ui_notify(ED.ui, "Save failed: %s", path); return false; }
+    ed_remember_scene();
     ED.dirty = false;
     ui_notify(ED.ui, "Scene saved");
     ed_update_title();
@@ -1085,6 +1124,7 @@ void ed_shortcuts(void) {
 void ed_update(float dt) {
     ed_build_poll();
     if (ED.play == ED_EDIT) ed_scripts_poll();
+    ed_materials_flush(false);
     if (!ED.scene) return;
     ed_shortcuts();
     /* edit gestures end when the mouse is released and no field is being typed in */

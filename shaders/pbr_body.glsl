@@ -15,12 +15,19 @@ layout(location = 2) out vec4 o_spec;    // rgb: weight of the reflected light, 
 
 layout(set = 1, binding = 0) uniform sampler2D u_albedo_map;
 layout(set = 1, binding = 1) uniform sampler2D u_normal_map;
+layout(set = 1, binding = 2) uniform sampler2D u_roughness_map;  // G channel (grayscale or ORM-packed)
+layout(set = 1, binding = 3) uniform sampler2D u_metallic_map;   // B channel
+layout(set = 1, binding = 4) uniform sampler2D u_ao_map;         // R channel
+layout(set = 1, binding = 5) uniform sampler2D u_height_map;     // R channel, white = high
 
 layout(push_constant) uniform Material {
     vec4 albedo;
-    vec4 params;    // metallic, roughness, uv scale, has normal map
+    vec4 params;    // metallic, roughness, uv scale, normal strength (0 = no normal map, < 0 = DirectX green)
     vec4 emissive;  // rgb, strength
+    vec4 params2;   // height scale (0 = no parallax), ao strength, flags, -
 } m;
+
+const int MF_ROUGH_MAP = 1, MF_METAL_MAP = 2, MF_AO_MAP = 4, MF_SMOOTHNESS = 8, MF_PARALLAX_SHADOWS = 16;
 
 const float PI = 3.14159265;
 
@@ -86,24 +93,114 @@ vec3 env_brdf_approx(vec3 f0, float rough, float ndv) {
     return f0 * ab.x + ab.y;
 }
 
+/* ---- parallax occlusion mapping ----
+ * Ray-marches the height map in tangent space: the step count adapts to the viewing angle (more steps
+ * at grazing angles, where the offset is largest), the hit is refined by interpolating between the
+ * last two layers, texture gradients come from the original UVs (no mip seams), and the effect fades
+ * out with distance so far-away surfaces pay nothing. The depth found also drives self-shadowing. */
+float pom_height(vec2 uv, vec2 dx, vec2 dy) { return textureGrad(u_height_map, uv, dx, dy).r; }
+
+vec2 parallax_uv(vec2 uv, vec3 v_ts, float scale, vec2 dx, vec2 dy, out float hit_depth) {
+    hit_depth = 0.0;
+    float nz = max(v_ts.z, 0.08);
+    float layers = mix(48.0, 10.0, clamp(v_ts.z, 0.0, 1.0));
+    float layer = 1.0 / layers;
+    vec2 delta = -(v_ts.xy / nz) * scale * layer;   // UV shift per layer, away from the eye
+    vec2 cur_uv = uv;
+    float cur_depth = 0.0;
+    float surf = 1.0 - pom_height(cur_uv, dx, dy);
+    vec2 prev_uv = cur_uv;
+    float prev_surf = surf, prev_depth = 0.0;
+    for (int i = 0; i < 64 && cur_depth < surf; i++) {
+        prev_uv = cur_uv; prev_surf = surf; prev_depth = cur_depth;
+        cur_uv += delta;
+        cur_depth += layer;
+        surf = 1.0 - pom_height(cur_uv, dx, dy);
+    }
+    // linear refinement between the layer above and below the surface
+    float after = surf - cur_depth, before = prev_surf - prev_depth;
+    float t = clamp(before / max(before - after, 1e-5), 0.0, 1.0);
+    hit_depth = mix(prev_depth, cur_depth, t);
+    return mix(prev_uv, cur_uv, t);
+}
+
+/* Soft self-shadowing: march from the hit point towards the light and see how far the height field
+ * rises above the ray. */
+float parallax_shadow(vec2 uv, float depth, vec3 l_ts, float scale, vec2 dx, vec2 dy) {
+    if (l_ts.z <= 0.0) return 0.0;
+    if (depth <= 0.001) return 1.0;
+    const int STEPS = 16;
+    float layer = depth / float(STEPS);
+    vec2 delta = (l_ts.xy / max(l_ts.z, 0.08)) * scale * layer;
+    float shadow = 0.0;
+    vec2 p = uv;
+    float d = depth;
+    for (int i = 1; i <= STEPS; i++) {
+        p += delta;
+        d -= layer;
+        float surf = 1.0 - pom_height(p, dx, dy);
+        float above = d - surf;   // > 0: the height field is above the ray
+        shadow = max(shadow, above * (1.0 - float(i) / float(STEPS)) * 12.0);
+    }
+    return 1.0 - clamp(shadow, 0.0, 1.0);
+}
+
 void main() {
     vec2 uv = v_uv * m.params.z;
-    vec4 tex = texture(u_albedo_map, uv);
-    vec3 albedo = m.albedo.rgb * tex.rgb * v_tint.rgb;
-    float metallic = clamp(m.params.x, 0.0, 1.0);
-    float rough = clamp(m.params.y, 0.04, 1.0);
-    vec3 n = normalize(v_normal);
-    if (m.params.w > 0.5) {
-        vec3 t = normalize(v_tangent.xyz - n * dot(n, v_tangent.xyz));
-        vec3 bt = cross(n, t) * v_tangent.w;
-        vec3 tn = texture(u_normal_map, uv).xyz * 2.0 - 1.0;
-        n = normalize(mat3(t, bt, n) * tn);
-    }
+    vec2 uv_dx = dFdx(uv), uv_dy = dFdy(uv);
     vec3 v = normalize(u.camera_pos.xyz - v_world);
-    if (dot(n, v) < 0.0) n = -n; // two-sided lighting for thin geometry like planes
+    // geometric normal facing the viewer (planes are drawn two-sided)
+    vec3 ng = normalize(v_normal);
+    if (dot(ng, v) < 0.0) ng = -ng;
+    vec3 t = v_tangent.xyz - ng * dot(ng, v_tangent.xyz);
+    t = dot(t, t) > 1e-8 ? normalize(t) : normalize(cross(ng, abs(ng.y) < 0.99 ? vec3(0, 1, 0) : vec3(1, 0, 0)));
+    vec3 bt = cross(ng, t) * (v_tangent.w < 0.0 ? -1.0 : 1.0) * (dot(normalize(v_normal), ng) < 0.0 ? -1.0 : 1.0);
+    mat3 tbn = mat3(t, bt, ng);
+    int flags = int(m.params2.z + 0.5);
+
+    float pom_depth = 0.0, self_shadow = 1.0;
+    float height_scale = m.params2.x;
+    if (height_scale > 0.0) {
+        float fade = 1.0 - smoothstep(25.0, 45.0, v_view_depth);
+        if (fade > 0.0) {
+            vec3 v_ts = transpose(tbn) * v;
+            uv = parallax_uv(uv, v_ts, height_scale * fade, uv_dx, uv_dy, pom_depth);
+            if ((flags & MF_PARALLAX_SHADOWS) != 0 && u.sun_color.w > 0.5) {
+                vec3 l_ts = transpose(tbn) * -u.sun_dir.xyz;
+                self_shadow = mix(1.0, parallax_shadow(uv, pom_depth, l_ts, height_scale * fade, uv_dx, uv_dy), fade);
+            }
+        }
+    }
+
+    vec4 tex = textureGrad(u_albedo_map, uv, uv_dx, uv_dy);
+    vec3 albedo = m.albedo.rgb * tex.rgb * v_tint.rgb;
+    float metallic = m.params.x, rough = m.params.y;
+    if ((flags & MF_ROUGH_MAP) != 0) {
+        float r = textureGrad(u_roughness_map, uv, uv_dx, uv_dy).g;
+        rough *= (flags & MF_SMOOTHNESS) != 0 ? 1.0 - r : r;
+    }
+    if ((flags & MF_METAL_MAP) != 0) metallic *= textureGrad(u_metallic_map, uv, uv_dx, uv_dy).b;
+    metallic = clamp(metallic, 0.0, 1.0);
+    rough = clamp(rough, 0.04, 1.0);
+    float ao = 1.0;
+    if ((flags & MF_AO_MAP) != 0) ao = mix(1.0, textureGrad(u_ao_map, uv, uv_dx, uv_dy).r, clamp(m.params2.y, 0.0, 1.0));
+    ao *= 1.0 - pom_depth * 0.35 * clamp(height_scale * 10.0, 0.0, 1.0);   // deep crevices get less ambient light
+
+    vec3 n = ng;
+    float nstrength = m.params.w;
+    if (nstrength != 0.0) {
+        vec3 tn = textureGrad(u_normal_map, uv, uv_dx, uv_dy).xyz * 2.0 - 1.0;
+        if (nstrength < 0.0) tn.y = -tn.y;     // DirectX-style normal map
+        tn.xy *= abs(nstrength);
+        n = normalize(tbn * tn);
+        // a bumped normal can face away from the eye at grazing angles; bend it back so it doesn't
+        // reflect the ground below the surface (black speckles)
+        float nv = dot(n, v);
+        if (nv < 0.05) n = normalize(n + v * (0.05 - nv));
+    }
     vec3 color = vec3(0.0);
     if (u.sun_color.w > 0.5)
-        color += brdf(n, v, -u.sun_dir.xyz, albedo, metallic, rough) * u.sun_color.rgb * shadow_factor(v_world, n);
+        color += brdf(n, v, -u.sun_dir.xyz, albedo, metallic, rough) * u.sun_color.rgb * shadow_factor(v_world, ng) * self_shadow;
     for (int i = 0; i < u.counts.x; i++) {
         LxLightData L = u.lights[i];
         vec3 to_l = L.pos_range.xyz - v_world;
@@ -127,7 +224,7 @@ void main() {
     vec3 f0 = mix(vec3(0.04), albedo, metallic);
     vec3 spec_env = env_brdf_approx(f0, rough, ndv);
     vec3 kd = (1.0 - spec_env) * (1.0 - metallic);
-    color += kd * albedo / PI * irradiance;
+    color += kd * albedo / PI * irradiance * ao;
     // specular ambient: probes (or the sky), pre-filtered by roughness
     vec3 r = reflect(-v, n);
     float local_w;
@@ -143,7 +240,9 @@ void main() {
         occl = mix(0.35, 1.0, sqrt(occl)); /* GI is low-frequency: never fully black out a reflection */
         occl = mix(occl, 1.0, local_w * 0.7);
     }
-    vec3 spec_weight = clamp(spec_env * occl, 0.0, 1.0);
+    // specular occlusion from the AO map (Lagarde & de Rousiers)
+    float spec_ao = clamp(pow(ndv + ao, exp2(-16.0 * rough - 1.0)) - 1.0 + ao, 0.0, 1.0);
+    vec3 spec_weight = clamp(spec_env * occl * spec_ao, 0.0, 1.0);
     color += spec_weight * env;
     color += m.emissive.rgb * m.emissive.w;
     float fog = 1.0 - exp(-u.ground_color.w * length(u.camera_pos.xyz - v_world));

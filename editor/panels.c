@@ -897,7 +897,9 @@ static void build_entity_inspector(UiNode *body) {
 /* ---------------- material editing (shared by the asset inspector and Mesh Renderer) ----------------
  * Widgets bind straight to the cached material the renderer draws with, so every change is
  * visible immediately. The .lxmat file is written when the edit gesture ends. */
-static char g_mat_pending[LX_REF_MAX];
+#define MAT_PENDING_MAX 32
+static char g_mat_pending[MAT_PENDING_MAX][LX_REF_MAX];   /* every edited material waits here until saved */
+static int g_mat_pending_count;
 
 static bool material_is_file(const char *ref) {
     if (!ref || !ref[0] || !strncmp(ref, "builtin:", 8)) return false;
@@ -906,18 +908,30 @@ static bool material_is_file(const char *ref) {
     return lx_file_exists(path);
 }
 
-static void material_changed(UiNode *n) {
-    lx_strcpy(g_mat_pending, sizeof g_mat_pending, n->path);
-    if (ED.scene) lx_scene_mark_static_dirty(ED.scene); /* albedo/absorption feed GI and acoustics */
+static void material_save_now(const char *ref) {
+    if (!material_is_file(ref)) return;
+    char path[LX_PATH_MAX];
+    lx_asset_path(path, sizeof path, ref);
+    if (!lx_material_save(lx_asset_material(ref), path)) ui_notify(ED.ui, "Could not save %s", ref);
 }
 
-static void material_flush(void) {
-    if (!g_mat_pending[0] || lx_mouse_down(LX_MOUSE_LEFT) || ui_wants_keyboard(ED.ui) || ui_popup_open(ED.ui)) return;
-    char path[LX_PATH_MAX];
-    lx_asset_path(path, sizeof path, g_mat_pending);
-    if (!lx_material_save(lx_asset_material(g_mat_pending), path)) ui_notify(ED.ui, "Could not save %s", g_mat_pending);
-    g_mat_pending[0] = 0;
+static void material_changed(UiNode *n) {
+    if (ED.scene) lx_scene_mark_static_dirty(ED.scene); /* albedo/absorption feed GI and acoustics */
+    for (int i = 0; i < g_mat_pending_count; i++)
+        if (!strcmp(g_mat_pending[i], n->path)) return;
+    if (g_mat_pending_count == MAT_PENDING_MAX) material_save_now(g_mat_pending[--g_mat_pending_count]);
+    lx_strcpy(g_mat_pending[g_mat_pending_count++], LX_REF_MAX, n->path);
 }
+
+/* Writes edited materials to disk: when the edit gesture ends, or right away when forced (saving
+ * the scene, closing the project, quitting). */
+void ed_materials_flush(bool force) {
+    if (!g_mat_pending_count) return;
+    if (!force && (lx_mouse_down(LX_MOUSE_LEFT) || ui_wants_keyboard(ED.ui) || ui_popup_open(ED.ui))) return;
+    for (int i = 0; i < g_mat_pending_count; i++) material_save_now(g_mat_pending[i]);
+    g_mat_pending_count = 0;
+}
+static void material_flush(void) { ed_materials_flush(false); }
 
 static UiNode *mat_bind(UiNode *n, const char *ref) {
     lx_strcpy(n->path, sizeof n->path, ref);
@@ -937,6 +951,23 @@ static void build_material_editor(UiNode *parent, const char *ref) {
     mat_bind(tx, ref);
     tx = asset_field(parent, "Normal Map", m->normal_map, sizeof m->normal_map, "texture");
     mat_bind(tx, ref);
+    mat_bind(slider_row(parent, "Normal Strength", &m->normal_strength, 0, 3), ref);
+    UiNode *fg = mat_bind(bool_row(parent, "DirectX Normal Map", &m->normal_flip_green), ref);
+    lx_strcpy(fg->tooltip, sizeof fg->tooltip, "Tick if the bumps look inverted: the map's green channel points down (DirectX / Unreal style)");
+    tx = mat_bind(asset_field(parent, "Roughness Map", m->roughness_map, sizeof m->roughness_map, "texture"), ref);
+    lx_strcpy(tx->tooltip, sizeof tx->tooltip, "Grayscale roughness (or the green channel of an AO/Roughness/Metallic pack), multiplied by Roughness");
+    UiNode *sm = mat_bind(bool_row(parent, "Map Is Smoothness", &m->roughness_is_smoothness), ref);
+    lx_strcpy(sm->tooltip, sizeof sm->tooltip, "Tick for gloss/smoothness maps (white = shiny)");
+    tx = mat_bind(asset_field(parent, "Metallic Map", m->metallic_map, sizeof m->metallic_map, "texture"), ref);
+    lx_strcpy(tx->tooltip, sizeof tx->tooltip, "Grayscale metalness (or the blue channel of an AO/Roughness/Metallic pack), multiplied by Metallic");
+    tx = mat_bind(asset_field(parent, "AO Map", m->ao_map, sizeof m->ao_map, "texture"), ref);
+    lx_strcpy(tx->tooltip, sizeof tx->tooltip, "Ambient occlusion (red channel): darkens ambient light and reflections in crevices");
+    mat_bind(slider_row(parent, "AO Strength", &m->ao_strength, 0, 1), ref);
+    tx = mat_bind(asset_field(parent, "Height Map", m->height_map, sizeof m->height_map, "texture"), ref);
+    lx_strcpy(tx->tooltip, sizeof tx->tooltip, "Displacement (white = high): parallax occlusion mapping gives the surface real depth");
+    UiNode *hs = mat_bind(slider_row(parent, "Parallax Depth", &m->height_scale, 0, 0.2f), ref);
+    lx_strcpy(hs->tooltip, sizeof hs->tooltip, "How deep the height map looks (in texture tiles). 0.03 - 0.08 suits stone and bricks");
+    mat_bind(bool_row(parent, "Parallax Self-Shadows", &m->parallax_shadows), ref);
     mat_bind(float_row(parent, "UV Scale", &m->uv_scale, 0.05f, 0.001f, 1000), ref);
     UiNode *a1 = mat_bind(slider_row(parent, "Sound Absorption", &m->acoustic_absorption, 0, 1), ref);
     lx_strcpy(a1->tooltip, sizeof a1->tooltip, "Sound energy swallowed on each reflection (carpet ~0.6, concrete ~0.02)");
@@ -1301,30 +1332,55 @@ UiNode *ed_stats_panel(UiNode *parent) {
 /* ======================================================================
  *  CONTENT BROWSER
  * ====================================================================== */
-typedef struct Thumb { char path[LX_PATH_MAX]; uint32_t tex; } Thumb;
-static Thumb g_thumbs[64];
-static int g_thumb_next;
+/* Thumbnails: cached per file (path + size, so a re-exported image refreshes), least recently used
+ * evicted - never one shown in the current frame, so a tile can't end up drawing someone else's. */
+#define THUMB_MAX 192
+typedef struct Thumb { char path[LX_PATH_MAX]; uint64_t size; uint32_t tex; float aspect; uint64_t used; } Thumb;
+static Thumb g_thumbs[THUMB_MAX];
+static uint64_t g_thumb_clock, g_thumb_rebuild;
 static char g_ctx_path[LX_PATH_MAX];
 
-static uint32_t thumbnail(const char *path) {
-    for (int i = 0; i < 64; i++) if (g_thumbs[i].tex && !strcmp(g_thumbs[i].path, path)) return g_thumbs[i].tex;
+static uint32_t thumbnail(const char *path, uint64_t file_size, float *aspect) {
+    uint64_t now = ++g_thumb_clock;
+    for (int i = 0; i < THUMB_MAX; i++)
+        if (g_thumbs[i].tex && g_thumbs[i].size == file_size && !strcmp(g_thumbs[i].path, path)) {
+            g_thumbs[i].used = now;
+            *aspect = g_thumbs[i].aspect;
+            return g_thumbs[i].tex;
+        }
     int w, h;
     uint8_t *px = lx_image_load(path, &w, &h);
-    if (!px) return 0;
-    /* box-downsample to <= 128 px */
-    int step = 1;
-    while (w / step > 128 || h / step > 128) step++;
-    int tw = w / step, th = h / step;
-    uint8_t *small = lx_alloc((size_t)tw * (size_t)th * 4);
-    for (int y = 0; y < th; y++)
-        for (int x = 0; x < tw; x++) memcpy(small + ((size_t)y * (size_t)tw + (size_t)x) * 4, px + ((size_t)(y * step) * (size_t)w + (size_t)(x * step)) * 4, 4);
-    lx_free(px);
-    Thumb *t = &g_thumbs[g_thumb_next];
-    g_thumb_next = (g_thumb_next + 1) % 64;
+    if (!px || w <= 0 || h <= 0) { lx_free(px); return 0; }
+    /* area-averaged downscale to fit 128x128, keeping the aspect ratio */
+    float k = 128.0f / (float)(w > h ? w : h);
+    int tw = w, th = h;
+    uint8_t *small = px;
+    if (k < 1.0f) {
+        tw = (int)((float)w * k + 0.5f); th = (int)((float)h * k + 0.5f);
+        if (tw < 1) tw = 1;
+        if (th < 1) th = 1;
+        small = lx_image_resize(px, w, h, tw, th);
+        lx_free(px);
+        if (!small) return 0;
+    }
+    /* reuse: the same file's old entry, else an empty slot, else the least recently used */
+    int slot = -1;
+    for (int i = 0; i < THUMB_MAX && slot < 0; i++) if (g_thumbs[i].tex && !strcmp(g_thumbs[i].path, path)) slot = i;
+    for (int i = 0; i < THUMB_MAX && slot < 0; i++) if (!g_thumbs[i].tex) slot = i;
+    if (slot < 0) {
+        for (int i = 0; i < THUMB_MAX; i++)
+            if (g_thumbs[i].used < g_thumb_rebuild && (slot < 0 || g_thumbs[i].used < g_thumbs[slot].used)) slot = i;
+        if (slot < 0) { lx_free(small); return 0; }   /* every cached thumbnail is on screen: show the icon */
+    }
+    Thumb *t = &g_thumbs[slot];
     if (t->tex) lx_ui_texture_free(t->tex);
     t->tex = lx_ui_texture_from_rgba(small, tw, th);
     lx_strcpy(t->path, sizeof t->path, path);
+    t->size = file_size;
+    t->aspect = (float)tw / (float)th;
+    t->used = now;
     lx_free(small);
+    *aspect = t->aspect;
     return t->tex;
 }
 
@@ -1597,6 +1653,7 @@ static void content_frame(UiNode *panel) {
     /* grid */
     UiNode *grid = ED.content_grid;
     ui_clear(ui, grid);
+    g_thumb_rebuild = g_thumb_clock + 1;   /* thumbnails used from here on are on screen: keep them */
     grid->wrap = !ED.content_list_view;
     grid->scroll = true;
     grid->dir = ED.content_list_view ? UI_COL : UI_ROW;
@@ -1623,7 +1680,8 @@ static void content_frame(UiNode *panel) {
         tl->selected = !strcmp(ED.selected_asset, full);
         lx_strcpy(tl->tooltip, sizeof tl->tooltip, ref);
         if (e[i].is_dir) { tl->accept = "mesh,material,texture,sound,scene,script,file,folder"; tl->on_drop = folder_drop; }
-        uint32_t thumb = icon == UI_ICON_TEXTURE ? thumbnail(full) : 0;
+        float thumb_aspect = 1.0f;
+        uint32_t thumb = icon == UI_ICON_TEXTURE ? thumbnail(full, e[i].size, &thumb_aspect) : 0;
         if (ED.content_list_view) {
             tl->h = 26;
             ui_pad(tl, 8, 0, 8, 0);
@@ -1646,7 +1704,7 @@ static void content_frame(UiNode *panel) {
             if (thumb) {
                 UiNode *img = ui_image(ui, tl, thumb);
                 img->h = tile - 18;
-                img->tex_aspect = 1.0f;
+                img->tex_aspect = thumb_aspect;
             } else {
                 UiNode *ic = ui_label(ui, tl, "");
                 ic->icon = icon;

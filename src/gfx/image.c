@@ -146,6 +146,41 @@ static int paeth(int a, int b, int c) {
     return pb <= pc ? b : c;
 }
 
+/* Un-filters one (sub)image of `rows` scanlines of `bytes` bytes each; bpp = bytes per pixel (>= 1). */
+static bool png_unfilter(const uint8_t *src, size_t avail, uint8_t *dst, size_t bytes, uint32_t rows, size_t bpp) {
+    if ((bytes + 1) * rows > avail) return false;
+    for (uint32_t y = 0; y < rows; y++) {
+        int filter = src[y * (bytes + 1)];
+        const uint8_t *in = src + y * (bytes + 1) + 1;
+        uint8_t *out = dst + y * bytes;
+        const uint8_t *prev = y ? out - bytes : NULL;
+        for (size_t x = 0; x < bytes; x++) {
+            int a = x >= bpp ? out[x - bpp] : 0;
+            int b = prev ? prev[x] : 0;
+            int c = (prev && x >= bpp) ? prev[x - bpp] : 0;
+            int v = in[x];
+            switch (filter) {
+            case 1: v += a; break;
+            case 2: v += b; break;
+            case 3: v += (a + b) / 2; break;
+            case 4: v += paeth(a, b, c); break;
+            default: break;
+            }
+            out[x] = (uint8_t)v;
+        }
+    }
+    return true;
+}
+
+/* Sample `ch` of pixel x in an unfiltered scanline, scaled to 8 bits (handles 1/2/4/8/16-bit depths). */
+static int png_sample(const uint8_t *row, uint32_t x, int ch, int channels, int depth, bool palette) {
+    if (depth == 16) return row[((size_t)x * (size_t)channels + (size_t)ch) * 2];   /* high byte */
+    if (depth == 8) return row[(size_t)x * (size_t)channels + (size_t)ch];
+    size_t bit = (size_t)x * (size_t)depth;            /* sub-byte depths have one channel */
+    int v = (row[bit >> 3] >> (8 - depth - (int)(bit & 7))) & ((1 << depth) - 1);
+    return palette ? v : v * 255 / ((1 << depth) - 1);
+}
+
 uint8_t *lx_png_decode(const uint8_t *data, size_t size, int *w, int *h) {
     static const uint8_t sig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
     if (size < 8 || memcmp(data, sig, 8) != 0) return NULL;
@@ -155,20 +190,23 @@ uint8_t *lx_png_decode(const uint8_t *data, size_t size, int *w, int *h) {
     uint8_t *idat = NULL;
     size_t idat_len = 0;
     uint8_t palette[256][4];
-    int pal_count = 0;
+    int trns_key[3] = {-1, -1, -1};   /* gray / RGB colour that is transparent */
     memset(palette, 255, sizeof palette);
+    for (int i = 0; i < 256; i++) palette[i][0] = palette[i][1] = palette[i][2] = 0;
     while (pos + 12 <= size) {
         uint32_t len = be32(data + pos);
         const uint8_t *type = data + pos + 4, *body = data + pos + 8;
-        if (pos + 12 + len > size) break;
-        if (!memcmp(type, "IHDR", 4)) {
+        if (len > size || pos + 12 + len > size) break;
+        if (!memcmp(type, "IHDR", 4) && len >= 13) {
             width = be32(body); height = be32(body + 4);
             depth = body[8]; color = body[9]; interlace = body[12];
         } else if (!memcmp(type, "PLTE", 4)) {
-            pal_count = (int)(len / 3);
-            for (int i = 0; i < pal_count && i < 256; i++) { palette[i][0] = body[i * 3]; palette[i][1] = body[i * 3 + 1]; palette[i][2] = body[i * 3 + 2]; }
-        } else if (!memcmp(type, "tRNS", 4) && color == 3) {
-            for (uint32_t i = 0; i < len && i < 256; i++) palette[i][3] = body[i];
+            int count = (int)(len / 3);
+            for (int i = 0; i < count && i < 256; i++) { palette[i][0] = body[i * 3]; palette[i][1] = body[i * 3 + 1]; palette[i][2] = body[i * 3 + 2]; }
+        } else if (!memcmp(type, "tRNS", 4)) {
+            if (color == 3) for (uint32_t i = 0; i < len && i < 256; i++) palette[i][3] = body[i];
+            else if (color == 0 && len >= 2) trns_key[0] = (body[0] << 8) | body[1];
+            else if (color == 2 && len >= 6) for (int c = 0; c < 3; c++) trns_key[c] = (body[c * 2] << 8) | body[c * 2 + 1];
         } else if (!memcmp(type, "IDAT", 4)) {
             idat = lx_realloc(idat, idat_len + len);
             memcpy(idat + idat_len, body, len);
@@ -176,52 +214,71 @@ uint8_t *lx_png_decode(const uint8_t *data, size_t size, int *w, int *h) {
         } else if (!memcmp(type, "IEND", 4)) break;
         pos += 12 + len;
     }
-    if (!idat || !width || !height || interlace || depth != 8 || width > 16384 || height > 16384) {
-        if (idat && depth != 8) LX_WARN("PNG: only 8-bit, non-interlaced images are supported");
+    int channels = color == 0 ? 1 : color == 2 ? 3 : color == 3 ? 1 : color == 4 ? 2 : color == 6 ? 4 : 0;
+    bool depth_ok = depth == 8 || depth == 16 || ((color == 0 || color == 3) && (depth == 1 || depth == 2 || depth == 4));
+    if (color == 3 && depth == 16) depth_ok = false;
+    if (!idat || !width || !height || !channels || !depth_ok || interlace > 1 || width > 16384 || height > 16384) {
+        if (idat) LX_WARN("PNG: unsupported format (colour type %d, %d-bit)", color, depth);
         lx_free(idat);
         return NULL;
     }
-    int channels = color == 0 ? 1 : color == 2 ? 3 : color == 3 ? 1 : color == 4 ? 2 : 4;
     size_t raw_len = 0;
     uint8_t *raw = zlib_inflate(idat, idat_len, &raw_len);
     lx_free(idat);
-    size_t stride = (size_t)width * (size_t)channels;
-    if (!raw || raw_len < (stride + 1) * height) { lx_free(raw); return NULL; }
-    uint8_t *img = lx_alloc(stride * height);
-    for (uint32_t y = 0; y < height; y++) {
-        int filter = raw[y * (stride + 1)];
-        const uint8_t *src = raw + y * (stride + 1) + 1;
-        uint8_t *dst = img + y * stride;
-        const uint8_t *prev = y ? img + (y - 1) * stride : NULL;
-        for (size_t x = 0; x < stride; x++) {
-            int a = x >= (size_t)channels ? dst[x - (size_t)channels] : 0;
-            int b = prev ? prev[x] : 0;
-            int c = (prev && x >= (size_t)channels) ? prev[x - (size_t)channels] : 0;
-            int v = src[x];
-            switch (filter) {
-            case 1: v += a; break;
-            case 2: v += b; break;
-            case 3: v += (a + b) / 2; break;
-            case 4: v += paeth(a, b, c); break;
-            default: break;
+    if (!raw) return NULL;
+    size_t bpp = (size_t)(channels * depth + 7) / 8;     /* bytes per pixel for filtering (>= 1) */
+    uint8_t *rgba = lx_alloc((size_t)width * height * 4);
+    /* Adam7 passes (a non-interlaced image is one pass covering everything) */
+    static const int P_X0[7] = {0, 4, 0, 2, 0, 1, 0}, P_Y0[7] = {0, 0, 4, 0, 2, 0, 1};
+    static const int P_DX[7] = {8, 8, 4, 4, 2, 2, 1}, P_DY[7] = {8, 8, 8, 4, 4, 2, 2};
+    int passes = interlace ? 7 : 1;
+    size_t at = 0;
+    bool ok = true;
+    for (int p = 0; p < passes && ok; p++) {
+        int x0 = interlace ? P_X0[p] : 0, y0 = interlace ? P_Y0[p] : 0, dx = interlace ? P_DX[p] : 1, dy = interlace ? P_DY[p] : 1;
+        uint32_t pw = width > (uint32_t)x0 ? (width - (uint32_t)x0 + (uint32_t)dx - 1) / (uint32_t)dx : 0;
+        uint32_t ph = height > (uint32_t)y0 ? (height - (uint32_t)y0 + (uint32_t)dy - 1) / (uint32_t)dy : 0;
+        if (!pw || !ph) continue;
+        size_t bytes = ((size_t)pw * (size_t)channels * (size_t)depth + 7) / 8;
+        uint8_t *img = lx_alloc(bytes * ph);
+        if (at > raw_len || !png_unfilter(raw + at, raw_len - at, img, bytes, ph, bpp)) { ok = false; lx_free(img); break; }
+        at += (bytes + 1) * ph;
+        for (uint32_t y = 0; y < ph; y++) {
+            const uint8_t *row = img + (size_t)y * bytes;
+            for (uint32_t x = 0; x < pw; x++) {
+                uint8_t *d = rgba + ((size_t)(y0 + (int)y * dy) * width + (size_t)(x0 + (int)x * dx)) * 4;
+                int s0 = png_sample(row, x, 0, channels, depth, color == 3);
+                switch (color) {
+                case 0: {
+                    d[0] = d[1] = d[2] = (uint8_t)s0;
+                    int full = depth == 16 ? (row[(size_t)x * 2] << 8) | row[(size_t)x * 2 + 1]
+                                           : depth == 8 ? s0 : png_sample(row, x, 0, 1, depth, true);
+                    d[3] = full == trns_key[0] ? 0 : 255;
+                    break;
+                }
+                case 2: {
+                    d[0] = (uint8_t)s0; d[1] = (uint8_t)png_sample(row, x, 1, 3, depth, false); d[2] = (uint8_t)png_sample(row, x, 2, 3, depth, false);
+                    bool key = trns_key[0] >= 0;
+                    for (int c = 0; c < 3 && key; c++) {
+                        int full = depth == 16 ? (row[((size_t)x * 3 + (size_t)c) * 2] << 8) | row[((size_t)x * 3 + (size_t)c) * 2 + 1] : d[c];
+                        key = full == trns_key[c];
+                    }
+                    d[3] = key ? 0 : 255;
+                    break;
+                }
+                case 3: memcpy(d, palette[s0 & 255], 4); break;
+                case 4: d[0] = d[1] = d[2] = (uint8_t)s0; d[3] = (uint8_t)png_sample(row, x, 1, 2, depth, false); break;
+                default:
+                    d[0] = (uint8_t)s0; d[1] = (uint8_t)png_sample(row, x, 1, 4, depth, false);
+                    d[2] = (uint8_t)png_sample(row, x, 2, 4, depth, false); d[3] = (uint8_t)png_sample(row, x, 3, 4, depth, false);
+                    break;
+                }
             }
-            dst[x] = (uint8_t)v;
         }
+        lx_free(img);
     }
     lx_free(raw);
-    uint8_t *rgba = lx_alloc((size_t)width * height * 4);
-    for (size_t i = 0; i < (size_t)width * height; i++) {
-        const uint8_t *s = img + i * (size_t)channels;
-        uint8_t *d = rgba + i * 4;
-        switch (color) {
-        case 0: d[0] = d[1] = d[2] = s[0]; d[3] = 255; break;
-        case 2: d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255; break;
-        case 3: memcpy(d, palette[s[0]], 4); break;
-        case 4: d[0] = d[1] = d[2] = s[0]; d[3] = s[1]; break;
-        default: memcpy(d, s, 4); break;
-        }
-    }
-    lx_free(img);
+    if (!ok) { lx_free(rgba); return NULL; }
     *w = (int)width;
     *h = (int)height;
     return rgba;
