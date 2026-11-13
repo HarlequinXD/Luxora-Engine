@@ -110,6 +110,12 @@ static void preset_changed(UiNode *n) {
     extern void ed_settings_rebuild(void);
     ed_settings_rebuild();
 }
+static const char *PROBE_RES_OPTS[] = {"64", "128", "256", "512"};
+static int g_probe_res;
+static void probe_res_set(UiNode *n) {
+    ED.project.graphics.reflection_resolution = 64 << g_probe_res;
+    save_project(n);
+}
 static void build_graphics(UiNode *b) {
     LxGraphicsSettings *g = &ED.project.graphics;
     UiNode *s = ed_section(b, UI_ICON_MONITOR, "Quality", &g_dummy_open, NULL);
@@ -127,6 +133,17 @@ static void build_graphics(UiNode *b) {
     row_slider(s, "Intensity", &g->gi_intensity, 0, 4);
     row_slider(s, "Responsiveness", &g->gi_responsiveness, 0.01f, 1);
     note(s, UI_ICON_INFO, "Photons are traced on all CPU cores and converge over frames. More photons = less noise.");
+    s = ed_section(b, UI_ICON_PROBE, "Reflections", &g_dummy_open, NULL);
+    row_bool(s, "Reflection Probes", &g->reflections_enabled);
+    g_probe_res = g->reflection_resolution >= 512 ? 3 : g->reflection_resolution >= 256 ? 2 : g->reflection_resolution >= 128 ? 1 : 0;
+    row_drop(s, "Probe Resolution", &g_probe_res, PROBE_RES_OPTS, 4)->on_change = probe_res_set;
+    row_bool(s, "Screen-Space Reflections", &g->ssr_enabled);
+    row_int(s, "SSR Steps", &g->ssr_steps, 8, 128);
+    row_num(s, "SSR Max Distance", &g->ssr_max_distance, 0.5f, 1, 500);
+    row_num(s, "SSR Thickness", &g->ssr_thickness, 0.01f, 0.01f, 5);
+    row_slider(s, "SSR Max Roughness", &g->ssr_max_roughness, 0.05f, 1);
+    note(s, UI_ICON_INFO, "Probes reflect the whole surroundings (an automatic one follows the camera; place Reflection Probe "
+                          "objects for rooms). Screen-space reflections add exact detail for what is on screen.");
     s = ed_section(b, UI_ICON_LAYERS, "Shadows", &g_dummy_open, NULL);
     row_int(s, "Resolution", &g->shadow_resolution, 256, 8192)->step = 64;
     row_int(s, "Cascades", &g->shadow_cascades, 1, 4);

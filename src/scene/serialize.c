@@ -50,6 +50,11 @@ static void write_entity(LxStrBuf *sb, const LxScene *s, LxEntity e, int id_of_p
         lx_sb_printf(sb, "crowd.agents = %d\ncrowd.radius = %g\ncrowd.speed = %g\ncrowd.mesh = %s\ncrowd.material = %s\n",
                      c->agent_count, c->area_radius, c->agent_speed, c->mesh, c->material);
     }
+    if (d->comps & LX_COMP_REFLECTION_PROBE) {
+        const LxReflectionProbe *p = &d->probe;
+        lx_sb_printf(sb, "probe.size = %g %g %g\nprobe.intensity = %g\nprobe.blend = %g\nprobe.box = %d\nprobe.realtime = %d\n", p->size.x,
+                     p->size.y, p->size.z, p->intensity, p->blend_distance, p->box_projection, p->realtime);
+    }
     for (LxEntity c = d->first_child; c; c = lx_entity_next_sibling(s, c)) write_entity(sb, s, c, id, next_id);
 }
 
@@ -175,6 +180,14 @@ LxScene *lx_scene_deserialize(const char *text) {
             else if (!strcmp(f, "speed")) c->agent_speed = (float)atof(v);
             else if (!strcmp(f, "mesh")) lx_strcpy(c->mesh, sizeof c->mesh, v);
             else if (!strcmp(f, "material")) lx_strcpy(c->material, sizeof c->material, v);
+        } else if (!strncmp(k, "probe.", 6)) {
+            const char *f = k + 6;
+            LxReflectionProbe *p = lx_add_reflection_probe(s, cur_e);
+            if (!strcmp(f, "size")) p->size = lx_parse_vec3(v);
+            else if (!strcmp(f, "intensity")) p->intensity = (float)atof(v);
+            else if (!strcmp(f, "blend")) p->blend_distance = (float)atof(v);
+            else if (!strcmp(f, "box")) p->box_projection = lx_parse_bool(v);
+            else if (!strcmp(f, "realtime")) p->realtime = lx_parse_bool(v);
         }
     }
     lx_free(ids);

@@ -414,6 +414,22 @@ static void draw_gizmo(UiCtx *ui) {
     else ui_draw_ring(ui, sc.x, sc.y, 7 * ui_scale(ui), 2, cc, 16);
 }
 
+/* the influence box of a selected reflection probe */
+static void draw_probe_box(UiCtx *ui, LxEntity e, LxVec3 c) {
+    LxReflectionProbe *p = lx_get_reflection_probe(ED.scene, e);
+    if (!p) return;
+    LxVec3 sc = lx_entity_scale(ED.scene, e);
+    LxVec3 h = lx_v3(fabsf(p->size.x * sc.x) * 0.5f, fabsf(p->size.y * sc.y) * 0.5f, fabsf(p->size.z * sc.z) * 0.5f);
+    LxVec3 v[8];
+    for (int i = 0; i < 8; i++) v[i] = lx_v3(c.x + ((i & 1) ? h.x : -h.x), c.y + ((i & 2) ? h.y : -h.y), c.z + ((i & 4) ? h.z : -h.z));
+    static const int edges[12][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3}, {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+    uint32_t col = UI_RGBA(139, 233, 253, 200);
+    for (int i = 0; i < 12; i++) {
+        LxVec2 a, b;
+        if (to_screen(v[edges[i][0]], &a) && to_screen(v[edges[i][1]], &b)) ui_draw_line(ui, a.x, a.y, b.x, b.y, 1.5f * ui_scale(ui), col);
+    }
+}
+
 static void draw_icons(UiCtx *ui) {
     if (!ED.show_icons) return;
     int n = lx_scene_entity_count(ED.scene);
@@ -430,6 +446,7 @@ static void draw_icons(UiCtx *ui) {
         ui_draw_icon(ui, icon, s.x - sz * 0.4f, s.y - sz * 0.4f, sz * 0.8f, ed_color_for_icon(icon));
         /* direction hint for selected lights and cameras */
         uint32_t c = lx_entity_components(ED.scene, e);
+        if (sel && (c & LX_COMP_REFLECTION_PROBE)) draw_probe_box(ui, e, wp);
         if (sel && (c & (LX_COMP_LIGHT | LX_COMP_CAMERA))) {
             LxVec3 f = lx_entity_forward(ED.scene, e);
             LxVec2 tip;

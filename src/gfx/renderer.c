@@ -4,9 +4,12 @@
  *   1. CPU culling + LOD selection + batching into instanced draws (one draw per mesh/LOD/material)
  *   2. virtual-photon GI volume upload (L1 SH, three RGBA16F 3D textures) when it changes
  *   3. cascaded shadow maps (depth array, one layer per cascade)
- *   4. HDR forward PBR pass: sky, opaque geometry, editor grid and selection outline
- *   5. ACES tonemap into an LDR target (editor viewport) or straight into the swapchain
- *   6. UI pass on the swapchain (editor)
+ *   4. reflection probes: time-sliced cubemap capture of the scene + GGX pre-filtered mips
+ *   5. HDR forward PBR pass: sky, opaque geometry (+ normal/roughness/reflection-weight targets for SSR)
+ *   6. screen-space reflections: half-res trace, then a composite that replaces probe reflections where
+ *      the ray hit something on screen; editor grid and selection outline go on top
+ *   7. ACES tonemap into an LDR target (editor viewport) or straight into the swapchain
+ *   8. UI pass on the swapchain (editor)
  */
 #include "../lx_internal.h"
 #include "vk.h"
@@ -15,7 +18,9 @@
 #define FRAMES 2
 #define MAX_CASCADES 4
 #define MAX_LIGHTS 16
-#define MAX_VIEWS_PER_FRAME 8
+#define MAX_VIEWS_PER_FRAME 24   /* camera views + reflection-probe faces */
+#define PROBE_SLOTS 5            /* 0: automatic environment probe, 1..4: Reflection Probe objects */
+#define PROBE_MAX_MIPS 7
 #define MAX_UI_TEXTURES 1024
 #define SPV(name) name, sizeof(name)
 
@@ -37,7 +42,9 @@ struct LxRenderTarget {
     int w, h;              /* output size */
     int iw, ih;            /* internal (render-scaled) size */
     GpuImage hdr, depth, ldr;
-    VkDescriptorSet hdr_set;
+    GpuImage gnormal, gspec, ssr;   /* SSR inputs (full res) and trace result (half res) */
+    int sw, sh;                     /* half-res size */
+    VkDescriptorSet hdr_set, ssr_trace_set, ssr_comp_set;
     uint32_t ui_tex;
 };
 
@@ -67,6 +74,8 @@ typedef struct SceneUBO {
     float cascade_splits[4];
     float gi_origin[4], gi_cell[4], gi_res[4];
     int32_t counts[4];
+    float probe_pos[PROBE_SLOTS][4], probe_min[PROBE_SLOTS][4], probe_max[PROBE_SLOTS][4];
+    float refl[4];
     float lights[MAX_LIGHTS][12];
 } SceneUBO;
 
@@ -75,6 +84,20 @@ typedef struct DrawList {
     Batch *batches; int nb, cb;
     float *inst; int *item_batch; int ni, ci;
 } DrawList;
+
+typedef struct ProbeSlot {
+    GpuImage cube;                                  /* cube view over every mip (what the PBR shader samples) */
+    VkImageView face_view[PROBE_MAX_MIPS][6];       /* render targets */
+    VkImageView src_view[PROBE_MAX_MIPS];           /* mips [0, m): what pre-filtering mip m reads */
+    VkDescriptorSet src_set[PROBE_MAX_MIPS];
+    LxEntity entity;                                /* 0 = automatic environment probe */
+    bool used, valid, cycling, realtime;
+    int next_face;
+    uint64_t captured_hash, cycle_hash, want_hash;
+    LxVec3 pos, bmin, bmax, cap_pos;
+    float intensity, blend;
+    bool box;
+} ProbeSlot;
 
 /* ------------------------------------------------------------------ state */
 static struct {
@@ -110,11 +133,22 @@ static struct {
     VkFormat depth_format, hdr_format;
     /* descriptors */
     VkDescriptorPool desc_pool;
-    VkDescriptorSetLayout scene_layout, material_layout, tex_layout;
-    VkPipelineLayout pbr_layout, shadow_layout, scene_only_layout, outline_layout, tonemap_layout, ui_layout;
-    VkSampler linear_repeat, linear_clamp, shadow_sampler;
+    VkDescriptorSetLayout scene_layout, material_layout, tex_layout, probe_layout, ssr_layout;
+    VkPipelineLayout pbr_layout, shadow_layout, scene_only_layout, outline_layout, tonemap_layout, ui_layout, ssr_pipe_layout,
+        filter_layout;
+    VkSampler linear_repeat, linear_clamp, shadow_sampler, point_clamp, cube_sampler;
+    VkFormat gnormal_format, gspec_format;
     /* pipelines */
     VkPipeline pbr, shadow, sky, grid, outline, tonemap_ldr, tonemap_swap, ui;
+    VkPipeline pbr_mrt, sky_mrt, pbr_probe, probe_filter, ssr_trace, ssr_composite;
+    /* reflection probes */
+    ProbeSlot probes[PROBE_SLOTS];
+    int probe_res, probe_mips;
+    GpuImage probe_depth, dummy_cube;
+    VkDescriptorSet probe_set, probe_dummy_set;
+    DrawList probe_list;
+    uint64_t frame_serial, probe_frame;
+    int probe_rr;
     /* images */
     GpuImage shadow_map;
     int shadow_res, shadow_layers;
@@ -201,9 +235,9 @@ static void one_shot_end(VkCommandBuffer cmd) {
     vkFreeCommandBuffers(R.device, R.pool, 1, &cmd);
 }
 
-static void image_barrier(VkCommandBuffer cmd, VkImage img, VkImageAspectFlags aspect, VkImageLayout from, VkImageLayout to,
-                          VkPipelineStageFlags src_stage, VkAccessFlags src_access, VkPipelineStageFlags dst_stage,
-                          VkAccessFlags dst_access, uint32_t base_mip, uint32_t mips, uint32_t layers) {
+static void image_barrier_layers(VkCommandBuffer cmd, VkImage img, VkImageAspectFlags aspect, VkImageLayout from, VkImageLayout to,
+                                 VkPipelineStageFlags src_stage, VkAccessFlags src_access, VkPipelineStageFlags dst_stage,
+                                 VkAccessFlags dst_access, uint32_t base_mip, uint32_t mips, uint32_t base_layer, uint32_t layers) {
     VkImageMemoryBarrier b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     b.oldLayout = from;
     b.newLayout = to;
@@ -215,8 +249,15 @@ static void image_barrier(VkCommandBuffer cmd, VkImage img, VkImageAspectFlags a
     b.subresourceRange.aspectMask = aspect;
     b.subresourceRange.baseMipLevel = base_mip;
     b.subresourceRange.levelCount = mips;
+    b.subresourceRange.baseArrayLayer = base_layer;
     b.subresourceRange.layerCount = layers;
     vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, NULL, 0, NULL, 1, &b);
+}
+
+static void image_barrier(VkCommandBuffer cmd, VkImage img, VkImageAspectFlags aspect, VkImageLayout from, VkImageLayout to,
+                          VkPipelineStageFlags src_stage, VkAccessFlags src_access, VkPipelineStageFlags dst_stage,
+                          VkAccessFlags dst_access, uint32_t base_mip, uint32_t mips, uint32_t layers) {
+    image_barrier_layers(cmd, img, aspect, from, to, src_stage, src_access, dst_stage, dst_access, base_mip, mips, 0, layers);
 }
 
 typedef struct ImageDesc {
@@ -226,11 +267,13 @@ typedef struct ImageDesc {
     VkImageAspectFlags aspect;
     VkImageViewType view_type;
     bool layer_views;
+    VkImageCreateFlags flags;
 } ImageDesc;
 
 static bool image_create(GpuImage *im, const ImageDesc *d) {
     memset(im, 0, sizeof *im);
     VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ci.flags = d->flags;
     ci.imageType = d->d > 1 ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
     ci.format = d->fmt;
     ci.extent.width = d->w;
@@ -352,6 +395,9 @@ typedef struct PipeDesc {
     int vertex;
     VkFormat color, depth;
     bool depth_test, depth_write, blend, depth_bias;
+    bool additive;           /* ONE + ONE (signed: the SSR composite subtracts too) */
+    int color_count;         /* 3 = main-pass MRT (colour, normal, reflection weight) */
+    bool mrt_color_only;     /* MRT pipeline that leaves the extra targets untouched (sky) */
     VkCompareOp compare;
     VkCullModeFlags cull;
 } PipeDesc;
@@ -415,10 +461,18 @@ static VkPipeline pipeline_create(const PipeDesc *d) {
     ds.depthTestEnable = d->depth_test;
     ds.depthWriteEnable = d->depth_write;
     ds.depthCompareOp = d->compare ? d->compare : VK_COMPARE_OP_LESS_OR_EQUAL;
+    VkPipelineColorBlendAttachmentState cbs_arr[3];
+    memset(cbs_arr, 0, sizeof cbs_arr);
     VkPipelineColorBlendAttachmentState cb;
     memset(&cb, 0, sizeof cb);
     cb.colorWriteMask = 0xf;
-    if (d->blend) {
+    if (d->additive) {
+        cb.blendEnable = VK_TRUE;
+        cb.srcColorBlendFactor = cb.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        cb.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        cb.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        cb.colorBlendOp = cb.alphaBlendOp = VK_BLEND_OP_ADD;
+    } else if (d->blend) {
         cb.blendEnable = VK_TRUE;
         cb.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
         cb.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
@@ -427,16 +481,20 @@ static VkPipeline pipeline_create(const PipeDesc *d) {
         cb.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
         cb.alphaBlendOp = VK_BLEND_OP_ADD;
     }
+    uint32_t ncolor = d->color ? (d->color_count > 1 ? (uint32_t)d->color_count : 1u) : 0u;
+    VkFormat formats[3] = {d->color, R.gnormal_format, R.gspec_format};
+    cbs_arr[0] = cb;
+    for (uint32_t i = 1; i < ncolor; i++) cbs_arr[i].colorWriteMask = d->mrt_color_only ? 0 : 0xf;
     VkPipelineColorBlendStateCreateInfo cbs = {VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-    cbs.attachmentCount = d->color ? 1 : 0;
-    cbs.pAttachments = &cb;
+    cbs.attachmentCount = ncolor;
+    cbs.pAttachments = cbs_arr;
     VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dy = {VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
     dy.dynamicStateCount = 2;
     dy.pDynamicStates = dyn;
     VkPipelineRenderingCreateInfo ri = {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-    ri.colorAttachmentCount = d->color ? 1 : 0;
-    ri.pColorAttachmentFormats = &d->color;
+    ri.colorAttachmentCount = ncolor;
+    ri.pColorAttachmentFormats = formats;
     ri.depthAttachmentFormat = d->depth;
     VkGraphicsPipelineCreateInfo ci = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     ci.pNext = &ri;
@@ -851,6 +909,105 @@ static VkSampler make_sampler(VkFilter filter, VkSamplerAddressMode mode, bool c
     return s;
 }
 
+/* ------------------------------------------------------------------ reflection probe resources */
+static void probes_destroy(void) {
+    for (int i = 0; i < PROBE_SLOTS; i++) {
+        ProbeSlot *p = &R.probes[i];
+        for (int m = 0; m < PROBE_MAX_MIPS; m++) {
+            for (int f = 0; f < 6; f++)
+                if (p->face_view[m][f]) vkDestroyImageView(R.device, p->face_view[m][f], NULL);
+            if (p->src_view[m]) vkDestroyImageView(R.device, p->src_view[m], NULL);
+            if (p->src_set[m]) vkFreeDescriptorSets(R.device, R.desc_pool, 1, &p->src_set[m]);
+        }
+        image_destroy(&p->cube);
+        memset(p, 0, sizeof *p);
+    }
+    image_destroy(&R.probe_depth);
+    R.probe_res = 0;
+}
+
+static VkImageView cube_view(VkImage img, VkImageViewType type, uint32_t base_mip, uint32_t mips, uint32_t base_layer, uint32_t layers) {
+    VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vi.image = img;
+    vi.viewType = type;
+    vi.format = R.hdr_format;
+    vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    vi.subresourceRange.baseMipLevel = base_mip;
+    vi.subresourceRange.levelCount = mips;
+    vi.subresourceRange.baseArrayLayer = base_layer;
+    vi.subresourceRange.layerCount = layers;
+    VkImageView v = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateImageView(R.device, &vi, NULL, &v));
+    return v;
+}
+
+static void write_probe_set(VkDescriptorSet set, bool dummy) {
+    VkDescriptorImageInfo ii[PROBE_SLOTS];
+    for (int i = 0; i < PROBE_SLOTS; i++) {
+        ii[i].sampler = R.cube_sampler;
+        ii[i].imageView = dummy ? R.dummy_cube.view : R.probes[i].cube.view;
+        ii[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+    VkWriteDescriptorSet w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = set;
+    w.dstBinding = 0;
+    w.descriptorCount = PROBE_SLOTS;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = ii;
+    vkUpdateDescriptorSets(R.device, 1, &w, 0, NULL);
+}
+
+/* (Re)create every probe cubemap at the given face size, with GGX mips down to 8x8 (max 7 levels). */
+static void probes_create(int res) {
+    probes_destroy();
+    if (res < 16) res = 16;
+    if (res > 1024) res = 1024;
+    int mips = 0;
+    for (int r = res; r >= 8 && mips < PROBE_MAX_MIPS; r >>= 1) mips++;
+    R.probe_res = res;
+    R.probe_mips = mips;
+    VkCommandBuffer cmd = one_shot_begin();
+    for (int i = 0; i < PROBE_SLOTS; i++) {
+        ProbeSlot *p = &R.probes[i];
+        ImageDesc d = {(uint32_t)res, (uint32_t)res, 1, 6, (uint32_t)mips, R.hdr_format,
+                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
+                       VK_IMAGE_VIEW_TYPE_CUBE, false, VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT};
+        image_create(&p->cube, &d);
+        for (int m = 0; m < mips; m++) {
+            for (int f = 0; f < 6; f++) p->face_view[m][f] = cube_view(p->cube.img, VK_IMAGE_VIEW_TYPE_2D, (uint32_t)m, 1, (uint32_t)f, 1);
+            if (m > 0) {
+                p->src_view[m] = cube_view(p->cube.img, VK_IMAGE_VIEW_TYPE_CUBE, 0, (uint32_t)m, 0, 6);
+                p->src_set[m] = alloc_set(R.tex_layout);
+                write_image(p->src_set[m], 0, p->src_view[m], R.cube_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            }
+        }
+        /* contents are undefined until captured; shaders only read a slot once it is valid */
+        image_barrier(cmd, p->cube.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, 0,
+                      (uint32_t)mips, 6);
+    }
+    ImageDesc dd = {(uint32_t)res, (uint32_t)res, 1, 1, 1, R.depth_format, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                    VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_VIEW_TYPE_2D, false, 0};
+    image_create(&R.probe_depth, &dd);
+    one_shot_end(cmd);
+    write_probe_set(R.probe_set, false);
+}
+
+static void create_dummy_cube(void) {
+    ImageDesc d = {1, 1, 1, 6, 1, R.hdr_format, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
+                   VK_IMAGE_VIEW_TYPE_CUBE, false, VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT};
+    image_create(&R.dummy_cube, &d);
+    VkCommandBuffer cmd = one_shot_begin();
+    image_barrier(cmd, R.dummy_cube.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, 0, 1, 6);
+    VkClearColorValue black = {{0, 0, 0, 1}};
+    VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 6};
+    vkCmdClearColorImage(cmd, R.dummy_cube.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
+    image_barrier(cmd, R.dummy_cube.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                  VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, 0, 1, 6);
+    one_shot_end(cmd);
+}
+
 static void create_static_resources(void) {
     VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 16}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8192}};
     VkDescriptorPoolCreateInfo pi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -873,9 +1030,23 @@ static void create_static_resources(void) {
     R.material_layout = set_layout(mb, 2);
     VkDescriptorSetLayoutBinding tb = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
     R.tex_layout = set_layout(&tb, 1);
+    VkDescriptorSetLayoutBinding pb = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, PROBE_SLOTS, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+    R.probe_layout = set_layout(&pb, 1);
+    VkDescriptorSetLayoutBinding rb[5];
+    for (uint32_t i = 0; i < 5; i++) rb[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+    R.ssr_layout = set_layout(rb, 5);
 
-    VkDescriptorSetLayout pbr_sets[2] = {R.scene_layout, R.material_layout};
-    R.pbr_layout = pipe_layout(pbr_sets, 2, 48, VK_SHADER_STAGE_FRAGMENT_BIT);
+    /* small formats for the SSR inputs: 10-bit normals, 8-bit reflection weight + roughness */
+    R.gnormal_format = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+    if (!format_supports(R.gnormal_format, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))
+        R.gnormal_format = VK_FORMAT_R16G16B16A16_SFLOAT;
+    R.gspec_format = VK_FORMAT_R8G8B8A8_UNORM;
+
+    VkDescriptorSetLayout pbr_sets[3] = {R.scene_layout, R.material_layout, R.probe_layout};
+    R.pbr_layout = pipe_layout(pbr_sets, 3, 48, VK_SHADER_STAGE_FRAGMENT_BIT);
+    VkDescriptorSetLayout ssr_sets[3] = {R.scene_layout, R.ssr_layout, R.probe_layout};
+    R.ssr_pipe_layout = pipe_layout(ssr_sets, 3, 32, VK_SHADER_STAGE_FRAGMENT_BIT);
+    R.filter_layout = pipe_layout(&R.tex_layout, 1, 16, VK_SHADER_STAGE_FRAGMENT_BIT);
     R.shadow_layout = pipe_layout(NULL, 0, 64, VK_SHADER_STAGE_VERTEX_BIT);
     R.scene_only_layout = pipe_layout(&R.scene_layout, 1, 0, 0);
     R.outline_layout = pipe_layout(&R.scene_layout, 1, 16, VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -885,6 +1056,8 @@ static void create_static_resources(void) {
     R.linear_repeat = make_sampler(VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT, false, 16.0f);
     R.linear_clamp = make_sampler(VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, false, 0.0f);
     R.shadow_sampler = make_sampler(VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER, true, 0.0f);
+    R.point_clamp = make_sampler(VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, false, 0.0f);
+    R.cube_sampler = make_sampler(VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, false, 16.0f);
 
     PipeDesc p;
     memset(&p, 0, sizeof p);
@@ -893,6 +1066,31 @@ static void create_static_resources(void) {
     p.layout = R.pbr_layout; p.vertex = VTX_MESH; p.color = R.hdr_format; p.depth = R.depth_format;
     p.depth_test = p.depth_write = true; p.compare = VK_COMPARE_OP_LESS_OR_EQUAL; p.cull = VK_CULL_MODE_BACK_BIT;
     R.pbr = pipeline_create(&p);
+    /* probe faces are rendered mirrored (cubemap convention), which flips the triangle winding */
+    p.cull = VK_CULL_MODE_FRONT_BIT;
+    R.pbr_probe = pipeline_create(&p);
+    p.cull = VK_CULL_MODE_BACK_BIT;
+    p.fs = lx_spv_pbr_mrt_frag; p.fs_size = sizeof lx_spv_pbr_mrt_frag;
+    p.color_count = 3;
+    R.pbr_mrt = pipeline_create(&p);
+
+    memset(&p, 0, sizeof p);
+    p.vs = lx_spv_fullscreen_vert; p.vs_size = sizeof lx_spv_fullscreen_vert;
+    p.fs = lx_spv_probe_filter_frag; p.fs_size = sizeof lx_spv_probe_filter_frag;
+    p.layout = R.filter_layout; p.color = R.hdr_format;
+    R.probe_filter = pipeline_create(&p);
+
+    memset(&p, 0, sizeof p);
+    p.vs = lx_spv_fullscreen_vert; p.vs_size = sizeof lx_spv_fullscreen_vert;
+    p.fs = lx_spv_ssr_trace_frag; p.fs_size = sizeof lx_spv_ssr_trace_frag;
+    p.layout = R.ssr_pipe_layout; p.color = R.hdr_format;
+    R.ssr_trace = pipeline_create(&p);
+
+    memset(&p, 0, sizeof p);
+    p.vs = lx_spv_fullscreen_vert; p.vs_size = sizeof lx_spv_fullscreen_vert;
+    p.fs = lx_spv_ssr_composite_frag; p.fs_size = sizeof lx_spv_ssr_composite_frag;
+    p.layout = R.ssr_pipe_layout; p.color = R.hdr_format; p.depth = R.depth_format; p.additive = true;
+    R.ssr_composite = pipeline_create(&p);
 
     memset(&p, 0, sizeof p);
     p.vs = lx_spv_shadow_vert; p.vs_size = sizeof lx_spv_shadow_vert;
@@ -905,6 +1103,8 @@ static void create_static_resources(void) {
     p.fs = lx_spv_sky_frag; p.fs_size = sizeof lx_spv_sky_frag;
     p.layout = R.scene_only_layout; p.color = R.hdr_format; p.depth = R.depth_format;
     R.sky = pipeline_create(&p);
+    p.color_count = 3; p.mrt_color_only = true;   /* leaves "no reflection" in the SSR targets */
+    R.sky_mrt = pipeline_create(&p);
 
     memset(&p, 0, sizeof p);
     p.vs = lx_spv_grid_vert; p.vs_size = sizeof lx_spv_grid_vert;
@@ -928,7 +1128,7 @@ static void create_static_resources(void) {
 
     /* white + flat normal defaults */
     ImageDesc d = {1, 1, 1, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-                   VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_2D, false};
+                   VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_2D, false, 0};
     uint8_t white[4] = {255, 255, 255, 255}, flat[4] = {128, 128, 255, 255};
     image_create(&R.white, &d);
     image_upload_2d(&R.white, white, 4, false);
@@ -956,6 +1156,11 @@ static void create_static_resources(void) {
     create_shadow_map(R.settings.shadow_resolution, R.settings.shadow_cascades);
     create_gi_images(2, 2, 2);
     write_scene_sets();
+    create_dummy_cube();
+    R.probe_set = alloc_set(R.probe_layout);
+    R.probe_dummy_set = alloc_set(R.probe_layout);
+    write_probe_set(R.probe_dummy_set, true);
+    probes_create(R.settings.reflection_resolution > 0 ? R.settings.reflection_resolution : 128);
 }
 
 static void create_swap_pipelines(void) {
@@ -1018,17 +1223,19 @@ void lx_renderer_shutdown(void) {
     for (int c = 0; c < 3; c++) image_destroy(&R.gi[c]);
     image_destroy(&R.white);
     image_destroy(&R.flat_normal);
-    VkPipeline pipes[] = {R.pbr, R.shadow, R.sky, R.grid, R.outline, R.tonemap_ldr, R.tonemap_swap, R.ui};
-    for (int i = 0; i < 8; i++) if (pipes[i]) vkDestroyPipeline(R.device, pipes[i], NULL);
-    VkPipelineLayout layouts[] = {R.pbr_layout, R.shadow_layout, R.scene_only_layout, R.outline_layout, R.tonemap_layout, R.ui_layout};
-    for (int i = 0; i < 6; i++) vkDestroyPipelineLayout(R.device, layouts[i], NULL);
-    vkDestroyDescriptorSetLayout(R.device, R.scene_layout, NULL);
-    vkDestroyDescriptorSetLayout(R.device, R.material_layout, NULL);
-    vkDestroyDescriptorSetLayout(R.device, R.tex_layout, NULL);
+    probes_destroy();
+    image_destroy(&R.dummy_cube);
+    VkPipeline pipes[] = {R.pbr, R.shadow, R.sky, R.grid, R.outline, R.tonemap_ldr, R.tonemap_swap, R.ui,
+                          R.pbr_mrt, R.sky_mrt, R.pbr_probe, R.probe_filter, R.ssr_trace, R.ssr_composite};
+    for (size_t i = 0; i < sizeof pipes / sizeof pipes[0]; i++) if (pipes[i]) vkDestroyPipeline(R.device, pipes[i], NULL);
+    VkPipelineLayout layouts[] = {R.pbr_layout, R.shadow_layout, R.scene_only_layout, R.outline_layout, R.tonemap_layout, R.ui_layout,
+                                  R.ssr_pipe_layout, R.filter_layout};
+    for (size_t i = 0; i < sizeof layouts / sizeof layouts[0]; i++) vkDestroyPipelineLayout(R.device, layouts[i], NULL);
+    VkDescriptorSetLayout set_layouts[] = {R.scene_layout, R.material_layout, R.tex_layout, R.probe_layout, R.ssr_layout};
+    for (size_t i = 0; i < sizeof set_layouts / sizeof set_layouts[0]; i++) vkDestroyDescriptorSetLayout(R.device, set_layouts[i], NULL);
     vkDestroyDescriptorPool(R.device, R.desc_pool, NULL);
-    vkDestroySampler(R.device, R.linear_repeat, NULL);
-    vkDestroySampler(R.device, R.linear_clamp, NULL);
-    vkDestroySampler(R.device, R.shadow_sampler, NULL);
+    VkSampler samplers[] = {R.linear_repeat, R.linear_clamp, R.shadow_sampler, R.point_clamp, R.cube_sampler};
+    for (size_t i = 0; i < sizeof samplers / sizeof samplers[0]; i++) vkDestroySampler(R.device, samplers[i], NULL);
     destroy_swapchain();
     vkDestroyCommandPool(R.device, R.pool, NULL);
     vkDestroyDevice(R.device, NULL);
@@ -1038,6 +1245,7 @@ void lx_renderer_shutdown(void) {
     lx_free(R.mat_sets);
     for (int i = 0; i < MAX_CASCADES; i++) { lx_free(R.shadow_lists[i].batches); lx_free(R.shadow_lists[i].inst); lx_free(R.shadow_lists[i].item_batch); }
     lx_free(R.main_list.batches); lx_free(R.main_list.inst); lx_free(R.main_list.item_batch);
+    lx_free(R.probe_list.batches); lx_free(R.probe_list.inst); lx_free(R.probe_list.item_batch);
     lx_gi_shutdown();
     memset(&R, 0, sizeof R);
 }
@@ -1213,11 +1421,33 @@ static void target_alloc(LxRenderTarget *rt, bool with_ldr) {
     ImageDesc hd = {(uint32_t)rt->iw, (uint32_t)rt->ih, 1, 1, 1, R.hdr_format, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                     VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_2D, false};
     image_create(&rt->hdr, &hd);
-    ImageDesc dd = {(uint32_t)rt->iw, (uint32_t)rt->ih, 1, 1, 1, R.depth_format, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-                    VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_VIEW_TYPE_2D, false};
+    ImageDesc dd = {(uint32_t)rt->iw, (uint32_t)rt->ih, 1, 1, 1, R.depth_format,
+                    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_DEPTH_BIT,
+                    VK_IMAGE_VIEW_TYPE_2D, false, 0};
     image_create(&rt->depth, &dd);
     rt->hdr_set = alloc_set(R.tex_layout);
     write_image(rt->hdr_set, 0, rt->hdr.view, R.linear_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    /* screen-space reflection buffers */
+    ImageDesc gn = {(uint32_t)rt->iw, (uint32_t)rt->ih, 1, 1, 1, R.gnormal_format, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                    VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_2D, false, 0};
+    image_create(&rt->gnormal, &gn);
+    gn.fmt = R.gspec_format;
+    image_create(&rt->gspec, &gn);
+    rt->sw = rt->iw > 1 ? rt->iw / 2 : 1;
+    rt->sh = rt->ih > 1 ? rt->ih / 2 : 1;
+    ImageDesc sr = {(uint32_t)rt->sw, (uint32_t)rt->sh, 1, 1, 1, R.hdr_format, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                    VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_2D, false, 0};
+    image_create(&rt->ssr, &sr);
+    rt->ssr_trace_set = alloc_set(R.ssr_layout);
+    rt->ssr_comp_set = alloc_set(R.ssr_layout);
+    VkDescriptorSet both[2] = {rt->ssr_trace_set, rt->ssr_comp_set};
+    for (int i = 0; i < 2; i++) {
+        write_image(both[i], 1, rt->depth.view, R.point_clamp, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+        write_image(both[i], 2, rt->gnormal.view, R.point_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        write_image(both[i], 3, rt->gspec.view, R.point_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+    write_image(rt->ssr_trace_set, 0, rt->hdr.view, R.linear_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    write_image(rt->ssr_comp_set, 4, rt->ssr.view, R.linear_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     if (with_ldr) {
         ImageDesc ld = {(uint32_t)rt->w, (uint32_t)rt->h, 1, 1, 1, VK_FORMAT_R8G8B8A8_UNORM,
                         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
@@ -1241,8 +1471,13 @@ static void target_free(LxRenderTarget *rt) {
     image_destroy(&rt->hdr);
     image_destroy(&rt->depth);
     image_destroy(&rt->ldr);
-    if (rt->hdr_set) vkFreeDescriptorSets(R.device, R.desc_pool, 1, &rt->hdr_set);
-    rt->hdr_set = VK_NULL_HANDLE;
+    image_destroy(&rt->gnormal);
+    image_destroy(&rt->gspec);
+    image_destroy(&rt->ssr);
+    VkDescriptorSet sets[3] = {rt->hdr_set, rt->ssr_trace_set, rt->ssr_comp_set};
+    for (int i = 0; i < 3; i++)
+        if (sets[i]) vkFreeDescriptorSets(R.device, R.desc_pool, 1, &sets[i]);
+    rt->hdr_set = rt->ssr_trace_set = rt->ssr_comp_set = VK_NULL_HANDLE;
 }
 
 LxRenderTarget *lx_render_target_create(int w, int h) {
@@ -1331,6 +1566,7 @@ bool lx_renderer_begin_frame(void) {
     fr->inst_used = 0;
     R.swap_written = false;
     R.frame_active = true;
+    R.frame_serial++;
     memset(&R.stats, 0, sizeof R.stats);
     return true;
 }
@@ -1609,6 +1845,314 @@ static void make_crowd_matrix(float *m, LxVec3 p, LxVec3 vel, float scale) {
     m[12] = p.x; m[13] = p.y; m[14] = p.z; m[15] = 1;
 }
 
+/* ------------------------------------------------------------------ reflection probes: per frame */
+static uint64_t fnv(uint64_t h, const void *p, size_t n) {
+    const uint8_t *b = p;
+    for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ull; }
+    return h;
+}
+
+static bool entity_hidden(LxScene *s, const LxEntityData *d) {
+    for (LxEntity p = d->parent; p; p = lx_entity_data(s, p)->parent)
+        if (!lx_entity_data(s, p)->active) return true;
+    return false;
+}
+
+/* Everything that changes what a probe sees (geometry, materials, lights, sky) - not the camera.
+ * Probes only re-capture when this changes, so a static scene costs nothing after the first capture. */
+static uint64_t scene_look_hash(LxScene *s) {
+    uint64_t h = 1469598103934665603ull;
+    const LxEnvironment *e = &s->env;
+    float env[14] = {e->sky_zenith.x, e->sky_zenith.y, e->sky_zenith.z, e->sky_horizon.x, e->sky_horizon.y, e->sky_horizon.z,
+                     e->ground_color.x, e->ground_color.y, e->ground_color.z, e->ambient_intensity, e->exposure, e->fog_density,
+                     e->fog_color.x, e->fog_color.y};
+    h = fnv(h, env, sizeof env);
+    for (int i = 1; i < s->count; i++) {
+        LxEntityData *d = &s->entities[i];
+        if (!d->alive || !d->active || !(d->comps & (LX_COMP_MESH | LX_COMP_LIGHT)) || entity_hidden(s, d)) continue;
+        h = fnv(h, &i, sizeof i);
+        h = fnv(h, d->world.m, 64);
+        if (d->comps & LX_COMP_MESH) {
+            const LxMesh *mesh = lx_asset_mesh(d->mesh.mesh);
+            const LxMaterial *m = lx_asset_material(d->mesh.material);
+            float mf[10] = {m->albedo.x, m->albedo.y, m->albedo.z, m->albedo.w, m->metallic, m->roughness,
+                            m->emissive.x, m->emissive.y, m->emissive.z, m->emissive_strength};
+            h = fnv(h, &mesh, sizeof mesh);
+            h = fnv(h, &m, sizeof m);
+            h = fnv(h, mf, sizeof mf);
+        }
+        if (d->comps & LX_COMP_LIGHT) {
+            const LxLight *l = &d->light;
+            float lf[7] = {(float)l->type, l->color.x, l->color.y, l->color.z, l->intensity, l->range, l->spot_angle_deg};
+            h = fnv(h, lf, sizeof lf);
+        }
+    }
+    return h;
+}
+
+/* Slot 0 is the automatic environment probe: it captures around the camera, snapped to a 4 m grid,
+ * so it only re-captures after the camera has moved a few metres. Slots 1-4 hold the Reflection
+ * Probe objects nearest the camera. */
+static void probes_assign(LxScene *s, const LxRenderView *view, uint64_t look) {
+    if (!R.settings.reflections_enabled) {
+        for (int i = 0; i < PROBE_SLOTS; i++) R.probes[i].used = false;
+        return;
+    }
+    const float cell = 4.0f;
+    LxVec3 snap = lx_v3(floorf(view->eye.x / cell) * cell + cell * 0.5f, floorf(view->eye.y / cell) * cell + cell * 0.5f,
+                        floorf(view->eye.z / cell) * cell + cell * 0.5f);
+    ProbeSlot *g = &R.probes[0];
+    g->used = true;
+    g->entity = 0;
+    g->pos = snap;
+    g->bmin = lx_v3(-1e9f, -1e9f, -1e9f);
+    g->bmax = lx_v3(1e9f, 1e9f, 1e9f);
+    g->box = false;
+    g->intensity = 1.0f;
+    g->blend = 1.0f;
+    g->realtime = false;
+    g->want_hash = fnv(look, &snap, sizeof snap);
+
+    typedef struct Cand { LxEntity e; float dist; LxVec3 c, half; const LxReflectionProbe *p; } Cand;
+    Cand best[PROBE_SLOTS - 1];
+    int nb = 0;
+    for (int i = 1; i < s->count; i++) {
+        LxEntityData *d = &s->entities[i];
+        if (!d->alive || !d->active || !(d->comps & LX_COMP_REFLECTION_PROBE) || d->probe.intensity <= 0.0f || entity_hidden(s, d)) continue;
+        Cand c;
+        c.e = lx_entity_make((uint32_t)i, d->generation & ((1u << (32 - LX_INDEX_BITS)) - 1u));
+        c.p = &d->probe;
+        c.c = lx_v3(d->world.m[12], d->world.m[13], d->world.m[14]);
+        LxVec3 sc = lx_v3(lx_len3(lx_v3(d->world.m[0], d->world.m[1], d->world.m[2])), lx_len3(lx_v3(d->world.m[4], d->world.m[5], d->world.m[6])),
+                          lx_len3(lx_v3(d->world.m[8], d->world.m[9], d->world.m[10])));
+        c.half = lx_v3(fabsf(d->probe.size.x * sc.x) * 0.5f, fabsf(d->probe.size.y * sc.y) * 0.5f, fabsf(d->probe.size.z * sc.z) * 0.5f);
+        LxVec3 o = lx_v3(lx_maxf(fabsf(view->eye.x - c.c.x) - c.half.x, 0), lx_maxf(fabsf(view->eye.y - c.c.y) - c.half.y, 0),
+                         lx_maxf(fabsf(view->eye.z - c.c.z) - c.half.z, 0));
+        c.dist = lx_len3(o);
+        int at;
+        if (nb < PROBE_SLOTS - 1) at = nb++;
+        else if (c.dist < best[PROBE_SLOTS - 2].dist) at = PROBE_SLOTS - 2;   /* replaces the farthest */
+        else continue;
+        best[at] = c;
+        for (int k = at; k > 0 && best[k].dist < best[k - 1].dist; k--) { Cand t = best[k]; best[k] = best[k - 1]; best[k - 1] = t; }
+    }
+    /* keep probes in the slot they already occupy (no re-capture), free the rest */
+    bool placed[PROBE_SLOTS - 1] = {false}, taken[PROBE_SLOTS] = {true, false, false, false, false};
+    for (int sl = 1; sl < PROBE_SLOTS; sl++) {
+        ProbeSlot *p = &R.probes[sl];
+        int found = -1;
+        for (int k = 0; k < nb && p->used; k++)
+            if (!placed[k] && best[k].e == p->entity) { found = k; break; }
+        if (found < 0) { p->used = p->valid = p->cycling = false; p->entity = 0; continue; }
+        placed[found] = true;
+        taken[sl] = true;
+    }
+    for (int k = 0; k < nb; k++) {
+        if (placed[k]) continue;
+        for (int sl = 1; sl < PROBE_SLOTS; sl++)
+            if (!taken[sl]) {
+                ProbeSlot *p = &R.probes[sl];
+                p->used = true; p->valid = p->cycling = false; p->entity = best[k].e; p->captured_hash = 0;
+                taken[sl] = true;
+                break;
+            }
+    }
+    for (int sl = 1; sl < PROBE_SLOTS; sl++) {
+        ProbeSlot *p = &R.probes[sl];
+        if (!p->used) continue;
+        for (int k = 0; k < nb; k++) {
+            if (best[k].e != p->entity) continue;
+            p->pos = best[k].c;
+            p->bmin = lx_sub3(best[k].c, best[k].half);
+            p->bmax = lx_add3(best[k].c, best[k].half);
+            p->intensity = best[k].p->intensity;
+            p->blend = lx_maxf(best[k].p->blend_distance, 0.01f);
+            p->box = best[k].p->box_projection;
+            p->realtime = best[k].p->realtime;
+            float key[7] = {p->pos.x, p->pos.y, p->pos.z, best[k].half.x, best[k].half.y, best[k].half.z, p->box ? 1.0f : 0.0f};
+            p->want_hash = fnv(look, key, sizeof key);
+        }
+    }
+}
+
+static void probes_fill_ubo(SceneUBO *u) {
+    bool on = R.settings.reflections_enabled;
+    for (int i = 0; i < PROBE_SLOTS; i++) {
+        const ProbeSlot *p = &R.probes[i];
+        bool live = on && p->used && p->valid;
+        u->probe_pos[i][0] = p->pos.x; u->probe_pos[i][1] = p->pos.y; u->probe_pos[i][2] = p->pos.z;
+        u->probe_pos[i][3] = live ? p->intensity : 0.0f;
+        u->probe_min[i][0] = p->bmin.x; u->probe_min[i][1] = p->bmin.y; u->probe_min[i][2] = p->bmin.z; u->probe_min[i][3] = p->blend;
+        u->probe_max[i][0] = p->bmax.x; u->probe_max[i][1] = p->bmax.y; u->probe_max[i][2] = p->bmax.z; u->probe_max[i][3] = p->box ? 1.0f : 0.0f;
+    }
+    u->refl[0] = (float)R.probe_mips;
+    u->refl[1] = on ? 1.0f : 0.0f;
+}
+
+/* Renders one cube face of a probe: the scene as seen from the capture point, 90 degree field of view.
+ * Cube faces use a left-handed convention, so the projection is mirrored (and culling flipped). */
+static bool probe_render_face(LxScene *s, ProbeSlot *p, int face, VkCommandBuffer cmd, FrameData *fr, const SceneUBO *base) {
+    static const LxVec3 fwd[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    static const LxVec3 up[6] = {{0, 1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}, {0, 1, 0}, {0, 1, 0}};
+    if (fr->ubo_used >= MAX_VIEWS_PER_FRAME) return false;
+    SceneUBO ubo = *base;
+    LxVec3 eye = p->cap_pos;
+    float far_clip = lx_maxf(R.settings.shadow_distance * 2.0f, 150.0f);
+    LxMat4 view = lx_mat4_look_at(eye, lx_add3(eye, fwd[face]), up[face]);
+    LxMat4 proj = lx_mat4_perspective(90.0f * LX_DEG2RAD, 1.0f, 0.05f, far_clip);
+    proj.m[0] = -proj.m[0];
+    ubo.view = view;
+    ubo.proj = proj;
+    ubo.view_proj = lx_mat4_mul(proj, view);
+    ubo.inv_view_proj = lx_mat4_inverse(ubo.view_proj);
+    ubo.camera_pos[0] = eye.x; ubo.camera_pos[1] = eye.y; ubo.camera_pos[2] = eye.z;
+    for (int i = 0; i < PROBE_SLOTS; i++) ubo.probe_pos[i][3] = 0.0f;   /* probes never see other probes */
+    ubo.refl[1] = 0.0f;
+    /* shadows: the cascades follow the main camera; use the widest one for every pixel */
+    if (ubo.counts[1] > 0) {
+        for (int c = 0; c < ubo.counts[1] - 1; c++) ubo.cascade_splits[c] = 0.0f;
+        ubo.cascade_splits[ubo.counts[1] - 1] = 1e9f;
+    }
+    uint32_t off = fr->ubo_used * 4096;
+    memcpy((uint8_t *)fr->ubo.mapped + off, &ubo, sizeof ubo);
+    fr->ubo_used++;
+
+    LxFrustum fru = lx_frustum_from_matrix(ubo.view_proj);
+    dl_reset(&R.probe_list);
+    LxVec4 white = lx_v4(1, 1, 1, 1);
+    for (int i = 1; i < s->count; i++) {
+        LxEntityData *d = &s->entities[i];
+        if (!d->alive || !d->active || !(d->comps & LX_COMP_MESH) || entity_hidden(s, d)) continue;
+        LxMesh *mesh = lx_asset_mesh(d->mesh.mesh);
+        LxAabb wb = lx_aabb_transform(mesh->bounds, d->world);
+        /* skip whatever the capture point is inside of (it would only show its back faces) */
+        if (eye.x > wb.min.x && eye.x < wb.max.x && eye.y > wb.min.y && eye.y < wb.max.y && eye.z > wb.min.z && eye.z < wb.max.z) continue;
+        if (!lx_frustum_test_aabb(&fru, wb)) continue;
+        LxVec3 c = lx_aabb_center(wb);
+        float radius = lx_len3(lx_aabb_extent(wb));
+        float dist = lx_maxf(lx_len3(lx_sub3(c, eye)), 1e-3f);
+        dl_add(&R.probe_list, mesh, pick_lod(mesh, radius * 0.5f / dist), lx_asset_material(d->mesh.material), d->world.m, white);
+    }
+    if (!dl_upload(&R.probe_list, fr)) return false;
+
+    image_barrier_layers(cmd, p->cube.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0, 1, (uint32_t)face, 1);
+    image_barrier(cmd, R.probe_depth.img, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                  VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                  VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                  VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT, 0, 1, 1);
+    VkRenderingAttachmentInfo ca = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    ca.imageView = p->face_view[0][face];
+    ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    ca.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;   /* the sky covers every pixel */
+    ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingAttachmentInfo da = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    da.imageView = R.probe_depth.view;
+    da.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    da.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    da.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    da.clearValue.depthStencil.depth = 1.0f;
+    VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO};
+    ri.renderArea.extent.width = ri.renderArea.extent.height = (uint32_t)R.probe_res;
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = 1;
+    ri.pColorAttachments = &ca;
+    ri.pDepthAttachment = &da;
+    vkCmdBeginRendering(cmd, &ri);
+    VkViewport vp = {0, 0, (float)R.probe_res, (float)R.probe_res, 0, 1};
+    VkRect2D sc = {{0, 0}, {(uint32_t)R.probe_res, (uint32_t)R.probe_res}};
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.sky);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.scene_only_layout, 0, 1, &fr->scene_set, 1, &off);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.pbr_probe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.pbr_layout, 2, 1, &R.probe_dummy_set, 0, NULL);
+    draw_batches(cmd, &R.probe_list, fr->inst.buf, true, fr->scene_set, off);
+    vkCmdEndRendering(cmd);
+    image_barrier_layers(cmd, p->cube.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         VK_ACCESS_SHADER_READ_BIT, 0, 1, (uint32_t)face, 1);
+    R.stats.probe_faces_rendered++;
+    return true;
+}
+
+/* GGX pre-filter: mip m holds the probe as seen by a surface of roughness m / (mips - 1). */
+static void probe_prefilter(ProbeSlot *p, VkCommandBuffer cmd) {
+    for (int m = 1; m < R.probe_mips; m++) {
+        uint32_t size = (uint32_t)(R.probe_res >> m);
+        if (size < 1) size = 1;
+        float pc[4] = {0, (float)m / (float)(R.probe_mips - 1), (float)R.probe_res, (float)(m - 1)};
+        for (int f = 0; f < 6; f++) {
+            image_barrier_layers(cmd, p->cube.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, (uint32_t)m, 1, (uint32_t)f, 1);
+            VkRenderingAttachmentInfo ca = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+            ca.imageView = p->face_view[m][f];
+            ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            ca.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO};
+            ri.renderArea.extent.width = ri.renderArea.extent.height = size;
+            ri.layerCount = 1;
+            ri.colorAttachmentCount = 1;
+            ri.pColorAttachments = &ca;
+            vkCmdBeginRendering(cmd, &ri);
+            VkViewport vp = {0, 0, (float)size, (float)size, 0, 1};
+            VkRect2D sc = {{0, 0}, {size, size}};
+            vkCmdSetViewport(cmd, 0, 1, &vp);
+            vkCmdSetScissor(cmd, 0, 1, &sc);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.probe_filter);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.filter_layout, 0, 1, &p->src_set[m], 0, NULL);
+            pc[0] = (float)f;
+            vkCmdPushConstants(cmd, R.filter_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, pc);
+            vkCmdDraw(cmd, 3, 1, 0, 0);
+            vkCmdEndRendering(cmd);
+            image_barrier_layers(cmd, p->cube.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+                                 (uint32_t)m, 1, (uint32_t)f, 1);
+        }
+    }
+}
+
+void lx_reflections_refresh(void) {
+    for (int i = 0; i < PROBE_SLOTS; i++) R.probes[i].captured_hash = 0;
+}
+
+/* Time-sliced capture: a new probe captures all six faces at once (up to two probes a frame);
+ * a probe whose surroundings changed refreshes a couple of faces per frame and keeps showing
+ * its previous capture until the new one is complete. */
+static void probes_update(LxScene *s, VkCommandBuffer cmd, FrameData *fr, const SceneUBO *base) {
+    if (!R.settings.reflections_enabled) return;
+    int budget_new = 12, budget_refresh = 2;
+    for (int k = 0; k < PROBE_SLOTS; k++) {
+        ProbeSlot *p = &R.probes[(R.probe_rr + k) % PROBE_SLOTS];
+        if (!p->used) continue;
+        if (!p->cycling && (!p->valid || p->want_hash != p->captured_hash || p->realtime)) {
+            p->cycling = true;
+            p->next_face = 0;
+            p->cycle_hash = p->want_hash;
+            p->cap_pos = p->pos;
+        }
+        if (!p->cycling) continue;
+        int *budget = p->valid ? &budget_refresh : &budget_new;
+        while (p->next_face < 6 && *budget > 0) {
+            if (!probe_render_face(s, p, p->next_face, cmd, fr, base)) return;
+            p->next_face++;
+            (*budget)--;
+        }
+        if (p->next_face == 6) {
+            probe_prefilter(p, cmd);
+            p->cycling = false;
+            p->valid = true;
+            p->captured_hash = p->cycle_hash;
+        }
+    }
+    R.probe_rr = (R.probe_rr + 1) % PROBE_SLOTS;
+}
+
 void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *target) {
     if (!R.frame_active || !s) return;
     double t_start = lx_time();
@@ -1703,6 +2247,18 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     ubo.gi_cell[0] = gv->cell_size.x; ubo.gi_cell[1] = gv->cell_size.y; ubo.gi_cell[2] = gv->cell_size.z;
     ubo.gi_res[0] = (float)gv->res[0]; ubo.gi_res[1] = (float)gv->res[1]; ubo.gi_res[2] = (float)gv->res[2];
     ubo.counts[0] = nl; ubo.counts[1] = cascades; ubo.counts[2] = R.shadow_res;
+    /* reflection probes: the first view rendered each frame owns probe placement and capture */
+    bool probe_owner = R.probe_frame != R.frame_serial;
+    if (probe_owner) {
+        R.probe_frame = R.frame_serial;
+        int want_res = gs->reflection_resolution <= 64 ? 64 : gs->reflection_resolution <= 128 ? 128 : gs->reflection_resolution <= 256 ? 256 : 512;
+        if (want_res != R.probe_res) {
+            vkDeviceWaitIdle(R.device);
+            probes_create(want_res);
+        }
+        probes_assign(s, view, gs->reflections_enabled ? scene_look_hash(s) : 0);
+    }
+    probes_fill_ubo(&ubo);
     uint32_t ubo_off = fr->ubo_used * 4096;
     memcpy((uint8_t *)fr->ubo.mapped + ubo_off, &ubo, sizeof ubo);
     fr->ubo_used++;
@@ -1808,7 +2364,20 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
                       (uint32_t)R.shadow_layers);
     }
 
+    /* ---- reflection probe capture (time-sliced) ---- */
+    if (probe_owner) probes_update(s, cmd, fr, &ubo);
+    for (int i = 0; i < PROBE_SLOTS; i++) R.stats.probes_active += (gs->reflections_enabled && R.probes[i].used && R.probes[i].valid) ? 1 : 0;
+
     /* ---- main HDR pass ---- */
+    bool ssr = gs->ssr_enabled && view->proj.m[15] < 0.5f;              /* perspective views only */
+    bool post = ssr || view->highlight || view->draw_grid;
+    if (ssr) {
+        GpuImage *g[2] = {&rt->gnormal, &rt->gspec};
+        for (int i = 0; i < 2; i++)
+            image_barrier(cmd, g[i]->img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0, 1, 1);
+    }
     image_barrier(cmd, rt->hdr.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                   VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT, 0, 1, 1);
@@ -1816,6 +2385,8 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
                   VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, 0,
                   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT, 0, 1, 1);
+    VkRenderingAttachmentInfo cas[3];
+    memset(cas, 0, sizeof cas);
     VkRenderingAttachmentInfo ca = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     ca.imageView = rt->hdr.view;
     ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -1829,52 +2400,140 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     da.imageView = rt->depth.view;
     da.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     da.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    da.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    da.storeOp = post ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
     da.clearValue.depthStencil.depth = 1.0f;
+    cas[0] = ca;
+    for (int i = 1; i < 3; i++) {
+        cas[i].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        cas[i].imageView = i == 1 ? rt->gnormal.view : rt->gspec.view;
+        cas[i].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        cas[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;   /* zero = "no reflection" (sky) */
+        cas[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    }
     VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO};
     ri.renderArea.extent.width = (uint32_t)rt->iw;
     ri.renderArea.extent.height = (uint32_t)rt->ih;
     ri.layerCount = 1;
-    ri.colorAttachmentCount = 1;
-    ri.pColorAttachments = &ca;
+    ri.colorAttachmentCount = ssr ? 3 : 1;
+    ri.pColorAttachments = cas;
     ri.pDepthAttachment = &da;
     vkCmdBeginRendering(cmd, &ri);
     VkViewport vp = {0, 0, (float)rt->iw, (float)rt->ih, 0, 1};
     VkRect2D sc = {{0, 0}, {(uint32_t)rt->iw, (uint32_t)rt->ih}};
     vkCmdSetViewport(cmd, 0, 1, &vp);
     vkCmdSetScissor(cmd, 0, 1, &sc);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.sky);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ssr ? R.sky_mrt : R.sky);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.scene_only_layout, 0, 1, &fr->scene_set, 1, &ubo_off);
     vkCmdDraw(cmd, 3, 1, 0, 0);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.pbr);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ssr ? R.pbr_mrt : R.pbr);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.pbr_layout, 2, 1, &R.probe_set, 0, NULL);
     draw_batches(cmd, &R.main_list, fr->inst.buf, true, fr->scene_set, ubo_off);
-    if (view->highlight) {
-        LxEntityData *d = lx_entity_data(s, view->highlight);
-        if (d && (d->comps & LX_COMP_MESH) && fr->inst_used + 80 <= fr->inst.size) {
-            LxMesh *mesh = lx_asset_mesh(d->mesh.mesh);
-            float *dst = (float *)((uint8_t *)fr->inst.mapped + fr->inst_used);
-            memcpy(dst, d->world.m, 64);
-            dst[16] = dst[17] = dst[18] = dst[19] = 1.0f;
-            uint32_t first = (uint32_t)(fr->inst_used / 80);
-            fr->inst_used += 80;
-            MeshGpu *g = mesh_gpu(mesh);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.outline);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.outline_layout, 0, 1, &fr->scene_set, 1, &ubo_off);
-            float col[4] = {1.0f, 0.55f, 0.1f, 1.0f};
-            vkCmdPushConstants(cmd, R.outline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, col);
-            VkBuffer vbs[2] = {g->vb[0].buf, fr->inst.buf};
-            VkDeviceSize offs[2] = {0, 0};
-            vkCmdBindVertexBuffers(cmd, 0, 2, vbs, offs);
-            vkCmdBindIndexBuffer(cmd, g->ib[0].buf, 0, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexed(cmd, (uint32_t)mesh->lods[0].index_count, 1, 0, 0, first);
-        }
-    }
-    if (view->draw_grid) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.grid);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.scene_only_layout, 0, 1, &fr->scene_set, 1, &ubo_off);
-        vkCmdDraw(cmd, 6, 1, 0, 0);
-    }
     vkCmdEndRendering(cmd);
+
+    if (post) {
+        /* depth becomes read-only: sampled by SSR and still depth-tested by the overlays */
+        image_barrier(cmd, rt->depth.img, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                      VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                      VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                      VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT, 0, 1, 1);
+        float ssr_pc[8] = {gs->ssr_max_distance > 0.5f ? gs->ssr_max_distance : 30.0f, gs->ssr_thickness > 0.01f ? gs->ssr_thickness : 0.35f,
+                           (float)(gs->ssr_steps > 4 ? gs->ssr_steps : 24), gs->ssr_max_roughness > 0.05f ? gs->ssr_max_roughness : 0.6f,
+                           (float)rt->iw, (float)rt->ih, (float)rt->sw, (float)rt->sh};
+        if (ssr) {
+            /* ---- SSR trace (half resolution) ---- */
+            GpuImage *in[3] = {&rt->hdr, &rt->gnormal, &rt->gspec};
+            for (int i = 0; i < 3; i++)
+                image_barrier(cmd, in[i]->img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                              VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, 0, 1, 1);
+            image_barrier(cmd, rt->ssr.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0, 1, 1);
+            VkRenderingAttachmentInfo sa = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+            sa.imageView = rt->ssr.view;
+            sa.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            sa.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            sa.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            VkRenderingInfo si = {VK_STRUCTURE_TYPE_RENDERING_INFO};
+            si.renderArea.extent.width = (uint32_t)rt->sw;
+            si.renderArea.extent.height = (uint32_t)rt->sh;
+            si.layerCount = 1;
+            si.colorAttachmentCount = 1;
+            si.pColorAttachments = &sa;
+            vkCmdBeginRendering(cmd, &si);
+            VkViewport svp = {0, 0, (float)rt->sw, (float)rt->sh, 0, 1};
+            VkRect2D ssc = {{0, 0}, {(uint32_t)rt->sw, (uint32_t)rt->sh}};
+            vkCmdSetViewport(cmd, 0, 1, &svp);
+            vkCmdSetScissor(cmd, 0, 1, &ssc);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.ssr_trace);
+            VkDescriptorSet tsets[3] = {fr->scene_set, rt->ssr_trace_set, R.probe_set};
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.ssr_pipe_layout, 0, 3, tsets, 1, &ubo_off);
+            vkCmdPushConstants(cmd, R.ssr_pipe_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, ssr_pc);
+            vkCmdDraw(cmd, 3, 1, 0, 0);
+            vkCmdEndRendering(cmd);
+            image_barrier(cmd, rt->ssr.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                          VK_ACCESS_SHADER_READ_BIT, 0, 1, 1);
+            image_barrier(cmd, rt->hdr.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT, 0, 1, 1);
+        }
+        /* ---- post pass: SSR composite, then editor overlays ---- */
+        VkRenderingAttachmentInfo pa = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+        pa.imageView = rt->hdr.view;
+        pa.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        pa.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        pa.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        VkRenderingAttachmentInfo pd = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+        pd.imageView = rt->depth.view;
+        pd.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        pd.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        pd.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        VkRenderingInfo pi = {VK_STRUCTURE_TYPE_RENDERING_INFO};
+        pi.renderArea.extent.width = (uint32_t)rt->iw;
+        pi.renderArea.extent.height = (uint32_t)rt->ih;
+        pi.layerCount = 1;
+        pi.colorAttachmentCount = 1;
+        pi.pColorAttachments = &pa;
+        pi.pDepthAttachment = &pd;
+        vkCmdBeginRendering(cmd, &pi);
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        vkCmdSetScissor(cmd, 0, 1, &sc);
+        if (ssr) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.ssr_composite);
+            VkDescriptorSet csets[3] = {fr->scene_set, rt->ssr_comp_set, R.probe_set};
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.ssr_pipe_layout, 0, 3, csets, 1, &ubo_off);
+            vkCmdPushConstants(cmd, R.ssr_pipe_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, ssr_pc);
+            vkCmdDraw(cmd, 3, 1, 0, 0);
+        }
+        if (view->highlight) {
+            LxEntityData *d = lx_entity_data(s, view->highlight);
+            if (d && (d->comps & LX_COMP_MESH) && fr->inst_used + 80 <= fr->inst.size) {
+                LxMesh *mesh = lx_asset_mesh(d->mesh.mesh);
+                float *dst = (float *)((uint8_t *)fr->inst.mapped + fr->inst_used);
+                memcpy(dst, d->world.m, 64);
+                dst[16] = dst[17] = dst[18] = dst[19] = 1.0f;
+                uint32_t first = (uint32_t)(fr->inst_used / 80);
+                fr->inst_used += 80;
+                MeshGpu *g = mesh_gpu(mesh);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.outline);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.outline_layout, 0, 1, &fr->scene_set, 1, &ubo_off);
+                float col[4] = {1.0f, 0.55f, 0.1f, 1.0f};
+                vkCmdPushConstants(cmd, R.outline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, col);
+                VkBuffer vbs[2] = {g->vb[0].buf, fr->inst.buf};
+                VkDeviceSize offs[2] = {0, 0};
+                vkCmdBindVertexBuffers(cmd, 0, 2, vbs, offs);
+                vkCmdBindIndexBuffer(cmd, g->ib[0].buf, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(cmd, (uint32_t)mesh->lods[0].index_count, 1, 0, 0, first);
+            }
+        }
+        if (view->draw_grid) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.grid);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.scene_only_layout, 0, 1, &fr->scene_set, 1, &ubo_off);
+            vkCmdDraw(cmd, 6, 1, 0, 0);
+        }
+        vkCmdEndRendering(cmd);
+    }
     image_barrier(cmd, rt->hdr.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                   VK_ACCESS_SHADER_READ_BIT, 0, 1, 1);

@@ -91,6 +91,30 @@ static void test_scene(void) {
     lx_scene_destroy(c);
 }
 
+static void test_reflection_probe(void) {
+    printf("reflection probe\n");
+    LxScene *s = lx_scene_create("Probes");
+    LxEntity e = lx_entity_create(s, "Probe");
+    LxReflectionProbe *p = lx_add_reflection_probe(s, e);
+    CHECK(p && p->intensity > 0 && p->box_projection && p->size.x > 0, "probe defaults");
+    p->size = lx_v3(4, 3, 2);
+    p->intensity = 1.5f;
+    p->blend_distance = 0.25f;
+    p->realtime = true;
+    char *text = lx_scene_serialize(s);
+    LxScene *c = lx_scene_deserialize(text);
+    LxReflectionProbe *q = lx_get_reflection_probe(c, lx_entity_find(c, "Probe"));
+    CHECK(q && NEAR(q->size.x, 4, 1e-5f) && NEAR(q->size.z, 2, 1e-5f) && NEAR(q->intensity, 1.5f, 1e-5f) &&
+          NEAR(q->blend_distance, 0.25f, 1e-5f) && q->realtime && q->box_projection, "probe round trip");
+    lx_remove_component(c, lx_entity_find(c, "Probe"), LX_COMP_REFLECTION_PROBE);
+    CHECK(!lx_get_reflection_probe(c, lx_entity_find(c, "Probe")), "probe removed");
+    lx_free(text);
+    lx_scene_destroy(s);
+    lx_scene_destroy(c);
+    LxGraphicsSettings g = lx_graphics_defaults(0), u = lx_graphics_defaults(3);
+    CHECK(g.reflections_enabled && !g.ssr_enabled && u.ssr_enabled && u.reflection_resolution > g.reflection_resolution, "reflection presets");
+}
+
 static void test_meshes(void) {
     printf("meshes\n");
     LxMesh *cube = lx_asset_mesh("builtin:cube");
@@ -483,6 +507,7 @@ int main(void) {
     test_project();
     test_wav();
     test_input();
+    test_reflection_probe();
     lx_assets_clear();
     lx_jobs_shutdown();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

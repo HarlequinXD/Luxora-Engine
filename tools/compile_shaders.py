@@ -20,6 +20,20 @@ def find_compiler():
             return p
     sys.exit("glslangValidator not found (install glslang-tools or the Vulkan SDK)")
 
+def expand(text, common, depth=0):
+    """#pragma lx_common inserts scene_common.glsl; #pragma lx_include <file> inserts shaders/<file>."""
+    out = []
+    for line in text.split("\n"):
+        t = line.strip()
+        if t == "#pragma lx_common":
+            out.append(common)
+        elif t.startswith("#pragma lx_include ") and depth < 8:
+            inc = t.split(None, 2)[2].strip()
+            out.append(expand(open(os.path.join(SRC, inc)).read(), common, depth + 1))
+        else:
+            out.append(line)
+    return "\n".join(out)
+
 def main():
     glslang = find_compiler()
     common = open(os.path.join(SRC, "scene_common.glsl")).read()
@@ -28,7 +42,7 @@ def main():
              "#ifndef LX_SHADERS_SPV_H", "#define LX_SHADERS_SPV_H", "#include <stdint.h>", ""]
     with tempfile.TemporaryDirectory() as tmp:
         for name in shaders:
-            text = open(os.path.join(SRC, name)).read().replace("#pragma lx_common", common)
+            text = expand(open(os.path.join(SRC, name)).read(), common)
             src = os.path.join(tmp, name)
             open(src, "w").write(text)
             spv = src + ".spv"

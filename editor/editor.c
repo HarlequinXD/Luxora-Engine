@@ -469,6 +469,7 @@ LxEntity ed_create(const char *what) {
         else if (!strcmp(what, "Point Light")) { lx_add_light(s, e, LX_LIGHT_POINT); lx_entity_set_position(s, e, lx_v3(at.x, 2.5f, at.z)); }
         else if (!strcmp(what, "Spot Light")) { lx_add_light(s, e, LX_LIGHT_SPOT); lx_entity_set_position(s, e, lx_v3(at.x, 4, at.z)); lx_entity_set_euler(s, e, lx_v3(-90, 0, 0)); }
         else if (!strcmp(what, "Audio Source")) lx_add_audio_source(s, e, "");
+        else if (!strcmp(what, "Reflection Probe")) { lx_add_reflection_probe(s, e); lx_entity_set_position(s, e, lx_v3(at.x, 2.0f, at.z)); }
         else if (!strcmp(what, "Crowd")) { lx_add_crowd(s, e, 500); lx_entity_set_position(s, e, lx_v3(at.x, 0.5f, at.z)); }
         else if (!strcmp(what, "Empty")) lx_entity_set_position(s, e, at);
     }
@@ -674,6 +675,7 @@ static void create_items(UiNode *p) {
     item(p, "Directional Light", NULL, UI_ICON_SUN, m_create);
     item(p, "Point Light", NULL, UI_ICON_BULB, m_create);
     item(p, "Spot Light", NULL, UI_ICON_SPOT, m_create);
+    item(p, "Reflection Probe", NULL, UI_ICON_PROBE, m_create);
     ui_menu_separator(ED.ui, p);
     item(p, "Audio Source", NULL, UI_ICON_SPEAKER, m_create);
     item(p, "Crowd", NULL, UI_ICON_CROWD, m_create);

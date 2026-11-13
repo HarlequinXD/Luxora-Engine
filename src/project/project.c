@@ -26,6 +26,9 @@ void lx_graphics_apply_preset(LxGraphicsSettings *g, int preset) {
     static const int bounces[] = {2, 3, 4, 6};
     static const int grid[] = {24, 32, 48, 64};
     static const float lod_bias[] = {0.6f, 0.8f, 1.0f, 1.4f};
+    static const int probe_res[] = {64, 128, 256, 256};
+    static const bool ssr[] = {false, true, true, true};
+    static const int ssr_steps[] = {16, 24, 32, 48};
     g->quality_preset = preset;
     g->shadow_resolution = shadow_res[preset];
     g->shadow_cascades = cascades[preset];
@@ -34,6 +37,9 @@ void lx_graphics_apply_preset(LxGraphicsSettings *g, int preset) {
     g->gi_max_bounces = bounces[preset];
     g->gi_grid_resolution = grid[preset];
     g->lod_bias = lod_bias[preset];
+    g->reflection_resolution = probe_res[preset];
+    g->ssr_enabled = ssr[preset];
+    g->ssr_steps = ssr_steps[preset];
 }
 
 LxGraphicsSettings lx_graphics_defaults(int preset) {
@@ -47,6 +53,10 @@ LxGraphicsSettings lx_graphics_defaults(int preset) {
     g.vsync = true;
     g.target_fps = 0;
     g.exposure = 1.0f;
+    g.reflections_enabled = true;
+    g.ssr_max_distance = 30.0f;
+    g.ssr_thickness = 0.35f;
+    g.ssr_max_roughness = 0.6f;
     lx_graphics_apply_preset(&g, preset);
     return g;
 }
@@ -100,6 +110,9 @@ bool lx_project_save(const LxProject *p) {
                  g->gi_enabled, g->gi_photons_per_frame, g->gi_max_bounces, g->gi_grid_resolution, g->gi_intensity, g->gi_responsiveness);
     lx_sb_printf(&sb, "lod = %d\nlod_bias = %g\nvsync = %d\ntarget_fps = %d\nexposure = %g\n", g->lod_enabled, g->lod_bias,
                  g->vsync, g->target_fps, g->exposure);
+    lx_sb_printf(&sb, "reflections = %d\nreflection_resolution = %d\nssr = %d\nssr_steps = %d\nssr_distance = %g\nssr_thickness = %g\nssr_roughness = %g\n",
+                 g->reflections_enabled, g->reflection_resolution, g->ssr_enabled, g->ssr_steps, g->ssr_max_distance, g->ssr_thickness,
+                 g->ssr_max_roughness);
     lx_sb_printf(&sb, "\n[audio]\nmaster = %g\nbus_sfx = %g\nbus_music = %g\nbus_voice = %g\nbus_ambient = %g\n", a->master_volume,
                  a->bus_volume[0], a->bus_volume[1], a->bus_volume[2], a->bus_volume[3]);
     lx_sb_printf(&sb, "sample_rate = %d\nspeed_of_sound = %g\npropagation = %d\nrays = %d\nbounces = %d\nair_absorption = %g\ndoppler = %d\n",
@@ -157,6 +170,13 @@ bool lx_project_load(LxProject *p, const char *root) {
             else if (!strcmp(k, "vsync")) g->vsync = lx_parse_bool(v);
             else if (!strcmp(k, "target_fps")) g->target_fps = n;
             else if (!strcmp(k, "exposure")) g->exposure = f;
+            else if (!strcmp(k, "reflections")) g->reflections_enabled = lx_parse_bool(v);
+            else if (!strcmp(k, "reflection_resolution")) g->reflection_resolution = n;
+            else if (!strcmp(k, "ssr")) g->ssr_enabled = lx_parse_bool(v);
+            else if (!strcmp(k, "ssr_steps")) g->ssr_steps = n;
+            else if (!strcmp(k, "ssr_distance")) g->ssr_max_distance = f;
+            else if (!strcmp(k, "ssr_thickness")) g->ssr_thickness = f;
+            else if (!strcmp(k, "ssr_roughness")) g->ssr_max_roughness = f;
         } else if (!strcmp(section, "audio")) {
             if (!strcmp(k, "master")) a->master_volume = f;
             else if (!strcmp(k, "bus_sfx")) a->bus_volume[LX_BUS_SFX] = f;
@@ -258,7 +278,7 @@ bool lx_project_create(LxProject *p, const char *parent, const char *name, LxPro
         lx_strcpy(lx_get_mesh(s, ground)->material, LX_REF_MAX, "Materials/Ground.lxmat");
         LxEntity sphere = lx_spawn_primitive(s, LX_PRIM_SPHERE, "Metal Sphere", lx_v3(-2, 0.75f, 0));
         lx_entity_set_scale(s, sphere, lx_v3(1.5f, 1.5f, 1.5f));
-        lx_strcpy(lx_get_mesh(s, sphere)->material, LX_REF_MAX, "builtin:metal");
+        lx_strcpy(lx_get_mesh(s, sphere)->material, LX_REF_MAX, "Materials/Chrome.lxmat");
         LxEntity red = lx_spawn_primitive(s, LX_PRIM_CUBE, "Red Wall", lx_v3(3, 1.5f, -1));
         lx_entity_set_scale(s, red, lx_v3(0.3f, 3, 4));
         lx_strcpy(lx_get_mesh(s, red)->material, LX_REF_MAX, "builtin:red");
@@ -274,11 +294,22 @@ bool lx_project_create(LxProject *p, const char *parent, const char *name, LxPro
         LxMaterial ground_mat = lx_material_default();
         lx_strcpy(ground_mat.name, sizeof ground_mat.name, "Ground");
         ground_mat.albedo = lx_v4(0.42f, 0.44f, 0.4f, 1);
-        ground_mat.roughness = 0.85f;
+        ground_mat.roughness = 0.45f;   /* polished concrete: soft screen-space + probe reflections */
         ground_mat.acoustic_absorption = 0.05f;
         char mp[LX_PATH_MAX];
         lx_path_join(mp, sizeof mp, p->assets, "Materials/Ground.lxmat");
         lx_material_save(&ground_mat, mp);
+        LxMaterial chrome = lx_material_default();
+        lx_strcpy(chrome.name, sizeof chrome.name, "Chrome");
+        chrome.albedo = lx_v4(0.95f, 0.94f, 0.92f, 1);
+        chrome.metallic = 1.0f;
+        chrome.roughness = 0.06f;
+        lx_path_join(mp, sizeof mp, p->assets, "Materials/Chrome.lxmat");
+        lx_material_save(&chrome, mp);
+        /* a reflection probe over the play area: box-projected reflections of the walls and floor */
+        LxEntity probe = lx_entity_create(s, "Reflection Probe");
+        lx_entity_set_position(s, probe, lx_v3(0, 1.5f, 0));
+        lx_add_reflection_probe(s, probe)->size = lx_v3(16, 8, 16);
     }
     char sp[LX_PATH_MAX];
     lx_path_join(sp, sizeof sp, p->assets, "Scenes/Main.lxscene");

@@ -53,3 +53,5 @@ bool lx_camera_view(LxScene *s, LxEntity cam, int w, int h, LxRenderView *out) {
     out->height = h;
     return true;
 }
+
+void lx_reflections_refresh(void) {}

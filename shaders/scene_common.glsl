@@ -1,6 +1,7 @@
 // Shared scene uniform block (set 0) and helpers. Inserted where "#pragma lx_common" appears.
 #define LX_MAX_LIGHTS 16
 #define LX_MAX_CASCADES 4
+#define LX_PROBE_SLOTS 5   // slot 0: automatic environment probe, 1..4: Reflection Probe objects
 
 struct LxLightData {
     vec4 pos_range;   // xyz position, w range
@@ -26,6 +27,10 @@ layout(set = 0, binding = 0, std140) uniform SceneUBO {
     vec4 gi_cell;         // xyz cell size
     vec4 gi_res;          // xyz resolution
     ivec4 counts;         // x lights, y cascades, z shadow map size
+    vec4 probe_pos[LX_PROBE_SLOTS];  // xyz capture point, w intensity (0 = slot not in use)
+    vec4 probe_min[LX_PROBE_SLOTS];  // xyz influence box min, w blend distance
+    vec4 probe_max[LX_PROBE_SLOTS];  // xyz influence box max, w 1 = box projection
+    vec4 refl_params;     // x probe mip count, y 1 = probes on
     LxLightData lights[LX_MAX_LIGHTS];
 } u;
 
@@ -46,4 +51,28 @@ vec3 lx_sky(vec3 dir) {
     vec3 sky = mix(u.sky_horizon.rgb, u.sky_zenith.rgb, pow(max(t, 0.0), 0.45));
     vec3 ground = mix(u.sky_horizon.rgb, u.ground_color.rgb, clamp(-t * 4.0, 0.0, 1.0));
     return t >= 0.0 ? sky : ground;
+}
+
+/* The sky exactly as the sky pass draws it (reflections must match what you see). */
+const float LX_SKY_SCALE = 1.6;
+vec3 lx_sky_radiance(vec3 dir) { return lx_sky(dir) * u.sky_zenith.w * LX_SKY_SCALE; }
+
+/* Glossy sky reflection: the sky averaged over a cone around the mirror direction whose
+   width follows the GGX lobe (alpha = roughness^2). Mirrors stay sharp, rough metal blurs
+   the horizon and gradient instead of fading to a flat colour. */
+vec3 lx_sky_glossy(vec3 r, float rough) {
+    float a = rough * rough;
+    if (a < 0.003) return lx_sky_radiance(r);
+    vec3 up = abs(r.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 t = normalize(cross(up, r));
+    vec3 b = cross(r, t);
+    float spread = min(a * 1.6, 2.0);
+    vec3 sum = lx_sky_radiance(r);
+    const int N = 12;
+    for (int i = 0; i < N; i++) {
+        float k = (float(i) + 0.5) / float(N);
+        float rad = sqrt(k) * spread, ang = float(i) * 2.39996323; /* golden-angle spiral */
+        sum += lx_sky_radiance(normalize(r + (t * cos(ang) + b * sin(ang)) * rad));
+    }
+    return sum / float(N + 1);
 }

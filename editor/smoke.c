@@ -125,8 +125,8 @@ static void s_make_editable_verify(void) {
 
 static void s_create_all(void) {
     static const char *what[] = {"Empty", "Cube", "Sphere", "Plane", "Cylinder", "Capsule", "Camera", "Directional Light",
-                                 "Point Light", "Spot Light", "Audio Source", "Crowd"};
-    for (int i = 0; i < 12; i++) ed_create(what[i]);
+                                 "Point Light", "Spot Light", "Reflection Probe", "Audio Source", "Crowd"};
+    for (int i = 0; i < 13; i++) ed_create(what[i]);
 }
 static void s_undo(void) { for (int i = 0; i < 4; i++) ed_undo(); }
 static void s_redo(void) { for (int i = 0; i < 2; i++) ed_redo(); }

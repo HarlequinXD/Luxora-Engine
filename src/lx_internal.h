@@ -213,6 +213,7 @@ typedef struct LxEntityData {
     LxAudioSource audio;
     LxBehaviourRef behaviour;
     LxCrowdComponent crowd;
+    LxReflectionProbe probe;
     LxBehaviourInstance binst;
     LxCrowd *crowd_sim;
     int audio_voice;  /* runtime voice index or -1 */
@@ -236,6 +237,8 @@ struct LxScene {
 };
 
 LxEntityData *lx_entity_data(const LxScene *s, LxEntity e);
+#define LX_INDEX_BITS 20u
+#define LX_INDEX_MASK ((1u << LX_INDEX_BITS) - 1u)
 LxEntity lx_entity_make(uint32_t index, uint32_t gen);
 
 /* ---------- geometry acceleration (shared by GI + acoustics) ---------- */

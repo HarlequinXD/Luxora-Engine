@@ -98,6 +98,7 @@
     X(vkCmdPushConstants)              \
     X(vkCmdCopyBuffer)                 \
     X(vkCmdCopyBufferToImage)          \
+    X(vkCmdClearColorImage)            \
     X(vkCmdCopyImageToBuffer)          \
     X(vkCmdBlitImage)
 

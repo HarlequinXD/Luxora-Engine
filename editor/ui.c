@@ -508,6 +508,15 @@ void ui_draw_icon(UiCtx *ui, UiIcon icon, float x, float y, float s, uint32_t c)
             ui_draw_rect(ui, x + s * (cx - 0.12f * sc), y + s * 0.5f, s * 0.24f * sc, s * 0.34f, i == 1 ? c : c2, s * 0.1f);
         }
         break;
+    case UI_ICON_PROBE: {
+        /* a mirror ball: dark sphere reflecting a bright horizon, with a highlight */
+        float cx = x + s * 0.5f, cy = y + s * 0.5f, r = s * 0.4f;
+        ui_draw_circle(ui, cx, cy, r, ui_alpha(c, 0.45f), 24);
+        ui_draw_rect(ui, cx - r * 0.86f, cy - r * 0.08f, r * 1.72f, r * 0.2f, c, r * 0.1f);
+        ui_draw_circle(ui, cx - r * 0.35f, cy - r * 0.42f, r * 0.2f, UI_RGBA(255, 255, 255, 230), 12);
+        ui_draw_ring(ui, cx, cy, r, t, c, 24);
+        break;
+    }
     case UI_ICON_BEHAVIOUR:
         ui_draw_ring(ui, x + s * 0.5f, y + s * 0.5f, s * 0.36f, t, c, 20);
         ui_draw_line(ui, P(0.42f, 0.3f), P(0.3f, 0.5f), t, c);

@@ -1,8 +1,6 @@
 /* Scene graph: generational entity handles, hierarchy, transforms and components. */
 #include "../lx_internal.h"
 
-#define LX_INDEX_BITS 20u
-#define LX_INDEX_MASK ((1u << LX_INDEX_BITS) - 1u)
 
 LxEntity lx_entity_make(uint32_t index, uint32_t gen) { return (gen << LX_INDEX_BITS) | (index & LX_INDEX_MASK); }
 
@@ -432,6 +430,20 @@ LxCrowdComponent *lx_add_crowd(LxScene *s, LxEntity e, int agents) {
     return &d->crowd;
 }
 
+LxReflectionProbe *lx_add_reflection_probe(LxScene *s, LxEntity e) {
+    LxEntityData *d = lx_entity_data(s, e);
+    if (!d) return NULL;
+    if (!(d->comps & LX_COMP_REFLECTION_PROBE)) {
+        d->probe.size = lx_v3(10, 6, 10);
+        d->probe.intensity = 1.0f;
+        d->probe.blend_distance = 1.0f;
+        d->probe.box_projection = true;
+        d->probe.realtime = false;
+    }
+    d->comps |= LX_COMP_REFLECTION_PROBE;
+    return &d->probe;
+}
+
 #define GETTER(fn, type, bit, field)                                  \
     type *fn(LxScene *s, LxEntity e) {                                \
         LxEntityData *d = lx_entity_data(s, e);                       \
@@ -443,6 +455,7 @@ GETTER(lx_get_mesh, LxMeshRenderer, LX_COMP_MESH, mesh)
 GETTER(lx_get_audio_source, LxAudioSource, LX_COMP_AUDIO_SOURCE, audio)
 GETTER(lx_get_behaviour, LxBehaviourRef, LX_COMP_BEHAVIOUR, behaviour)
 GETTER(lx_get_crowd, LxCrowdComponent, LX_COMP_CROWD, crowd)
+GETTER(lx_get_reflection_probe, LxReflectionProbe, LX_COMP_REFLECTION_PROBE, probe)
 
 void lx_remove_component(LxScene *s, LxEntity e, LxComponentBits c) {
     LxEntityData *d = lx_entity_data(s, e);

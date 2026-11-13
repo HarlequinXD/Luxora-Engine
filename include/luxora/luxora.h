@@ -280,6 +280,7 @@ typedef enum LxComponentBits {
     LX_COMP_AUDIO_LISTENER = 1 << 4,
     LX_COMP_BEHAVIOUR = 1 << 5,
     LX_COMP_CROWD = 1 << 6,
+    LX_COMP_REFLECTION_PROBE = 1 << 7,
 } LxComponentBits;
 
 typedef struct LxCamera {
@@ -330,6 +331,18 @@ typedef struct LxCrowdComponent {
     char mesh[LX_REF_MAX];
     char material[LX_REF_MAX];
 } LxCrowdComponent;
+
+/* Captures the scene around it into a cubemap that nearby surfaces reflect.
+ * The box is centred on the entity; inside it, reflections are parallax-corrected
+ * (box projection) so floors and walls line up. Probes re-capture automatically when
+ * the scene changes; realtime probes keep updating every few frames. */
+typedef struct LxReflectionProbe {
+    LxVec3 size;            /* influence box, world units */
+    float intensity;
+    float blend_distance;   /* fade-in distance at the box edges */
+    bool box_projection;
+    bool realtime;
+} LxReflectionProbe;
 
 typedef struct LxEnvironment {
     LxVec3 sky_zenith, sky_horizon, ground_color;
@@ -391,12 +404,14 @@ LxAudioSource *lx_add_audio_source(LxScene *s, LxEntity e, const char *clip_ref)
 void lx_add_audio_listener(LxScene *s, LxEntity e);
 LxBehaviourRef *lx_add_behaviour(LxScene *s, LxEntity e, const char *behaviour_name);
 LxCrowdComponent *lx_add_crowd(LxScene *s, LxEntity e, int agents);
+LxReflectionProbe *lx_add_reflection_probe(LxScene *s, LxEntity e);
 LxCamera *lx_get_camera(LxScene *s, LxEntity e);
 LxLight *lx_get_light(LxScene *s, LxEntity e);
 LxMeshRenderer *lx_get_mesh(LxScene *s, LxEntity e);
 LxAudioSource *lx_get_audio_source(LxScene *s, LxEntity e);
 LxBehaviourRef *lx_get_behaviour(LxScene *s, LxEntity e);
 LxCrowdComponent *lx_get_crowd(LxScene *s, LxEntity e);
+LxReflectionProbe *lx_get_reflection_probe(LxScene *s, LxEntity e);
 void lx_remove_component(LxScene *s, LxEntity e, LxComponentBits comp);
 
 LxEntity lx_spawn_primitive(LxScene *s, LxPrimitive p, const char *name, LxVec3 pos);
@@ -471,6 +486,15 @@ typedef struct LxGraphicsSettings {
     int target_fps;             /* 0 = unlimited */
     float exposure;
     int quality_preset;         /* 0 low, 1 medium, 2 high, 3 ultra */
+    /* reflections: probes (cubemaps of the scene, plus an automatic environment probe)
+       and screen-space reflections layered on top for exact on-screen detail */
+    bool reflections_enabled;
+    int reflection_resolution;  /* probe cube face size: 64 .. 512 */
+    bool ssr_enabled;
+    int ssr_steps;              /* ray-march steps (half resolution) */
+    float ssr_max_distance;     /* world units */
+    float ssr_thickness;        /* how thick on-screen surfaces are assumed to be */
+    float ssr_max_roughness;    /* rougher surfaces use probes only */
 } LxGraphicsSettings;
 
 typedef struct LxRenderStats {
@@ -478,6 +502,7 @@ typedef struct LxRenderStats {
     int64_t triangles;
     int gi_photons_traced;
     float gi_ms, cull_ms, frame_ms;
+    int probes_active, probe_faces_rendered;
 } LxRenderStats;
 
 typedef struct LxRenderView {
@@ -507,6 +532,7 @@ void lx_render_target_resize(LxRenderTarget *rt, int w, int h);
 void lx_render_target_destroy(LxRenderTarget *rt);
 uint32_t lx_render_target_texture(const LxRenderTarget *rt); /* GL texture of the final LDR image */
 void lx_gi_reset(void);  /* restart photon accumulation */
+void lx_reflections_refresh(void);  /* re-capture every reflection probe */
 
 /* ===================================================================
  *  Audio + acoustics

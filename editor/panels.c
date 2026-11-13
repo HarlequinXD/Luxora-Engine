@@ -18,6 +18,7 @@ uint32_t ed_color_for_icon(UiIcon icon) {
     case UI_ICON_CAMERA: return UI_HEX(0x79c0ff);
     case UI_ICON_LIGHT: case UI_ICON_SUN: case UI_ICON_BULB: case UI_ICON_SPOT: return UI_HEX(0xf2cc60);
     case UI_ICON_CROWD: return UI_HEX(0xff7b72);
+    case UI_ICON_PROBE: return UI_HEX(0x8be9fd);
     case UI_ICON_PLAY: return UI_HEX(0x3fb950);
     case UI_ICON_TRASH: case UI_ICON_ERROR: return UI_HEX(0xe5534b);
     case UI_ICON_WARNING: return UI_HEX(0xe3b341);
@@ -34,6 +35,7 @@ UiIcon ed_icon_for_entity(LxScene *s, LxEntity e) {
         return l->type == LX_LIGHT_DIRECTIONAL ? UI_ICON_SUN : l->type == LX_LIGHT_SPOT ? UI_ICON_SPOT : UI_ICON_BULB;
     }
     if (c & LX_COMP_CROWD) return UI_ICON_CROWD;
+    if (c & LX_COMP_REFLECTION_PROBE) return UI_ICON_PROBE;
     if (c & LX_COMP_MESH) {
         const char *m = lx_get_mesh(s, e)->mesh;
         if (strstr(m, "sphere")) return UI_ICON_SPHERE;
@@ -378,6 +380,8 @@ UiNode *ed_hierarchy_panel(UiNode *parent) {
  * ====================================================================== */
 static bool g_open_transform = true, g_open_camera = true, g_open_light = true, g_open_mesh = true, g_open_audio = true,
             g_open_listener = true, g_open_behaviour = true, g_open_crowd = true, g_open_material = true;
+static bool g_open_probe = true;
+static void probe_recapture(UiNode *n) { LX_UNUSED(n); lx_reflections_refresh(); ui_notify(ED.ui, "Reflection probes re-capturing"); }
 static const char *LIGHT_TYPES[] = {"Directional", "Point", "Spot"};
 static const char *BUSES[] = {"SFX", "Music", "Voice", "Ambient"};
 static const char *g_behaviour_names[64];
@@ -561,6 +565,7 @@ static void add_component(UiNode *n) {
     case LX_COMP_AUDIO_LISTENER: lx_add_audio_listener(s, e); break;
     case LX_COMP_BEHAVIOUR: lx_add_behaviour(s, e, lx_behaviour_count() ? lx_behaviour_at(0)->name : "Rotator"); break;
     case LX_COMP_CROWD: lx_add_crowd(s, e, 500); break;
+    case LX_COMP_REFLECTION_PROBE: lx_add_reflection_probe(s, e); break;
     }
     ED.inspector_dirty = true;
     ED.hierarchy_hash = 0;
@@ -574,8 +579,9 @@ static void add_component_menu(UiNode *b) {
     struct { LxComponentBits bit; const char *name; UiIcon icon; } comps[] = {
         {LX_COMP_MESH, "Mesh Renderer", UI_ICON_MESH}, {LX_COMP_LIGHT, "Light", UI_ICON_BULB}, {LX_COMP_CAMERA, "Camera", UI_ICON_CAMERA},
         {LX_COMP_AUDIO_SOURCE, "Audio Source", UI_ICON_SPEAKER}, {LX_COMP_AUDIO_LISTENER, "Audio Listener", UI_ICON_LISTENER},
-        {LX_COMP_BEHAVIOUR, "Behaviour (Script)", UI_ICON_BEHAVIOUR}, {LX_COMP_CROWD, "Crowd", UI_ICON_CROWD}};
-    for (int i = 0; i < 7; i++) {
+        {LX_COMP_BEHAVIOUR, "Behaviour (Script)", UI_ICON_BEHAVIOUR}, {LX_COMP_CROWD, "Crowd", UI_ICON_CROWD},
+        {LX_COMP_REFLECTION_PROBE, "Reflection Probe", UI_ICON_PROBE}};
+    for (int i = 0; i < 8; i++) {
         UiNode *it = ui_menu_item(ED.ui, p, comps[i].name, NULL, add_component);
         it->icon = comps[i].icon;
         it->icon_color = ed_color_for_icon(comps[i].icon);
@@ -729,6 +735,22 @@ static void build_entity_inspector(UiNode *body) {
         } else
             for (int i = 0; i < LX_BEHAVIOUR_PARAMS; i++)
                 if (desc->param_names[i]) float_row(sec, desc->param_names[i], &d->behaviour.params[i], 0.05f, -1e9f, 1e9f);
+    }
+    if (d->comps & LX_COMP_REFLECTION_PROBE) {
+        sec = comp_section(body, UI_ICON_PROBE, "Reflection Probe", &g_open_probe, LX_COMP_REFLECTION_PROBE);
+        ed_vec3_row(sec, "Box Size", &d->probe.size.x, 0.1f, ed_field_changed);
+        slider_row(sec, "Intensity", &d->probe.intensity, 0, 4)->on_change = ed_field_changed;
+        float_row(sec, "Blend Distance", &d->probe.blend_distance, 0.05f, 0, 100)->on_change = ed_field_changed;
+        bool_row(sec, "Box Projection", &d->probe.box_projection)->on_change = ed_field_changed;
+        bool_row(sec, "Realtime", &d->probe.realtime)->on_change = ed_field_changed;
+        UiNode *hint = ui_label(ui, sec, "Captures the scene around it; surfaces inside the box reflect it. Re-captures automatically when "
+                                         "the scene changes. Realtime keeps updating for moving objects.");
+        hint->font = UI_FONT_SMALL;
+        hint->fg = t->text_dim;
+        hint->wrap = true;
+        UiNode *rc = ui_button(ui, sec, "Re-capture Now", probe_recapture);
+        rc->icon = UI_ICON_REFRESH;
+        rc->h = 26;
     }
     if (d->comps & LX_COMP_CROWD) {
         sec = comp_section(body, UI_ICON_CROWD, "Crowd", &g_open_crowd, LX_COMP_CROWD);
@@ -994,7 +1016,9 @@ UiNode *ed_inspector_panel(UiNode *parent) {
  * ====================================================================== */
 static const char *QUALITY[] = {"Low", "Medium", "High", "Ultra"};
 static const char *SHADOW_RES[] = {"512", "1024", "2048", "4096"};
-static int g_quality, g_shadow_res_idx;
+static const char *PROBE_RES[] = {"64", "128", "256", "512"};
+static int g_quality, g_shadow_res_idx, g_probe_res_idx;
+static bool g_open_refl = true;
 static LxScene *g_lighting_scene;
 static bool g_open_env = true, g_open_gi = true, g_open_shadow = true;
 
@@ -1010,6 +1034,10 @@ static void quality_changed(UiNode *n) {
 }
 static void shadow_res_changed(UiNode *n) {
     lx_graphics_settings()->shadow_resolution = 512 << g_shadow_res_idx;
+    graphics_changed(n);
+}
+static void probe_res_changed(UiNode *n) {
+    lx_graphics_settings()->reflection_resolution = 64 << g_probe_res_idx;
     graphics_changed(n);
 }
 static void reset_gi(UiNode *n) { LX_UNUSED(n); lx_gi_reset(); ui_notify(ED.ui, "Global illumination restarted"); }
@@ -1061,6 +1089,25 @@ static void lighting_frame(UiNode *body) {
     rb->icon = UI_ICON_REFRESH;
     rb->h = 26;
 
+    sec = ed_section(body, UI_ICON_PROBE, "Reflections (project)", &g_open_refl, NULL);
+    bool_row(sec, "Reflection Probes", &g->reflections_enabled)->on_change = graphics_changed;
+    g_probe_res_idx = g->reflection_resolution >= 512 ? 3 : g->reflection_resolution >= 256 ? 2 : g->reflection_resolution >= 128 ? 1 : 0;
+    row = ed_prop_row(sec, "Probe Resolution");
+    UiNode *pr = ui_dropdown(ui, row, &g_probe_res_idx, PROBE_RES, 4);
+    pr->grow = 1;
+    pr->on_change = probe_res_changed;
+    bool_row(sec, "Screen-Space Reflections", &g->ssr_enabled)->on_change = graphics_changed;
+    row = ed_prop_row(sec, "SSR Steps");
+    UiNode *st = ui_int(ui, row, &g->ssr_steps, 8, 128);
+    st->grow = 1;
+    st->on_change = graphics_changed;
+    float_row(sec, "SSR Max Distance", &g->ssr_max_distance, 0.5f, 1, 500)->on_change = graphics_changed;
+    float_row(sec, "SSR Thickness", &g->ssr_thickness, 0.01f, 0.01f, 5)->on_change = graphics_changed;
+    slider_row(sec, "SSR Max Roughness", &g->ssr_max_roughness, 0.05f, 1)->on_change = graphics_changed;
+    UiNode *rr = ui_button(ui, sec, "Re-capture Probes", probe_recapture);
+    rr->icon = UI_ICON_REFRESH;
+    rr->h = 26;
+
     sec = ed_section(body, UI_ICON_LAYERS, "Shadows & Detail (project)", &g_open_shadow, NULL);
     row = ed_prop_row(sec, "Resolution");
     UiNode *sr = ui_dropdown(ui, row, &g_shadow_res_idx, SHADOW_RES, 4);
@@ -1107,6 +1154,7 @@ static void stats_frame(UiNode *body) {
     STAT("%.2f ms", (double)st->cull_ms);
     STAT("%d", st->gi_photons_traced);
     STAT("%.2f ms", (double)st->gi_ms);
+    STAT("%d active, %d faces", st->probes_active, st->probe_faces_rendered);
     STAT("%d", ED.scene ? lx_scene_entity_count(ED.scene) : 0);
     STAT("%d", lx_jobs_thread_count());
     STAT("%s", lx_audio_backend_name());
@@ -1127,9 +1175,9 @@ UiNode *ed_stats_panel(UiNode *parent) {
     ui_pad(body, 12, 10, 12, 10);
     body->gap = 2;
     static const char *names[] = {"Frame rate", "Render CPU time", "Draw calls", "Instances drawn", "Instances culled", "Triangles",
-                                  "Culling time", "Photons / frame", "GI trace time", "Entities", "Worker threads", "Audio device",
-                                  "Gamepads", "Last input"};
-    for (int i = 0; i < 14; i++) {
+                                  "Culling time", "Photons / frame", "GI trace time", "Reflection probes", "Entities", "Worker threads",
+                                  "Audio device", "Gamepads", "Last input"};
+    for (int i = 0; i < 15; i++) {
         UiNode *row = ed_prop_row(body, names[i]);
         row->first->w = 130;
         UiNode *v = ui_label(ui, row, "-");
