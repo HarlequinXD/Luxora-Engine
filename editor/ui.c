@@ -334,7 +334,8 @@ void ui_draw_text(UiCtx *ui, UiFont f, float x, float y, const char *t, uint32_t
 
 /* draws text clipped with an ellipsis when it exceeds max_w */
 static void draw_text_fit(UiCtx *ui, UiFont f, float x, float y, const char *t, uint32_t col, float max_w) {
-    if (ui_text_width(ui, f, t) <= max_w) { ui_draw_text(ui, f, x, y, t, col); return; }
+    if (!t || !t[0]) return;
+    if (ui_text_width(ui, f, t) <= max_w + 1.0f) { ui_draw_text(ui, f, x, y, t, col); return; }
     char buf[256];
     float ell = ui_text_width(ui, f, "…");
     size_t n = 0;
@@ -1001,7 +1002,7 @@ static void measure(UiCtx *ui, UiNode *n, float *ow, float *oh) {
     float icon = n->icon ? S(ui, n->icon_size > 0 ? n->icon_size : 16) : 0;
     switch (n->type) {
     case UI_LABEL: {
-        float tw = n->text[0] ? ui_text_width(ui, n->font, n->text) : 0;
+        float tw = n->text[0] ? ceilf(ui_text_width(ui, n->font, n->text)) + 1.0f : 0;
         w = tw + icon + (icon > 0 && tw > 0 ? S(ui, 6) : 0);
         h = lx_maxf(ui_line_height(ui, n->font), icon);
         h = lx_maxf(h, n->font == UI_FONT_TITLE ? 0 : S(ui, 20));

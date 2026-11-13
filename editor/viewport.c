@@ -562,7 +562,7 @@ UiNode *ed_viewport_panel(UiNode *parent) {
     b->bg_active = t->selection;
     lx_strcpy(b->tooltip, sizeof b->tooltip, "View through the scene's main camera while playing");
     ui_separator(ui, bar)->w = 10;
-    UiNode *spd = ui_label(ui, bar, "Camera speed");
+    UiNode *spd = ui_label(ui, bar, "Speed");
     spd->font = UI_FONT_SMALL;
     spd->fg = t->text_dim;
     UiNode *s = ui_slider(ui, bar, &ED.cam_speed, 0.5f, 60);

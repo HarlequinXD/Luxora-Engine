@@ -402,7 +402,9 @@ static VkPipeline pipeline_create(const PipeDesc *d) {
     VkPipelineRasterizationStateCreateInfo rs = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
     rs.polygonMode = VK_POLYGON_MODE_FILL;
     rs.cullMode = d->cull;
-    rs.frontFace = VK_FRONT_FACE_CLOCKWISE; /* GL-style CCW meshes become CW after the Y flip */
+    /* Meshes are counter-clockwise. The shaders flip Y in clip space and Vulkan's framebuffer Y
+     * points down, so the two flips cancel and the winding stays counter-clockwise on screen. */
+    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rs.lineWidth = 1.0f;
     rs.depthBiasEnable = d->depth_bias;
     rs.depthBiasConstantFactor = 1.25f;

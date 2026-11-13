@@ -127,6 +127,7 @@ void main() {
     vec3 r = reflect(-v, n);
     vec3 sky_ref = mix(lx_sky(r), mix(u.sky_horizon.rgb, u.sky_zenith.rgb, 0.5), rough) * ambient;
     float occl = u.gi_origin.w > 0.5 ? clamp(dot(irradiance, vec3(0.333)) / max(ambient * PI * 0.6, 1e-3), 0.0, 1.0) : 1.0;
+    occl = mix(0.45, 1.0, occl); /* GI is diffuse and low-frequency: only partially darken reflections */
     color += spec_env * sky_ref * occl;
     color += m.emissive.rgb * m.emissive.w;
     float fog = 1.0 - exp(-u.ground_color.w * length(u.camera_pos.xyz - v_world));
