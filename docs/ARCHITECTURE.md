@@ -24,7 +24,9 @@ Two frames are in flight. Per-frame resources (UBO slices, the instance stream, 
 1. Static meshes are flattened into a triangle BVH (binned SAH, 4 triangles per leaf).
 2. Each frame, `gi_photons_per_frame` photons are distributed over the lights and the sky in proportion to their power. Directional power is irradiance × projected scene area; point is 4πI; spot is 2π(1−cos θ)I; sky is πL×area.
 3. Photons bounce diffusely with Russian roulette by albedo. Light photons deposit **after** their first bounce, because direct light is shaded analytically. Sky photons deposit on every hit, which yields sky occlusion.
-4. Deposits are splatted trilinearly into an L1 SH irradiance volume, in parallel z-slabs so no locks are needed, then blended temporally.
+4. Deposits are splatted trilinearly into an L1 SH irradiance volume, in parallel z-slabs so no locks are needed.
+5. **Progressive accumulation**: while the lights and sky are unchanged, every frame gets equal weight (a running average over up to 1,024 frames), so Monte Carlo noise keeps falling roughly as 1/√frames. A hash of all emitters detects changes and shortens the history to `1 / gi_responsiveness` frames, so moving lights are followed quickly before the noise settles again.
+6. A separable [1,2,1] filter on the output removes the remaining cell-sized blotches.
 
 The tests check this: a red wall visibly tints the irradiance seen by surfaces facing it.
 

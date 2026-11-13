@@ -26,7 +26,10 @@ static struct {
     LxBvh bvh;
     uint32_t built_version;
     LxScene *built_scene;
-    float *accum;        /* temporally blended SH (public) */
+    float *accum;        /* temporally accumulated SH */
+    float *filtered;     /* accum after a light spatial denoise (what the renderer samples) */
+    float *scratch;
+    uint64_t light_hash, prev_light_hash; /* changes when any light or the sky changes */
     float *frame;        /* this frame's estimate */
     int res[3], cells;
     LxVec3 origin, cell_size;
@@ -53,6 +56,8 @@ void lx_gi_shutdown(void) {
     lx_bvh_free(&G.bvh);
     lx_free(G.accum);
     lx_free(G.frame);
+    lx_free(G.filtered);
+    lx_free(G.scratch);
     for (int i = 0; i < G.threads; i++) lx_free(G.thread_deps[i]);
     lx_free(G.thread_deps);
     lx_free(G.thread_dep_count);
@@ -94,13 +99,26 @@ static void setup_grid(int longest_res) {
     G.cell_size = lx_v3s(cell);
     lx_free(G.accum);
     lx_free(G.frame);
+    lx_free(G.filtered);
+    lx_free(G.scratch);
     G.accum = lx_calloc((size_t)G.cells * SH_FLOATS, sizeof(float));
     G.frame = lx_calloc((size_t)G.cells * SH_FLOATS, sizeof(float));
+    G.filtered = lx_calloc((size_t)G.cells * SH_FLOATS, sizeof(float));
+    G.scratch = lx_calloc((size_t)G.cells * SH_FLOATS, sizeof(float));
     G.frame_count = 0;
     G.scene_bounds = b;
 }
 
 static float luminance(LxVec3 c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; }
+
+static uint64_t hash_floats(uint64_t h, const float *f, int n) {
+    for (int i = 0; i < n; i++) {
+        uint32_t b;
+        memcpy(&b, &f[i], 4);
+        h = (h ^ b) * 1099511628211ull;
+    }
+    return h;
+}
 
 static void gather_emitters(LxScene *s) {
     G.emitter_count = 0;
@@ -130,6 +148,17 @@ static void gather_emitters(LxScene *s) {
         G.emitters[G.emitter_count++] = e;
         G.total_power += e.power;
     }
+    /* lighting signature: any change restarts the fast-adapt phase of accumulation */
+    uint64_t h = 1469598103934665603ull ^ (uint64_t)G.emitter_count;
+    for (int i = 0; i < G.emitter_count; i++) {
+        const Emitter *e = &G.emitters[i];
+        float f[11] = {(float)e->kind, e->pos.x, e->pos.y, e->pos.z, e->dir.x, e->dir.y, e->dir.z, e->color.x, e->color.y, e->color.z, e->cos_cone};
+        h = hash_floats(h, f, 11);
+    }
+    float env[7] = {s->env.sky_zenith.x, s->env.sky_zenith.y, s->env.sky_zenith.z, s->env.sky_horizon.x, s->env.sky_horizon.y,
+                    s->env.sky_horizon.z, s->env.ambient_intensity};
+    G.light_hash = hash_floats(h, env, 7);
+
     /* sky: a horizontal emitting plane above the scene radiating downward, L = sky radiance */
     LxVec3 sky = lx_scale3(lx_lerp3(s->env.sky_horizon, s->env.sky_zenith, 0.5f), s->env.ambient_intensity);
     if (luminance(sky) > 0) {
@@ -263,6 +292,25 @@ static void splat_job(void *user, int begin, int end, int thread) {
     }
 }
 
+/* separable [1,2,1] blur along one axis: softens the cell-sized blotches left by Monte Carlo noise */
+typedef struct BlurJob { const float *src; float *dst; int axis; } BlurJob;
+static void blur_job(void *user, int begin, int end, int thread) {
+    LX_UNUSED(thread);
+    BlurJob *b = user;
+    int rx = G.res[0], ry = G.res[1], rz = G.res[2];
+    int stride = b->axis == 0 ? 1 : b->axis == 1 ? rx : rx * ry;
+    int len = b->axis == 0 ? rx : b->axis == 1 ? ry : rz;
+    for (int i = begin; i < end; i++) {
+        int x = i % rx, y = (i / rx) % ry, z = i / (rx * ry);
+        int p = b->axis == 0 ? x : b->axis == 1 ? y : z;
+        const float *c = b->src + (size_t)i * SH_FLOATS;
+        const float *lo = p > 0 ? c - (size_t)stride * SH_FLOATS : c;
+        const float *hi = p < len - 1 ? c + (size_t)stride * SH_FLOATS : c;
+        float *o = b->dst + (size_t)i * SH_FLOATS;
+        for (int k = 0; k < SH_FLOATS; k++) o[k] = 0.25f * lo[k] + 0.5f * c[k] + 0.25f * hi[k];
+    }
+}
+
 typedef struct BlendJob { float alpha; } BlendJob;
 static void blend_job(void *user, int begin, int end, int thread) {
     LX_UNUSED(thread);
@@ -309,10 +357,24 @@ void lx_gi_update(LxScene *s, const LxGraphicsSettings *g) {
     lx_parallel_for(chunks, 1, trace_job, &tj);
     memset(G.frame, 0, sizeof(float) * (size_t)G.cells * SH_FLOATS);
     lx_parallel_for(G.res[2], 1, splat_job, NULL);
-    /* first frames converge fast, then settle to the configured responsiveness */
-    G.frame_count += 1.0f;
-    BlendJob bj = {lx_maxf(1.0f / G.frame_count, lx_clampf(g->gi_responsiveness, 0.01f, 1.0f))};
+    /* Progressive accumulation: while the lighting is unchanged every frame gets equal weight
+     * (a true running average), so noise keeps falling as 1/sqrt(frames) up to a long history.
+     * When a light, the sky or the geometry changes, the history is shortened to 1/responsiveness
+     * frames so the solution follows quickly, then it lengthens again and the noise settles. */
+    static const float MAX_HISTORY = 1024.0f;
+    if (G.light_hash != G.prev_light_hash) {
+        float fast = 1.0f / lx_clampf(g->gi_responsiveness, 0.01f, 1.0f);
+        if (G.frame_count > fast) G.frame_count = fast;
+        G.prev_light_hash = G.light_hash;
+    }
+    G.frame_count = lx_minf(G.frame_count + 1.0f, MAX_HISTORY);
+    BlendJob bj = {1.0f / G.frame_count};
     lx_parallel_for(G.cells, 4096, blend_job, &bj);
+    BlurJob bx = {G.accum, G.scratch, 0}, by = {G.scratch, G.filtered, 1}, bz = {G.filtered, G.scratch, 2};
+    lx_parallel_for(G.cells, 4096, blur_job, &bx);
+    lx_parallel_for(G.cells, 4096, blur_job, &by);
+    lx_parallel_for(G.cells, 4096, blur_job, &bz);
+    memcpy(G.filtered, G.scratch, sizeof(float) * (size_t)G.cells * SH_FLOATS);
     G.version++;
     G.photons_last = photons;
     G.ms_last = (float)((lx_time() - t0) * 1000.0);
@@ -321,7 +383,7 @@ void lx_gi_update(LxScene *s, const LxGraphicsSettings *g) {
     G.volume.res[0] = G.res[0];
     G.volume.res[1] = G.res[1];
     G.volume.res[2] = G.res[2];
-    G.volume.sh = G.accum;
+    G.volume.sh = G.filtered;
     G.volume.version = G.version;
     G.volume.valid = true;
 }

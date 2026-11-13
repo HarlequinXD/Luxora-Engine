@@ -227,6 +227,57 @@ static void test_gi(void) {
     lx_scene_destroy(s);
 }
 
+/* noise = relative RMS change of the indirect light on the floor between two consecutive frames */
+static void gi_floor_layer(float *out, int *n) {
+    const LxGiVolume *v = lx_gi_volume();
+    int y = (int)((0.6f - v->origin.y) / v->cell_size.y);
+    *n = 0;
+    for (int z = v->res[2] / 4; z < v->res[2] * 3 / 4; z++)
+        for (int x = v->res[0] / 4; x < v->res[0] * 3 / 4; x++) out[(*n)++] = v->sh[((size_t)(z * v->res[1] + y) * v->res[0] + x) * 12];
+}
+static float gi_flicker(LxScene *s, const LxGraphicsSettings *g) {
+    static float a[4096], b[4096];
+    int n;
+    gi_floor_layer(a, &n);
+    lx_gi_update(s, g);
+    gi_floor_layer(b, &n);
+    double d = 0, m = 0;
+    for (int i = 0; i < n; i++) { d += (double)(b[i] - a[i]) * (b[i] - a[i]); m += (double)b[i] * b[i]; }
+    return m > 0 ? (float)sqrt(d / m) : 1.0f;
+}
+
+static void test_gi_convergence(void) {
+    printf("photon gi convergence\n");
+    LxScene *s = lx_scene_create("Noise");
+    LxEntity floor = lx_spawn_primitive(s, LX_PRIM_CUBE, "Floor", lx_v3(0, -0.5f, 0));
+    lx_entity_set_scale(s, floor, lx_v3(20, 1, 20));
+    LxEntity roof = lx_spawn_primitive(s, LX_PRIM_CUBE, "Ceiling", lx_v3(0, 6.5f, 0));
+    lx_entity_set_scale(s, roof, lx_v3(20, 1, 20));
+    LxEntity lamp = lx_entity_create(s, "Lamp");
+    lx_entity_set_position(s, lamp, lx_v3(0, 4, 0));
+    lx_add_light(s, lamp, LX_LIGHT_POINT)->intensity = 200;
+    s->env.ambient_intensity = 0;
+    LxGraphicsSettings g = lx_graphics_defaults(1);
+    g.gi_photons_per_frame = 20000;
+    for (int f = 0; f < 8; f++) lx_gi_update(s, &g);
+    float early = gi_flicker(s, &g);
+    for (int f = 0; f < 300; f++) lx_gi_update(s, &g);
+    float late = gi_flicker(s, &g);
+    printf("  frame-to-frame noise after 8 frames %.4f, after 308 frames %.4f\n", early, late);
+    CHECK(late < early * 0.25f, "static lighting converges (noise %.4f -> %.4f)", early, late);
+    /* moving the light must restart accumulation quickly instead of smearing the old result */
+    lx_entity_set_position(s, lamp, lx_v3(6, 4, 6));
+    for (int f = 0; f < 30; f++) lx_gi_update(s, &g);
+    const LxGiVolume *v = lx_gi_volume();
+    int y = (int)((0.6f - v->origin.y) / v->cell_size.y);
+    int cx = (int)((6 - v->origin.x) / v->cell_size.x), cz = (int)((6 - v->origin.z) / v->cell_size.z);
+    int ox = (int)((-6 - v->origin.x) / v->cell_size.x), oz = (int)((-6 - v->origin.z) / v->cell_size.z);
+    float near_l = v->sh[((size_t)(cz * v->res[1] + y) * v->res[0] + cx) * 12], far_l = v->sh[((size_t)(oz * v->res[1] + y) * v->res[0] + ox) * 12];
+    CHECK(near_l > far_l * 2.0f, "GI follows a moved light within 30 frames (%g vs %g)", near_l, far_l);
+    lx_gi_shutdown();
+    lx_scene_destroy(s);
+}
+
 static void test_acoustics(void) {
     printf("acoustics\n");
     LxAudioSettings *as = lx_audio_settings();
@@ -426,6 +477,7 @@ int main(void) {
     test_png();
     test_bvh();
     test_gi();
+    test_gi_convergence();
     test_acoustics();
     test_crowd();
     test_project();
