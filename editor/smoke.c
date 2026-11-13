@@ -257,7 +257,7 @@ static void s_avatar_shot(void) {
 }
 static void s_model_place(void) {
     if (!g_md_char[0]) return;
-    g_md_ent = ed_model_place(g_md_char, lx_v3(1.0f, 0, 2.6f), 0);
+    g_md_ent = ed_model_place(g_md_char, lx_v3(1.0f, 0, 4.1f), 0);
     LxAnimator *a = g_md_ent ? lx_get_animator(ED.scene, g_md_ent) : NULL;
     SMOKE_CHECK(a != NULL, "placed model has an Animator");
     if (!a) return;
@@ -266,8 +266,8 @@ static void s_model_place(void) {
     lx_animator_play(ED.scene, g_md_ent, a->clip, 0);
     lx_animator_update(ED.scene, g_md_ent, 3.4f);   /* the editor's preview: a pose part-way into the dance */
     SMOKE_CHECK(lx_animator_playing(ED.scene, g_md_ent), "another humanoid's clip plays on the character (retargeted)");
-    ed_select(g_md_ent);
-    ED.cam_pos = lx_v3(1.0f, 1.05f, 5.4f);
+    ED.selected = 0;
+    ED.cam_pos = lx_v3(1.0f, 1.0f, 6.7f);
     ED.cam_yaw = 0.0f;
     ED.cam_pitch = -6.0f;
 }
@@ -282,6 +282,9 @@ static LxEntity find_named(LxEntity e, const char *part) {
 static void s_model_anim_shot(void) {
     if (!g_md_ent) return;
     smoke_shot("animated_character.ppm");
+}
+static void s_model_reset(void) {
+    if (!g_md_ent) return;
     LxEntity hips = find_named(g_md_ent, "Hips");
     LxQuat before = hips ? lx_entity_rotation(ED.scene, hips) : lx_quat_identity();
     lx_animator_reset_pose(ED.scene, g_md_ent);
@@ -527,7 +530,8 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {260, s_model_inspector_shot, "screenshot of the model inspector, open the Avatar window"},
     {264, s_avatar_shot, "screenshot of the Avatar window"},
     {266, s_model_place, "place a character and preview another model's dance on it"},
-    {270, s_model_anim_shot, "screenshot of the retargeted dance, reset the pose"},
+    {270, s_model_anim_shot, "screenshot of the retargeted dance"},
+    {272, s_model_reset, "stop the preview: back to the rest pose"},
 };
 
 bool ed_smoke_step(int frame) {
@@ -536,5 +540,5 @@ bool ed_smoke_step(int frame) {
             LX_INFO("[smoke] %s", STEPS[i].what);
             if (ED.mode == ED_MODE_EDITOR || frame >= 216) STEPS[i].fn(); /* the last steps run in the Project Manager */
         }
-    return frame < 273;
+    return frame < 275;
 }

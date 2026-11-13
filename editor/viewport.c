@@ -148,7 +148,12 @@ static int pick_axis(LxVec3 c) {
 /* ---------------- icons ---------------- */
 static bool needs_icon(LxEntity e) {
     uint32_t c = lx_entity_components(ED.scene, e);
-    return (c & (LX_COMP_LIGHT | LX_COMP_CAMERA | LX_COMP_AUDIO_SOURCE)) || (!(c & LX_COMP_MESH) && !(c & LX_COMP_CROWD));
+    if (c & (LX_COMP_LIGHT | LX_COMP_CAMERA | LX_COMP_AUDIO_SOURCE)) return true;
+    if ((c & LX_COMP_MESH) || (c & LX_COMP_CROWD)) return false;
+    /* the bones of an animated model would cover it in icons */
+    for (LxEntity p = lx_entity_parent(ED.scene, e); p; p = lx_entity_parent(ED.scene, p))
+        if (lx_entity_components(ED.scene, p) & LX_COMP_ANIMATOR) return false;
+    return true;
 }
 
 static LxEntity icon_under_mouse(void) {
