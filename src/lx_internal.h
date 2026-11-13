@@ -106,6 +106,7 @@ typedef struct LxPadState {
     float axes[LX_PAD_AXIS_COUNT];
 } LxPadState;
 extern LxPadState g_lx_pads[LX_MAX_PADS];
+extern bool g_lx_pad_polling_disabled; /* tests inject pad state directly */
 void lx_input_begin_frame(void); /* copy current->prev, clear per-frame data */
 void lx_input_push_char(uint32_t cp);
 

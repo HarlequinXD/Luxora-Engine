@@ -14,6 +14,7 @@
 #endif
 
 LxPadState g_lx_pads[LX_MAX_PADS];
+bool g_lx_pad_polling_disabled;
 
 typedef struct ActionState { bool down, prev; float value; } ActionState;
 typedef struct TouchState {
@@ -661,7 +662,7 @@ static void note_device(void) {
 void lx_input_update(float dt) {
     LxInputMap *m = lx_input_map();
     for (int p = 0; p < LX_MAX_PADS; p++) memcpy(g_lx_pads[p].prev_buttons, g_lx_pads[p].buttons, sizeof g_lx_pads[p].buttons);
-    poll_pads();
+    if (!g_lx_pad_polling_disabled) poll_pads();
     for (int p = 0; p < LX_MAX_PADS; p++)
         if (INP.rumble_time[p] > 0 && (INP.rumble_time[p] -= dt) <= 0) set_rumble(p, 0, 0);
     update_touch();

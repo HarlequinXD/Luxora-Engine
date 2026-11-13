@@ -346,6 +346,7 @@ static void test_input(void) {
     printf("input\n");
     LxInputMap *m = lx_input_map();
     lx_input_map_defaults(m);
+    g_lx_pad_polling_disabled = true; /* don't let real devices overwrite injected state */
     CHECK(lx_input_find(m, "Jump") && lx_input_find(m, "MoveX") && m->touch_count == 4, "default map");
     /* keyboard */
     memset(&g_lx_input, 0, sizeof g_lx_input);
