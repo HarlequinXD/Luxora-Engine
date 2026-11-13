@@ -73,6 +73,7 @@ struct LxModule {
     uint8_t *got, *stubs;
     char *err;
     size_t err_cap;
+    void *unwind;           /* Windows: the registered function table (.pdata) */
     /* exported symbols, kept after loading */
     char **names;
     uint64_t *addrs;
@@ -171,6 +172,9 @@ static bool apply(LxModule *m, uint8_t *p, uint32_t type, int sym, int64_t adden
 #if LX_MODULE_MACHINE == 62
     switch (type) {
     case 0: return true;                                   /* R_X86_64_NONE */
+    case 8:                                                /* R_X86_64_RELATIVE: Windows unwind tables (RVAs) */
+        put32(p, get32(p) + (uint32_t)(S + (uint64_t)addend - (uint64_t)(uintptr_t)m->mem));
+        return true;
     case 1: put64(p, S + (uint64_t)addend); return true;    /* R_X86_64_64 */
     case 24: put64(p, S + (uint64_t)addend - P); return true; /* R_X86_64_PC64 */
     case 2: case 4: {                                      /* R_X86_64_PC32, R_X86_64_PLT32 */
@@ -359,6 +363,20 @@ static bool load(LxModule *m) {
         }
     }
     if (!mem_make_executable(m->mem, m->exec_size)) return fail(m, "Could not make the scripts executable%s", NULL);
+#if LX_OS_WINDOWS && LX_MODULE_MACHINE == 62
+    /* unwind info, so crashes in scripts are reported properly and debuggers can walk the stack */
+    if (eh->shstrndx < m->shnum) {
+        const Elf64Shdr *names = &m->sh[eh->shstrndx];
+        for (int i = 0; i < m->shnum; i++) {
+            if (!m->sec_addr[i] || m->sh[i].name >= names->size) continue;
+            const char *nm = (const char *)(m->file + names->offset + m->sh[i].name);
+            if (strcmp(nm, ".pdata") || m->sh[i].size < sizeof(RUNTIME_FUNCTION)) continue;
+            PRUNTIME_FUNCTION table = (PRUNTIME_FUNCTION)(uintptr_t)m->sec_addr[i];
+            if (RtlAddFunctionTable(table, (DWORD)(m->sh[i].size / sizeof(RUNTIME_FUNCTION)), (DWORD64)(uintptr_t)m->mem))
+                m->unwind = table;
+        }
+    }
+#endif
 
     /* exports */
     for (int i = 1; i < m->nsyms; i++) {
@@ -415,6 +433,9 @@ bool lx_module_contains(const LxModule *m, const void *p) {
 
 void lx_module_unload(LxModule *m) {
     if (!m) return;
+#if LX_OS_WINDOWS && LX_MODULE_MACHINE == 62
+    if (m->unwind) RtlDeleteFunctionTable((PRUNTIME_FUNCTION)m->unwind);
+#endif
     mem_free(m->mem, m->size);
     for (int i = 0; i < m->count; i++) lx_free(m->names[i]);
     lx_free(m->names);
