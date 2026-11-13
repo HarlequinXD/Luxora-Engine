@@ -229,3 +229,32 @@ jobs:
         with:
           name: luxora-android-sample-apk
           path: ${{ runner.temp }}/apkbuild/outputs/apk/debug/app-debug.apk
+
+  # Publishes the downloads as a GitHub Release ("latest"): direct links that need no GitHub login,
+  # one zip per platform instead of an artifact zip around a zip.
+  release:
+    name: Publish downloads
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [linux, windows, android]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dl
+      - name: Zip and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -e
+          mkdir out
+          mkdir -p win && mv dl/Inferno-Editor-Windows "win/Inferno Editor"
+          (cd win && zip -qr ../out/Inferno-Editor-Windows.zip "Inferno Editor")
+          (cd dl/Inferno-Editor-Linux && zip -qr ../../out/Inferno-Editor-Linux.zip .)
+          cp dl/luxora-android-sample-apk/app-debug.apk out/Luxora-Android-Sample.apk
+          ls -la out
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest out/* --target "$GITHUB_SHA" --prerelease --title "Inferno Editor (latest build)" \
+            --notes "Built from ${GITHUB_SHA::7}. Windows: unzip and run InfernoEditor.exe. Linux: unzip and run InfernoEditor (needs Vulkan)."
