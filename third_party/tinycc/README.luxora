@@ -1,0 +1,4 @@
+TinyCC (https://github.com/TinyCC/tinycc) at f830a1697e159056b75de40a60464bc43ee670a3.
+Used by the editor to compile game scripts (Assets/Scripts). License: LGPL 2.1 (COPYING); see RELICENSING.
+tccdefs_.h is generated from include/tccdefs.h by conftest.c -DC2STR.
+config.h is ours.

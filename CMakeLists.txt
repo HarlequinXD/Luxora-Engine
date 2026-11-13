@@ -35,6 +35,7 @@ set(LUXORA_SOURCES
   src/crowd/crowd.c
   src/physics/physics.c
   src/gameui/gameui.c
+  src/script/module.c src/script/script_api.c
   src/scene/scene.c src/scene/serialize.c src/scene/behaviours.c
   src/project/project.c
   src/input/input.c
@@ -62,6 +63,42 @@ else()
   find_package(Threads REQUIRED)
   target_link_libraries(luxora PUBLIC ${X11_LIBRARIES} Threads::Threads ${CMAKE_DL_LIBS} m)
   target_include_directories(luxora PUBLIC ${X11_INCLUDE_DIR})
+endif()
+
+# ------------------------------------------------------------------ built-in script compiler
+# TinyCC as a library plus the embedded script SDK: lets the editor compile Assets/Scripts with
+# nothing installed. Games don't contain it - they only load the compiled module (src/script/module.c).
+set(LUXORA_SCRIPT_COMPILER OFF)
+if(NOT ANDROID AND (LUXORA_BUILD_EDITOR OR LUXORA_BUILD_TESTS))
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    set(LUXORA_TCC_TARGET TCC_TARGET_X86_64)
+    set(LUXORA_SCRIPT_COMPILER ON)
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+    set(LUXORA_TCC_TARGET TCC_TARGET_ARM64)
+    set(LUXORA_SCRIPT_COMPILER ON)
+  endif()
+endif()
+if(LUXORA_SCRIPT_COMPILER)
+  file(GLOB LUXORA_SDK_INPUTS include/luxora/*.h resources/script_sdk/include/*.h third_party/tinycc/include/*.h
+       third_party/tinycc/lib/*)
+  set(LUXORA_SDK_C ${CMAKE_CURRENT_BINARY_DIR}/script_sdk_files.c)
+  add_custom_command(OUTPUT ${LUXORA_SDK_C}
+    COMMAND ${CMAKE_COMMAND} -DOUT=${LUXORA_SDK_C} -DROOT=${CMAKE_CURRENT_SOURCE_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_sdk.cmake
+    DEPENDS ${LUXORA_SDK_INPUTS} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_sdk.cmake
+    COMMENT "Embedding the script SDK")
+  add_library(luxora_scriptc STATIC third_party/tinycc/libtcc.c src/script/compiler.c ${LUXORA_SDK_C})
+  target_include_directories(luxora_scriptc PUBLIC src/script third_party/tinycc PRIVATE src)
+  target_compile_definitions(luxora_scriptc PRIVATE ONE_SOURCE=1 ${LUXORA_TCC_TARGET} LUXORA_SCRIPT_COMPILER=1)
+  target_compile_definitions(luxora_scriptc PUBLIC LUXORA_SCRIPT_COMPILER=1)
+  if(WIN32)
+    target_compile_definitions(luxora_scriptc PRIVATE TCC_TARGET_PE)
+  endif()
+  if(MSVC)
+    set_source_files_properties(third_party/tinycc/libtcc.c PROPERTIES COMPILE_OPTIONS "/W0")
+  else()
+    set_source_files_properties(third_party/tinycc/libtcc.c PROPERTIES COMPILE_OPTIONS "-w")
+  endif()
+  target_link_libraries(luxora_scriptc PUBLIC luxora)
 endif()
 
 # ------------------------------------------------------------------ game scripts registration
@@ -157,6 +194,9 @@ if(LUXORA_BUILD_EDITOR AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/editor/main.c)
   add_executable(luxora_editor ${EDITOR_SOURCES})
   target_include_directories(luxora_editor PRIVATE src editor)
   target_link_libraries(luxora_editor PRIVATE luxora)
+  if(LUXORA_SCRIPT_COMPILER)
+    target_link_libraries(luxora_editor PRIVATE luxora_scriptc)
+  endif()
   target_compile_definitions(luxora_editor PRIVATE LUXORA_ENGINE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
   if(WIN32)
     set_target_properties(luxora_editor PROPERTIES WIN32_EXECUTABLE TRUE)
@@ -173,6 +213,9 @@ if(LUXORA_BUILD_TESTS)
   add_executable(luxora_tests tests/test_main.c)
   target_include_directories(luxora_tests PRIVATE src)
   target_link_libraries(luxora_tests PRIVATE luxora)
+  if(LUXORA_SCRIPT_COMPILER)
+    target_link_libraries(luxora_tests PRIVATE luxora_scriptc)
+  endif()
   add_test(NAME luxora_tests COMMAND luxora_tests)
 
   # The editor linked against a no-op renderer: runs its UI and logic without a GPU
@@ -184,6 +227,13 @@ if(LUXORA_BUILD_TESTS)
     add_executable(luxora_editor_nogpu ${EDITOR_SOURCES})
     target_include_directories(luxora_editor_nogpu PRIVATE src editor)
     target_link_libraries(luxora_editor_nogpu PRIVATE luxora_nogpu)
+    if(LUXORA_SCRIPT_COMPILER)
+      add_library(luxora_scriptc_nogpu STATIC third_party/tinycc/libtcc.c src/script/compiler.c ${LUXORA_SDK_C})
+      target_include_directories(luxora_scriptc_nogpu PUBLIC src/script third_party/tinycc PRIVATE src)
+      target_compile_definitions(luxora_scriptc_nogpu PRIVATE ONE_SOURCE=1 ${LUXORA_TCC_TARGET} PUBLIC LUXORA_SCRIPT_COMPILER=1)
+      target_link_libraries(luxora_scriptc_nogpu PUBLIC luxora_nogpu)
+      target_link_libraries(luxora_editor_nogpu PRIVATE luxora_scriptc_nogpu)
+    endif()
     target_compile_definitions(luxora_editor_nogpu PRIVATE LUXORA_ENGINE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
     luxora_add_game_scripts(luxora_editor_nogpu "")
   endif()

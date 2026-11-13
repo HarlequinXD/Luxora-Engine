@@ -10,6 +10,21 @@ void lx_register_behaviour(const LxBehaviourDesc *desc) {
         if (!strcmp(g_behaviours[i].name, desc->name)) { g_behaviours[i] = *desc; return; }
     if (g_behaviour_count < LX_MAX_BEHAVIOURS) g_behaviours[g_behaviour_count++] = *desc;
 }
+void lx_behaviours_drop_module(const LxModule *m) {
+    int n = 0;
+    for (int i = 0; i < g_behaviour_count; i++) {
+        const LxBehaviourDesc *d = &g_behaviours[i];
+        const void *ptrs[] = {d->name, (const void *)(uintptr_t)d->on_start, (const void *)(uintptr_t)d->on_update,
+                              (const void *)(uintptr_t)d->on_destroy, (const void *)(uintptr_t)d->on_fixed_update,
+                              (const void *)(uintptr_t)d->on_late_update, (const void *)(uintptr_t)d->on_collision_enter,
+                              (const void *)(uintptr_t)d->on_collision_exit, (const void *)(uintptr_t)d->on_trigger_enter,
+                              (const void *)(uintptr_t)d->on_trigger_exit};
+        bool inside = false;
+        for (size_t k = 0; k < sizeof ptrs / sizeof ptrs[0]; k++) inside |= ptrs[k] && lx_module_contains(m, ptrs[k]);
+        if (!inside) g_behaviours[n++] = *d;
+    }
+    g_behaviour_count = n;
+}
 int lx_behaviour_count(void) { return g_behaviour_count; }
 const LxBehaviourDesc *lx_behaviour_at(int i) { return (i >= 0 && i < g_behaviour_count) ? &g_behaviours[i] : NULL; }
 const LxBehaviourDesc *lx_behaviour_find(const char *name) {

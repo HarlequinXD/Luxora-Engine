@@ -209,17 +209,21 @@ const char *ed_engine_root(void) {
     return root;
 }
 
-/* Prebuilt players live in <engine>/Prebuilt/<Platform>/ or <editor folder>/Prebuilt/<Platform>/ */
+/* The game player that ships with the editor: Runtime/<Platform>/LuxoraPlayer next to the editor
+ * (the download). Source builds find the luxora_player built alongside the editor. */
 bool ed_prebuilt_player(LxPlatform target, char *out, size_t cap) {
     if (target == LX_PLATFORM_ANDROID) return false;
-    char rel[64];
-    snprintf(rel, sizeof rel, "Prebuilt/%s/LuxoraPlayer%s", lx_platform_name(target), target == LX_PLATFORM_WINDOWS ? ".exe" : "");
-    const char *bases[3] = {ed_engine_root(), lx_exe_dir(), NULL};
-    char eng[LX_PATH_MAX];
-    if (lx_exe_dir()[0]) { lx_path_join(eng, sizeof eng, lx_exe_dir(), "Engine"); bases[2] = eng; }
-    for (int i = 0; i < 3; i++) {
-        if (!bases[i] || !bases[i][0]) continue;
-        lx_path_join(out, cap, bases[i], rel);
+    const char *exe = lx_exe_dir(), *ext = target == LX_PLATFORM_WINDOWS ? ".exe" : "";
+    const char *env = getenv("LUXORA_PLAYER");
+    if (env && lx_file_exists(env)) { lx_strcpy(out, cap, env); return true; }
+    if (!exe[0]) { out[0] = 0; return false; }
+    char rel[96];
+    snprintf(rel, sizeof rel, "Runtime/%s/LuxoraPlayer%s", lx_platform_name(target), ext);
+    lx_path_join(out, cap, exe, rel);
+    if (lx_file_exists(out)) return true;
+    if (target == lx_platform_current()) {
+        snprintf(rel, sizeof rel, "luxora_player%s", ext); /* a source build: build/luxora_player */
+        lx_path_join(out, cap, exe, rel);
         if (lx_file_exists(out)) return true;
     }
     out[0] = 0;
@@ -286,6 +290,7 @@ void ed_close_project(void) {
     if (ED.viewport_rt) { lx_render_target_destroy(ED.viewport_rt); ED.viewport_rt = NULL; }
     lx_assets_clear();
     lx_gi_reset();
+    ed_scripts_close();
     ED.has_project = false;
 }
 
@@ -672,6 +677,7 @@ void ed_play(void) {
     if (ED.play == ED_PAUSED) { ED.play = ED_PLAYING; return; }
     if (ED.play != ED_EDIT || !ED.scene) return;
     if (ED.change_pending) ed_commit();
+    if (!ed_scripts_refresh(false)) { ui_notify(ED.ui, "Fix the script errors before playing (see the Console)"); return; }
     lx_audio_preview_stop();
     ED.play_snapshot = lx_scene_serialize(ED.scene);
     ED.play = ED_PLAYING;
@@ -1078,6 +1084,7 @@ void ed_shortcuts(void) {
 
 void ed_update(float dt) {
     ed_build_poll();
+    if (ED.play == ED_EDIT) ed_scripts_poll();
     if (!ED.scene) return;
     ed_shortcuts();
     /* edit gestures end when the mouse is released and no field is being typed in */

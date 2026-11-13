@@ -741,6 +741,113 @@ static void test_input(void) {
     memset(&g_lx_input, 0, sizeof g_lx_input);
 }
 
+
+/* ---- scripts: the built-in compiler and the module loader ---- */
+#if LUXORA_SCRIPT_COMPILER
+#include "compiler.h"
+static int g_diag_errors;
+static char g_diag_first[512];
+static void test_diag(void *u, bool warning, const char *msg) {
+    LX_UNUSED(u);
+    if (!warning) { if (!g_diag_errors++) lx_strcpy(g_diag_first, sizeof g_diag_first, msg); }
+    printf("    %s\n", msg);
+}
+
+static const char *TEST_SCRIPT =
+    "#include <luxora/luxora.h>\n"
+    "#include <stdio.h>\n#include <string.h>\n#include <math.h>\n#include <stdlib.h>\n#include <stdint.h>\n"
+    "typedef struct Mover { int frames; float speed; } Mover;\n"
+    "static int counter;\n"          /* bss */
+    "static float table[3] = {1.5f, 2.5f, 3.5f};\n" /* data */
+    "static int sum(int n, ...) { va_list ap; va_start(ap, n); int s = 0; for (int i = 0; i < n; i++) s += va_arg(ap, int); va_end(ap); return s; }\n"
+    "static void mover_start(LxBehaviourCtx *ctx) { Mover *m = ctx->state; m->speed = ctx->params[0]; }\n"
+    "static void mover_update(LxBehaviourCtx *ctx, float dt) {\n"
+    "    Mover *m = ctx->state; m->frames++; counter++;\n"
+    "    LxVec3 p = lx_entity_position(ctx->scene, ctx->self);\n"   /* struct return */
+    "    uint64_t big = 10000000000000ull; uint64_t q = big / (uint64_t)(counter + 1);\n" /* 64-bit division */
+    "    char buf[64]; snprintf(buf, sizeof buf, \"%d-%s\", sum(3, 1, 2, 3), \"ok\");\n"
+    "    char *heap = malloc(16); strcpy(heap, buf);\n"
+    "    p.x += m->speed; p.y = sqrtf(16.0f) + table[1];\n"
+    "    p.z = (q == 5000000000000ull && !strcmp(heap, \"6-ok\")) ? 7.0f : -1.0f;\n"
+    "    free(heap);\n"
+    "    lx_entity_set_position(ctx->scene, ctx->self, p);\n"
+    "    if (counter == 1) printf(\"script says hello from %s\\n\", lx_entity_name(ctx->scene, ctx->self));\n"
+    "}\n"
+    "LX_SCRIPT_REGISTER(mover) {\n"
+    "    LxBehaviourDesc d = {0};\n"
+    "    d.name = \"TestMover\"; d.state_size = sizeof(Mover);\n"
+    "    d.param_names[0] = \"Speed\"; d.param_defaults[0] = 2.0f;\n"
+    "    d.on_start = mover_start; d.on_update = mover_update;\n"
+    "    lx_register_behaviour(&d);\n"
+    "}\n"
+    "LX_SCRIPT_REGISTER(second) {\n"
+    "    LxBehaviourDesc d = {0}; d.name = \"TestSecond\"; lx_register_behaviour(&d);\n"
+    "}\n";
+
+static void test_scripts(void) {
+    printf("scripts\n");
+    char dir[LX_PATH_MAX], src[LX_PATH_MAX], bad[LX_PATH_MAX], sdk[LX_PATH_MAX], out[LX_PATH_MAX];
+    lx_path_join(dir, sizeof dir, tmpdir(), "luxora_test_scripts");
+    lx_path_remove(dir);
+    lx_mkdir_p(dir);
+    lx_path_join(src, sizeof src, dir, "mover.c");
+    lx_path_join(bad, sizeof bad, dir, "broken.c");
+    lx_path_join(sdk, sizeof sdk, dir, "sdk");
+    lx_path_join(out, sizeof out, dir, "scripts.lxo");
+    lx_file_write(src, TEST_SCRIPT, strlen(TEST_SCRIPT));
+    const char *files[1] = {src};
+    LxScriptCompileStats st;
+    g_diag_errors = 0;
+    bool ok = lx_script_compile(files, 1, sdk, out, test_diag, NULL, &st);
+    CHECK(ok && st.errors == 0, "script compiles (%d errors)", st.errors);
+    CHECK(st.registrations == 2, "two registrations found (%d)", st.registrations);
+    CHECK(lx_file_exists(out), "module written");
+    int before = lx_behaviour_count();
+    CHECK(lx_scripts_load(out), "module loads");
+    CHECK(lx_behaviour_find("TestMover") && lx_behaviour_find("TestSecond"), "script behaviours registered");
+    CHECK(lx_behaviour_count() == before + 2, "count %d -> %d", before, lx_behaviour_count());
+    LxScene *s = lx_scene_create("Scripts");
+    LxEntity e = lx_entity_create(s, "Mover");
+    LxBehaviourRef *ref = lx_add_behaviour(s, e, "TestMover");
+    CHECK(ref && NEAR(ref->params[0], 2.0f, 1e-6f), "default param from script");
+    lx_scene_simulate(s, 1.0f / 60.0f);
+    LxVec3 p = lx_entity_position(s, e);
+    CHECK(NEAR(p.x, 2.0f, 1e-5f) && NEAR(p.y, 6.5f, 1e-5f) && NEAR(p.z, 7.0f, 1e-5f), "script ran: %g %g %g", p.x, p.y, p.z);
+    lx_scene_simulate(s, 1.0f / 60.0f);
+    p = lx_entity_position(s, e);
+    CHECK(NEAR(p.x, 4.0f, 1e-5f), "second frame %g", p.x);
+    lx_scene_stop_simulation(s);
+    lx_scene_destroy(s);
+    lx_scripts_unload();
+    CHECK(!lx_behaviour_find("TestMover") && lx_behaviour_count() == before, "unloading forgets the behaviours");
+    CHECK(lx_behaviour_find("Rotator") != NULL, "built-ins stay");
+
+    /* errors come back with file and line */
+    const char *broken = "#include <luxora/luxora.h>\nvoid f(void) {\n    int x = undefined_thing;\n}\n";
+    lx_file_write(bad, broken, strlen(broken));
+    files[0] = bad;
+    g_diag_errors = 0;
+    g_diag_first[0] = 0;
+    ok = lx_script_compile(files, 1, sdk, out, test_diag, NULL, &st);
+    CHECK(!ok && g_diag_errors > 0, "compile error reported");
+    CHECK(strstr(g_diag_first, "broken.c:3") != NULL, "error has file:line: %s", g_diag_first);
+
+    /* calling something that isn't in the API fails at load, not at runtime */
+    const char *unknown = "#include <luxora/luxora.h>\nvoid system(const char *);\nLX_SCRIPT_REGISTER(x) { system(\"x\"); }\n";
+    lx_file_write(bad, unknown, strlen(unknown));
+    ok = lx_script_compile(files, 1, sdk, out, test_diag, NULL, &st);
+    char err[256];
+    size_t size;
+    void *data = lx_file_read(out, &size);
+    CHECK(ok && data && !lx_scripts_load_memory(data, size, err, sizeof err) && strstr(err, "system"), "unknown function rejected: %s", err);
+    lx_free(data);
+    static const unsigned char junk[64] = {0x7f, 'E', 'L', 'F', 2, 1};
+    CHECK(!lx_scripts_load_memory(junk, sizeof junk, err, sizeof err) && err[0], "damaged module rejected: %s", err);
+    CHECK(!lx_scripts_loaded(), "nothing loaded after failures");
+    lx_path_remove(dir);
+}
+#endif
+
 int main(void) {
     lx_jobs_init(0);
     lx_register_builtin_behaviours();
@@ -761,6 +868,9 @@ int main(void) {
     test_icon_images();
     test_physics();
     test_game_ui();
+#if LUXORA_SCRIPT_COMPILER
+    test_scripts();
+#endif
     lx_assets_clear();
     lx_jobs_shutdown();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

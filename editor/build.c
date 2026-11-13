@@ -42,6 +42,9 @@ static int copy_tree(const char *from, const char *to) {
     int n = lx_dir_list(from, &e);
     for (int i = 0; i < n; i++) {
         if (e[i].name[0] == '.') continue;
+        /* script sources stay in the project: games ship the compiled scripts.lxo */
+        const char *x = lx_path_ext(e[i].name);
+        if (!e[i].is_dir && (!strcmp(x, ".c") || !strcmp(x, ".h"))) continue;
         char a[LX_PATH_MAX], b[LX_PATH_MAX];
         lx_path_join(a, sizeof a, from, e[i].name);
         lx_path_join(b, sizeof b, to, e[i].name);
@@ -110,8 +113,8 @@ static uint8_t *load_game_icon(const LxProject *p, int *w, int *h) {
     return px;
 }
 
-/* Ships the ready-made player: copy it, stamp the game's name/icon into it (Windows), add the data.
- * No compiler needed; used when the project's scenes only use built-in behaviours. */
+/* Ships the ready-made player: copy it, stamp the game's name/icon into it (Windows), add the data
+ * and the scripts compiled by the editor's built-in compiler. Nothing to install. */
 static bool package_prebuilt(const BuildJob *j, const char *bdir, const char *out) {
     const LxProject *p = &j->project;
     const char *plat = lx_platform_name(j->target);
@@ -149,6 +152,12 @@ static bool package_prebuilt(const BuildJob *j, const char *bdir, const char *ou
     char data[LX_PATH_MAX];
     lx_path_join(data, sizeof data, out, "Data");
     if (!stage_data(p, data)) { LX_ERROR("Could not stage game data"); return false; }
+    char lxo[LX_PATH_MAX], sdk[LX_PATH_MAX];
+    lx_path_join(lxo, sizeof lxo, data, "scripts.lxo");
+    lx_path_join(sdk, sizeof sdk, p->root, "Library/ScriptSDK");
+    bool had_scripts = false;
+    status("Compiling scripts for %s...", plat);
+    if (!ed_scripts_compile_dir(p->assets, sdk, lxo, &had_scripts)) { LX_ERROR("Fix the script errors above, then build again"); return false; }
     lx_strcpy(g_result, sizeof g_result, dst);
     if (j->run && j->target == lx_platform_current()) {
         status("Launching %s...", p->name);
@@ -240,6 +249,12 @@ static bool build_desktop(const BuildJob *j) {
     char data[LX_PATH_MAX];
     lx_path_join(data, sizeof data, out, "Data");
     if (!stage_data(p, data)) { LX_ERROR("Could not stage game data"); return false; }
+    char lxo[LX_PATH_MAX], sdk[LX_PATH_MAX];
+    lx_path_join(lxo, sizeof lxo, data, "scripts.lxo");
+    lx_path_join(sdk, sizeof sdk, p->root, "Library/ScriptSDK");
+    bool had_scripts = false;
+    status("Compiling scripts for %s...", plat);
+    if (!ed_scripts_compile_dir(p->assets, sdk, lxo, &had_scripts)) { LX_ERROR("Fix the script errors above, then build again"); return false; }
     lx_strcpy(g_result, sizeof g_result, dst);
     if (j->run && j->target == lx_platform_current()) {
         status("Launching %s...", p->name);
@@ -373,34 +388,50 @@ static void scan_behaviours(const char *dir, EdBuildPlan *plan) {
     lx_free(e);
 }
 
+static int count_scripts(const char *dir) {
+    LxDirEntry *e;
+    int n = lx_dir_list(dir, &e), count = 0;
+    for (int i = 0; i < n; i++) {
+        char full[LX_PATH_MAX];
+        lx_path_join(full, sizeof full, dir, e[i].name);
+        if (e[i].is_dir) count += count_scripts(full);
+        else if (!strcmp(lx_path_ext(e[i].name), ".c")) count++;
+    }
+    lx_free(e);
+    return count;
+}
+
 void ed_build_plan(LxPlatform target, EdBuildPlan *plan) {
     memset(plan, 0, sizeof *plan);
     scan_behaviours(ED.project.assets, plan);
+    plan->scripts = count_scripts(ED.project.assets);
     lx_strcpy(plan->engine, sizeof plan->engine, ed_engine_root());
-    plan->cmake = have_command("cmake");
-    bool force_compile = getenv("LUXORA_BUILD_COMPILE") != NULL;
-    if (target != LX_PLATFORM_ANDROID && !plan->custom_count && !force_compile &&
-        ed_prebuilt_player(target, plan->prebuilt_path, sizeof plan->prebuilt_path)) {
-        plan->prebuilt = true;
-        plan->can_build = true;
+    LxPlatform host = lx_platform_current();
+    bool force_compile = getenv("LUXORA_BUILD_COMPILE") != NULL; /* engine developers: rebuild the player from source */
+    if (target != LX_PLATFORM_ANDROID && !force_compile) {
+        if (target != host)
+            snprintf(plan->problem, sizeof plan->problem,
+                     "%s games are built with the %s editor: each editor download packages games for its own platform.",
+                     lx_platform_name(target), lx_platform_name(target));
+        else if (!ed_prebuilt_player(target, plan->prebuilt_path, sizeof plan->prebuilt_path))
+            snprintf(plan->problem, sizeof plan->problem,
+                     "The game player that comes with the editor is missing (Runtime/%s/LuxoraPlayer next to LuxoraEditor). "
+                     "Download the editor again to restore it.", lx_platform_name(target));
+        else if (plan->scripts && !ed_scripts_supported())
+            snprintf(plan->problem, sizeof plan->problem, "This editor build has no script compiler for this CPU.");
+        else if (ed_script_errors())
+            snprintf(plan->problem, sizeof plan->problem, "Your scripts have errors - fix them first (they're listed in the Console).");
+        else plan->prebuilt = plan->can_build = true;
         return;
     }
-    char list[LX_NAME_MAX * 4 + 16] = "";
-    for (int i = 0; i < plan->custom_count && i < 4; i++) {
-        if (i) lx_strcpy(list + strlen(list), sizeof list - strlen(list), ", ");
-        lx_strcpy(list + strlen(list), sizeof list - strlen(list), plan->custom[i]);
-    }
-    const char *why = plan->custom_count ? "Your scenes use script behaviours" : target == LX_PLATFORM_ANDROID ? "Android builds" : "This platform";
+    plan->cmake = have_command("cmake");
+    const char *why = target == LX_PLATFORM_ANDROID ? "Android builds" : "Compiling the player";
     if (!plan->engine[0])
         snprintf(plan->problem, sizeof plan->problem,
-                 "%s%s%s%s need the Luxora engine source to compile. It ships with the editor as the \"Engine\" folder next to "
-                 "LuxoraEditor - keep it there, or set its location below.",
-                 why, plan->custom_count ? " (" : "", list, plan->custom_count ? ")" : "");
+                 "%s currently compile the engine with the Android SDK, so they need a copy of the Luxora engine source: "
+                 "set its folder below.", why);
     else if (!plan->cmake)
-        snprintf(plan->problem, sizeof plan->problem,
-                 "%s%s%s%s need CMake and a C compiler to compile: install CMake (cmake.org) and, on Windows, Visual Studio Build "
-                 "Tools with \"Desktop development with C++\".",
-                 why, plan->custom_count ? " (" : "", list, plan->custom_count ? ")" : "");
+        snprintf(plan->problem, sizeof plan->problem, "%s need CMake (cmake.org) and a C compiler.", why);
     else plan->can_build = true;
 }
 
@@ -435,7 +466,7 @@ void ed_build(LxPlatform target, bool run_after) {
     lx_strcpy(g_job.engine, sizeof g_job.engine, engine);
     g_job.use_prebuilt = plan.prebuilt;
     lx_strcpy(g_job.prebuilt, sizeof g_job.prebuilt, plan.prebuilt_path);
-    if (plan.prebuilt) LX_INFO("Scenes use built-in behaviours only: packaging the prebuilt player (no compiler needed)");
+    if (plan.prebuilt) LX_INFO("Packaging with the player that ships with the editor; scripts use the built-in compiler");
     g_result[0] = 0;
     lx_atomic_store(&g_finished, 0);
     lx_atomic_store(&ED.building, 1);

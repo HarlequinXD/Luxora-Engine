@@ -228,7 +228,7 @@ static void write_text(const char *dir, const char *rel, const char *text) {
 }
 
 static const char *SAMPLE_BEHAVIOUR =
-    "/* Example game behaviour. Files in Assets/Scripts are compiled into your game build.\n"
+    "/* Example game behaviour. Scripts are compiled by the editor's built-in compiler when you save them.\n"
     " * Register behaviours below; attach them to entities in the Inspector. */\n"
     "#include <luxora/luxora.h>\n\n"
     "typedef struct Spinner { float time; } Spinner;\n\n"

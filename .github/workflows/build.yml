@@ -60,19 +60,27 @@ jobs:
           cd "$RUNNER_TEMP/projects/CI Sample/Builds/Linux/CI Sample"
           LUXORA_SCREENSHOT=$GITHUB_WORKSPACE/shots/game.ppm LUXORA_SCREENSHOT_FRAME=60 xvfb-run -a -s "-screen 0 1280x720x24" "./CI Sample"
 
-      - name: Prebuilt player flow (the downloaded editor, no compiler)
+      - name: Downloaded-editor flow (built-in script compiler, no engine source)
         run: |
           export HOME=$RUNNER_TEMP/home LUXORA_NO_AUDIO=1
+          python3 tools/gen_script_api.py --check
           P=$RUNNER_TEMP/pkg
-          mkdir -p $P/Engine/Prebuilt/Linux
+          mkdir -p $P/Runtime/Linux
           cp build/luxora_editor_nogpu $P/LuxoraEditor
-          cp build/luxora_player $P/Engine/Prebuilt/Linux/LuxoraPlayer
+          cp build/luxora_player $P/Runtime/Linux/LuxoraPlayer
           xvfb-run -a $P/LuxoraEditor --new $RUNNER_TEMP/pb "Prebuilt Game" --screenshot /dev/null --frames 3
-          xvfb-run -a $P/LuxoraEditor "$RUNNER_TEMP/pb/Prebuilt Game" --build | tee pb.log
-          grep -q "prebuilt player" pb.log
-          cd "$RUNNER_TEMP/pb/Prebuilt Game/Builds/Linux/Prebuilt Game"
+          G="$RUNNER_TEMP/pb/Prebuilt Game"
+          printf '#include <luxora/luxora.h>\n#include <stdio.h>\nLX_SCRIPT_REGISTER(ci_check) { printf("CI-SCRIPT-LOADED %%d\\n", 6 * 7); }\n' > "$G/Assets/Scripts/ci_check.c"
+          xvfb-run -a $P/LuxoraEditor "$G" --build 2>&1 | tee pb.log
+          grep -q "Compiled 2 scripts" pb.log
+          grep -q "Build succeeded" pb.log
+          B="$G/Builds/Linux/Prebuilt Game"
+          test -f "$B/Data/scripts.lxo"
+          if find "$B" -name '*.c' | grep -q .; then echo "script sources were shipped"; exit 1; fi
+          cd "$B"
           LUXORA_VALIDATION=1 LUXORA_SCREENSHOT=$GITHUB_WORKSPACE/shots/prebuilt_game.ppm LUXORA_SCREENSHOT_FRAME=60 \
-            xvfb-run -a -s "-screen 0 1280x720x24" "./Prebuilt Game"
+            xvfb-run -a -s "-screen 0 1280x720x24" "./Prebuilt Game" 2>&1 | tee $RUNNER_TEMP/game.log
+          grep -q "CI-SCRIPT-LOADED 42" $RUNNER_TEMP/game.log
 
       - name: Convert screenshots
         if: always()
@@ -101,11 +109,12 @@ jobs:
 
       - name: Package
         run: |
-          mkdir -p "linux-package/Luxora Editor/Engine/Prebuilt/Linux"
+          # the editor (with its built-in script compiler) and the game player it packages games with - no engine source
+          mkdir -p "linux-package/Luxora Editor/Runtime/Linux" "linux-package/Luxora Editor/Licenses"
           cp build/luxora_editor "linux-package/Luxora Editor/LuxoraEditor"
           cp README.md "linux-package/Luxora Editor/"
-          git archive HEAD CMakeLists.txt include src player third_party resources shaders tools android | tar -x -C "linux-package/Luxora Editor/Engine"
-          cp build/luxora_player "linux-package/Luxora Editor/Engine/Prebuilt/Linux/LuxoraPlayer"
+          cp build/luxora_player "linux-package/Luxora Editor/Runtime/Linux/LuxoraPlayer"
+          cp third_party/tinycc/COPYING "linux-package/Luxora Editor/Licenses/TinyCC (LGPL-2.1).txt"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -176,12 +185,10 @@ jobs:
           New-Item -ItemType Directory -Force "Luxora Editor" | Out-Null
           Copy-Item build\Release\LuxoraEditor.exe "Luxora Editor\"
           Copy-Item README.md "Luxora Editor\README.md"
-          # the engine source (to compile games that use your own scripts) and the ready-made player
-          # (games that only use built-in behaviours build without any compiler)
-          git archive --format zip -o engine.zip HEAD CMakeLists.txt include src player third_party resources shaders tools android
-          Expand-Archive engine.zip -DestinationPath "Luxora Editor\Engine"
-          New-Item -ItemType Directory -Force "Luxora Editor\Engine\Prebuilt\Windows" | Out-Null
-          Copy-Item build\Release\luxora_player.exe "Luxora Editor\Engine\Prebuilt\Windows\LuxoraPlayer.exe"
+          # the editor (with its built-in script compiler) and the game player it packages games with - no engine source
+          New-Item -ItemType Directory -Force "Luxora Editor\Runtime\Windows", "Luxora Editor\Licenses" | Out-Null
+          Copy-Item build\Release\luxora_player.exe "Luxora Editor\Runtime\Windows\LuxoraPlayer.exe"
+          Copy-Item third_party\tinycc\COPYING "Luxora Editor\Licenses\TinyCC (LGPL-2.1).txt"
 
       - uses: actions/upload-artifact@v4
         with:

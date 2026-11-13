@@ -924,7 +924,7 @@ static void step(LxScene *s, LxPhysicsWorld *w, float dt) {
         d->phys.force = d->phys.torque = lx_v3(0, 0, 0);
     }
     /* broadphase: sort and sweep on X */
-    qsort(w->bodies, (size_t)w->nb, sizeof(Body), cmp_minx);
+    if (w->nb > 1) qsort(w->bodies, (size_t)w->nb, sizeof(Body), cmp_minx);
     w->nc = 0;
     w->np = 0;
     Manifold m;

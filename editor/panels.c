@@ -1056,7 +1056,7 @@ static void build_asset_inspector(UiNode *body) {
         b->icon = UI_ICON_EXTERNAL;
         b->grow = 1;
         if (icon == UI_ICON_SCRIPT) {
-            UiNode *hint = ui_label(ui, body, "Scripts are compiled into your game when you build. Register behaviours with LX_SCRIPT_REGISTER.");
+            UiNode *hint = ui_label(ui, body, "Scripts compile automatically when you save them (built-in compiler). Register behaviours with LX_SCRIPT_REGISTER.");
             hint->font = UI_FONT_SMALL;
             hint->fg = t->text_dim;
             ui_pad(hint, 12, 0, 8, 0);
@@ -1421,7 +1421,8 @@ static void create_script_named(const char *name) {
     lx_file_write(p, sb.data, sb.len);
     lx_free(sb.data);
     ED.content_dirty = true;
-    ui_notify(ED.ui, "Script created - it is compiled into your next build");
+    ui_notify(ED.ui, "Script created - its behaviour is ready in Add Component > Behaviour");
+    ed_scripts_refresh(true);
 }
 static void m_new_folder(UiNode *n) { LX_UNUSED(n); ed_prompt("New Folder", "Name", "New Folder", create_folder_named); }
 static void m_new_material(UiNode *n) { LX_UNUSED(n); ed_prompt("New Material", "Name", "New Material", create_material_named); }

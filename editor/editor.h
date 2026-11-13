@@ -199,6 +199,7 @@ typedef struct EdBuildPlan {
     char engine[LX_PATH_MAX];
     int custom_count;                    /* behaviours from your scripts used by scenes/prefabs */
     char custom[4][LX_NAME_MAX];
+    int scripts;                         /* .c files under Assets */
     bool cmake;
     char problem[512];                   /* why it can't build, in plain words */
 } EdBuildPlan;
@@ -214,4 +215,14 @@ void ed_relative_asset(char *out, size_t cap, const char *abs_path);
 void ed_confirm(const char *title, const char *message, const char *ok_text, void (*on_ok)(void));
 void ed_prompt(const char *title, const char *label, const char *initial, void (*on_ok)(const char *text));
 
+
+/* scripts.c: compiling Assets/Scripts with the built-in compiler */
+bool ed_scripts_compile(const char *out_path, bool *had_scripts);
+bool ed_scripts_compile_dir(const char *assets, const char *sdk_dir, const char *out_path, bool *had_scripts);
+bool ed_scripts_refresh(bool force);
+void ed_scripts_poll(void);
+void ed_scripts_close(void);
+int ed_script_errors(void);
+bool ed_scripts_supported(void);
+void ed_script_sdk_dir(char *out, size_t cap);
 #endif

@@ -193,6 +193,24 @@ static void s_physics_objects(void) {
     SMOKE_CHECK(lx_get_character(ED.scene, g_player) != NULL, "Character has a character controller");
     ed_select(g_phys_cube);   /* inspector shows the physics sections, viewport the wireframe */
 }
+/* the new project's sample script (Assets/Scripts/game.c) is compiled by the built-in compiler */
+static LxEntity g_spinner;
+static float g_spin0;
+static void s_script_compiled(void) {
+    SMOKE_CHECK(!ed_scripts_supported() || lx_behaviour_find("Spinner") != NULL, "the sample script compiled and registered Spinner");
+    SMOKE_CHECK(ed_script_errors() == 0, "no script errors");
+}
+static void s_script_attach(void) {
+    if (!lx_behaviour_find("Spinner")) return;
+    g_spinner = ed_create("Cube");
+    lx_add_behaviour(ED.scene, g_spinner, "Spinner");
+    g_spin0 = lx_entity_euler(ED.scene, g_spinner).y;
+}
+static void s_script_ran(void) {
+    if (!g_spinner) return;
+    float y = lx_entity_euler(ED.scene, g_spinner).y;
+    SMOKE_CHECK(fabsf(y - g_spin0) > 0.5f, "the script behaviour runs in play mode (%.1f -> %.1f)", g_spin0, y);
+}
 static void s_physics_fell(void) {
     float y = lx_entity_world_position(ED.scene, g_phys_cube).y;
     SMOKE_CHECK(y < g_cube_y0 - 0.01f, "the physics cube falls in play mode (%.2f -> %.2f)", g_cube_y0, y);
@@ -271,9 +289,12 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {120, s_content_root, "content browser root"},
     {124, s_menu, "create menu"},
     {128, s_close, "close menus"},
+    {129, s_script_compiled, "scripts compiled"},
     {130, s_physics_objects, "create physics objects"},
+    {131, s_script_attach, "attach the sample script behaviour"},
     {132, s_play, "play"},
     {149, s_physics_fell, "physics runs in play mode"},
+    {149, s_script_ran, "the script runs in play mode"},
     {150, s_pause, "pause"},
     {154, s_step, "step"},
     {158, s_game_view, "game view"},

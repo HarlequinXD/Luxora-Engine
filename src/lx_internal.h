@@ -297,6 +297,29 @@ struct LxScene {
 /* physics (src/physics) */
 void lx_physics_simulate(LxScene *s, float dt);   /* fixed steps + events; called by lx_scene_simulate */
 void lx_physics_world_free(LxScene *s);
+/* script modules (src/script/module.c): compiled game scripts loaded at runtime */
+#if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
+#define LX_MODULE_ABI "x86_64-windows"
+#elif defined(__x86_64__) || defined(_M_X64)
+#define LX_MODULE_ABI "x86_64-sysv"
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#define LX_MODULE_ABI "arm64"
+#else
+#define LX_MODULE_ABI "unsupported"
+#endif
+typedef struct LxModule LxModule;
+LxModule *lx_module_load(const void *data, size_t size, char *err, size_t err_cap);
+void *lx_module_symbol(const LxModule *m, const char *name);
+bool lx_module_contains(const LxModule *m, const void *p);
+void lx_module_unload(LxModule *m);
+const void *lx_script_api_symbol(const char *name);   /* src/script/script_api.c */
+int lx_script_api_count(void);
+bool lx_scripts_load(const char *path);                /* registers the module's behaviours */
+bool lx_scripts_load_memory(const void *data, size_t size, char *err, size_t err_cap);
+void lx_scripts_unload(void);
+bool lx_scripts_loaded(void);
+void lx_behaviours_drop_module(const LxModule *m);     /* forget behaviours whose code is in m */
+
 /* behaviours (src/scene/behaviours.c): physics events */
 void lx_behaviour_collision_enter(LxScene *s, LxEntity self, const LxCollision *c);
 void lx_behaviour_collision_exit(LxScene *s, LxEntity self, LxEntity other);

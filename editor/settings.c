@@ -1030,29 +1030,35 @@ static void build_settings_fill(void) {
     of->grow = 1;
     of->on_change = bs_save;
     /* how this build will be made, or what's missing */
-    LxPlatform host = lx_platform_current();
     EdBuildPlan plan;
     ed_build_plan((LxPlatform)g_build_platform, &plan);
-    if (plan.prebuilt)
-        note(right, UI_ICON_SUCCESS, "Ready: your scenes use built-in behaviours only, so the game is packaged with the prebuilt player - "
-                                     "no compiler needed.");
-    else if (!plan.can_build) note(right, UI_ICON_WARNING, plan.problem);
+    char msg[384];
+    if (plan.prebuilt) {
+        if (plan.scripts)
+            snprintf(msg, sizeof msg, "Ready: your %d script%s compile with the editor's built-in compiler and the game is packaged "
+                                      "with the player that ships with the editor - nothing else to install.",
+                     plan.scripts, plan.scripts == 1 ? "" : "s");
+        else snprintf(msg, sizeof msg, "Ready: the game is packaged with the player that ships with the editor - nothing else to install.");
+        note(right, UI_ICON_SUCCESS, msg);
+    } else if (!plan.can_build) note(right, UI_ICON_WARNING, plan.problem);
     else if (g_build_platform == LX_PLATFORM_ANDROID) {
         note(right, UI_ICON_INFO, "Needs the Android SDK + NDK (ANDROID_HOME), JDK 17 and Gradle. Produces a signed debug APK.");
         note(right, UI_ICON_PHONE, "Build and Run installs on a USB-connected phone with adb.");
-    } else if ((int)host != g_build_platform)
-        note(right, UI_ICON_WARNING, g_build_platform == LX_PLATFORM_WINDOWS ? "Compiling for Windows from Linux needs mingw-w64 (x86_64-w64-mingw32-gcc)."
-                                                                               : "Compiling for Linux needs a Linux machine or CI (see .github/workflows).");
-    else note(right, UI_ICON_SUCCESS, "Ready: compiles your scripts into the game with CMake and your C compiler.");
-    r = ed_prop_row(right, "Engine Folder");
-    r->first->w = 170;
-    UiNode *ef = ui_textfield(ui, r, ED.engine_root_pref, sizeof ED.engine_root_pref);
-    ef->grow = 1;
-    ef->on_change = engine_folder_changed;
-    char hint[LX_PATH_MAX + 32];
-    snprintf(hint, sizeof hint, "%s", plan.engine[0] ? plan.engine : "Not found - only needed to compile scripts");
-    lx_strcpy(ef->hint, sizeof ef->hint, hint);
-    lx_strcpy(ef->tooltip, sizeof ef->tooltip, "Leave empty to find it automatically (the Engine folder next to the editor)");
+    }
+    if (plan.custom_count) {
+        snprintf(msg, sizeof msg, "Your scenes use %d behaviour%s that no script defines (e.g. \"%s\"): %s.", plan.custom_count,
+                 plan.custom_count == 1 ? "" : "s", plan.custom[0], plan.custom_count == 1 ? "it will do nothing" : "they will do nothing");
+        note(right, UI_ICON_WARNING, msg);
+    }
+    if (g_build_platform == LX_PLATFORM_ANDROID) {
+        r = ed_prop_row(right, "Engine Source");
+        r->first->w = 170;
+        UiNode *ef = ui_textfield(ui, r, ED.engine_root_pref, sizeof ED.engine_root_pref);
+        ef->grow = 1;
+        ef->on_change = engine_folder_changed;
+        lx_strcpy(ef->hint, sizeof ef->hint, plan.engine[0] ? plan.engine : "Folder of a Luxora engine source checkout");
+        lx_strcpy(ef->tooltip, sizeof ef->tooltip, "Only Android builds use this");
+    }
     ui_spacer(ui, right);
     UiNode *btns = ui_box(ui, g_build_body, UI_ROW);
     btns->h = 34;
