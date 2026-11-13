@@ -24,13 +24,14 @@ UiNode *ed_panel_header(UiNode *parent, UiIcon icon, const char *title) {
     return h;
 }
 
+/* n is the section header; its own body is the header's next sibling inside the section */
 static void section_toggle(UiNode *n) {
     bool *open = n->user;
     if (open) *open = !*open;
-    UiNode *body = n->parent->next;
+    UiNode *body = n->next;
     if (body) body->hidden = open ? !*open : !body->hidden;
-    UiNode *chev = n->parent->first;
-    chev->icon = (body && !body->hidden) ? UI_ICON_CHEVRON_DOWN : UI_ICON_CHEVRON_RIGHT;
+    UiNode *chev = n->first;
+    if (chev) chev->icon = (body && !body->hidden) ? UI_ICON_CHEVRON_DOWN : UI_ICON_CHEVRON_RIGHT;
 }
 
 UiNode *ed_section(UiNode *parent, UiIcon icon, const char *title, bool *open, void (*on_menu)(UiNode *)) {

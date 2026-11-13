@@ -58,6 +58,31 @@ static void s_reopened(void) {
     SMOKE_CHECK(ED.has_project && ED.mode == ED_MODE_EDITOR && ED.scene, "Project reopens from the Project Manager");
 }
 
+/* collapse the Transform section through its header, as a click would */
+static UiNode *find_section_header(UiNode *n, const char *title) {
+    if (!n) return NULL;
+    if (n->type == UI_LABEL && !strcmp(n->text, title) && n->parent && n->parent->user) return n->parent;
+    for (UiNode *c = n->first; c; c = c->next) {
+        UiNode *r = find_section_header(c, title);
+        if (r) return r;
+    }
+    return NULL;
+}
+static void s_collapse(void) {
+    ed_select(lx_entity_find(ED.scene, "Cube"));
+}
+static void s_collapse_click(void) {
+    UiNode *h = find_section_header(ED.inspector, "Transform");
+    SMOKE_CHECK(h != NULL, "found the Transform section header");
+    if (!h) return;
+    UiNode *wrap = h->parent, *body = h->next, *after = wrap->next;
+    h->on_click(h);
+    SMOKE_CHECK(body && body->hidden, "collapsing Transform hides its own fields");
+    SMOKE_CHECK(!wrap->hidden && after && !after->hidden, "collapsing Transform leaves the components below visible");
+    h->on_click(h);
+    SMOKE_CHECK(body && !body->hidden, "expanding Transform shows its fields again");
+}
+
 static UiNode *g_first_widget;
 static void s_mat_select(void) {
     char p[LX_PATH_MAX];
@@ -203,6 +228,8 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {209, s_game_back, "scene view"},
     {211, s_game_play, "play switches to game view"},
     {214, s_game_stop, "stop restores scene view"},
+    {214, s_collapse, "select the cube"},
+    {215, s_collapse_click, "collapse and expand a component"},
     {216, s_close_project, "close project"},
     {219, s_closed, "back at the project manager"},
     {222, s_reopen_project, "reopen the project"},
