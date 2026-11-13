@@ -92,6 +92,9 @@ void lx_platform_clipboard_set(const char *text);
 /* Runs a shell command, streaming each output line to cb. Returns exit code. */
 int lx_platform_run_process(const char *cmdline, const char *workdir, void (*cb)(const char *line, void *u), void *u);
 void lx_platform_open_folder(const char *path);
+/* Windows only (false elsewhere): replace the icon / version details of an existing .exe */
+bool lx_exe_set_icon(const char *exe_path, const char *ico_path);
+bool lx_exe_set_version(const char *exe_path, const char *product, const char *company, const char *version);
 
 /* input state written by the platform layer */
 typedef struct LxInputState {

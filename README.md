@@ -75,7 +75,8 @@ You can add actions and axes, rebind them by pressing the input you want, set de
 
 Use **Build → Build Settings** and choose a platform, then click **Build** or **Build and Run**:
 
-- **Windows / Linux**: the editor runs CMake to compile the player together with your scripts, then writes `Builds/<Platform>/<Game>/` containing the executable and a `Data/` folder.
+- **Windows / Linux**: if your scenes only use built-in behaviours, the editor packages the **prebuilt player** that ships with it (`Engine/Prebuilt/<Platform>/`) - no compiler needed - and stamps your game's name, version and icon into it. If they use behaviours from your own scripts, the editor compiles the player together with your scripts using CMake and a C compiler (Windows: Visual Studio Build Tools, "Desktop development with C++"). Either way you get `Builds/<Platform>/<Game>/` with the executable and a `Data/` folder.
+- **Engine folder**: the editor download includes the engine source as `Engine/` next to `LuxoraEditor`; it's only needed for compiling scripts. The editor also finds it in a source checkout, via `LUXORA_ENGINE_ROOT`, or wherever you point Build Settings → Engine Folder.
 - **Windows .exe details**: the game's name, publisher and version from Project Settings are stamped into the executable (shown in Explorer under Properties → Details), together with a Windows 10/11 manifest. Games get a game-controller icon by default. To use your own, put an `Icon.ico` in the project folder.
 - **Windows SmartScreen**: Windows warns about any program that isn't code-signed by a known publisher. To remove the warning for your releases, sign the `.exe` with a code-signing certificate. The CI workflow signs automatically when the `WINDOWS_CERT_PFX` and `WINDOWS_CERT_PASSWORD` secrets are set.
 - **Android**: needs `ANDROID_HOME` (SDK with the NDK and CMake), JDK 17 and Gradle 8.7+. Luxora produces an APK and can install it over `adb`. Vulkan and AAudio require API 26+.

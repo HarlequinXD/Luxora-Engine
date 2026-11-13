@@ -25,6 +25,7 @@ void ed_save_prefs(void) {
     lx_sb_printf(&sb, "# Luxora editor preferences\n[editor]\ncamera_speed = %g\ngrid = %d\nsnap = %d\nicons = %d\n", ED.cam_speed, ED.show_grid,
                  ED.snap, ED.show_icons);
     for (int i = 0; i < ED.recent_count; i++) lx_sb_printf(&sb, "recent = %s\n", ED.recent[i]);
+    if (ED.engine_root_pref[0]) lx_sb_printf(&sb, "engine_root = %s\n", ED.engine_root_pref);
     char path[LX_PATH_MAX];
     prefs_path(path, sizeof path);
     lx_file_write(path, sb.data, sb.len);
@@ -47,6 +48,7 @@ void ed_load_prefs(void) {
         else if (!strcmp(k, "grid")) ED.show_grid = lx_parse_bool(v);
         else if (!strcmp(k, "snap")) ED.snap = lx_parse_bool(v);
         else if (!strcmp(k, "icons")) ED.show_icons = lx_parse_bool(v);
+        else if (!strcmp(k, "engine_root")) lx_strcpy(ED.engine_root_pref, sizeof ED.engine_root_pref, v);
     }
     lx_free(text);
 }

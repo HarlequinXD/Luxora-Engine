@@ -8,6 +8,8 @@ typedef struct BuildJob {
     bool run;
     LxProject project;
     char engine[LX_PATH_MAX];
+    bool use_prebuilt;               /* no script compiling needed: ship the ready-made player */
+    char prebuilt[LX_PATH_MAX];
 } BuildJob;
 
 static BuildJob g_job;
@@ -108,6 +110,58 @@ static uint8_t *load_game_icon(const LxProject *p, int *w, int *h) {
     return px;
 }
 
+/* Ships the ready-made player: copy it, stamp the game's name/icon into it (Windows), add the data.
+ * No compiler needed; used when the project's scenes only use built-in behaviours. */
+static bool package_prebuilt(const BuildJob *j, const char *bdir, const char *out) {
+    const LxProject *p = &j->project;
+    const char *plat = lx_platform_name(j->target);
+    char cmd[LX_PATH_MAX + 64];
+    status("Packaging %s with the prebuilt player...", plat);
+    char gexe[LX_NAME_MAX], gname[LX_NAME_MAX], gcompany[LX_NAME_MAX], gversion[32];
+    rc_safe(gexe, sizeof gexe, p->name, true);
+    if (!gexe[0]) lx_strcpy(gexe, sizeof gexe, "Game");
+    rc_safe(gname, sizeof gname, p->name, false);
+    rc_safe(gcompany, sizeof gcompany, p->company, false);
+    rc_safe(gversion, sizeof gversion, p->version[0] ? p->version : "1.0.0", false);
+    lx_path_remove(out);
+    lx_mkdir_p(out);
+    char fname[LX_NAME_MAX + 8], dst[LX_PATH_MAX];
+    snprintf(fname, sizeof fname, "%s%s", gexe, j->target == LX_PLATFORM_WINDOWS ? ".exe" : "");
+    lx_path_join(dst, sizeof dst, out, fname);
+    if (!copy_file(j->prebuilt, dst)) { LX_ERROR("Could not copy the prebuilt player to %s", dst); return false; }
+    if (j->target == LX_PLATFORM_WINDOWS) {
+        if (lx_platform_current() == LX_PLATFORM_WINDOWS) {
+            if (!lx_exe_set_version(dst, gname, gcompany, gversion)) LX_WARN("Could not write the game's version details into the .exe");
+            int iw, ih;
+            uint8_t *ipx = load_game_icon(p, &iw, &ih);
+            if (ipx) {
+                char ico[LX_PATH_MAX];
+                lx_path_join(ico, sizeof ico, bdir, "GameIcon.ico");
+                if (!lx_ico_write(ico, ipx, iw, ih) || !lx_exe_set_icon(dst, ico)) LX_WARN("Could not apply the game icon to the .exe");
+                lx_free(ipx);
+            }
+        } else if (p->build.icon[0]) LX_WARN("The game icon is applied to Windows builds made on Windows; this build keeps the default icon.");
+    }
+#if !LX_OS_WINDOWS
+    snprintf(cmd, sizeof cmd, "chmod +x \"%s\"", dst);
+    run(cmd, NULL);
+#endif
+    char data[LX_PATH_MAX];
+    lx_path_join(data, sizeof data, out, "Data");
+    if (!stage_data(p, data)) { LX_ERROR("Could not stage game data"); return false; }
+    lx_strcpy(g_result, sizeof g_result, dst);
+    if (j->run && j->target == lx_platform_current()) {
+        status("Launching %s...", p->name);
+#if LX_OS_WINDOWS
+        lx_platform_open_folder(dst);
+#else
+        snprintf(cmd, sizeof cmd, "\"%s\" >/dev/null 2>&1 &", dst);
+        run(cmd, out);
+#endif
+    }
+    return true;
+}
+
 static bool build_desktop(const BuildJob *j) {
     const LxProject *p = &j->project;
     const char *plat = lx_platform_name(j->target);
@@ -118,6 +172,7 @@ static bool build_desktop(const BuildJob *j) {
     if (tmp[0] == '/' || (tmp[0] && tmp[1] == ':')) lx_strcpy(out, sizeof out, tmp);
     else lx_path_join(out, sizeof out, p->root, tmp);
     lx_mkdir_p(bdir);
+    if (j->use_prebuilt) return package_prebuilt(j, bdir, out);
     if (!have_command("cmake")) { LX_ERROR("CMake was not found on PATH. Install CMake 3.20+ to build games."); return false; }
     const char *toolchain = "";
     bool cross_win = j->target == LX_PLATFORM_WINDOWS && lx_platform_current() != LX_PLATFORM_WINDOWS;
@@ -285,6 +340,70 @@ static int build_main(void *u) {
 
 static LxThread *g_thread;
 
+/* behaviour names that scenes/prefabs in the project use but the editor doesn't have built in:
+ * they come from the project's scripts, so the player has to be compiled with them */
+static void scan_behaviours(const char *dir, EdBuildPlan *plan) {
+    LxDirEntry *e;
+    int n = lx_dir_list(dir, &e);
+    for (int i = 0; i < n; i++) {
+        char full[LX_PATH_MAX];
+        lx_path_join(full, sizeof full, dir, e[i].name);
+        if (e[i].is_dir) { scan_behaviours(full, plan); continue; }
+        const char *x = lx_path_ext(e[i].name);
+        if (strcmp(x, ".lxscene") && strcmp(x, ".lxprefab")) continue;
+        char *text = lx_file_read(full, NULL);
+        for (const char *p = text; p && (p = strstr(p, "behaviour.name")); p++) {
+            const char *v = strchr(p, '=');
+            if (!v) break;
+            v++;
+            while (*v == ' ') v++;
+            char name[LX_NAME_MAX];
+            size_t k = 0;
+            while (v[k] && v[k] != '\n' && v[k] != '\r' && k < sizeof name - 1) { name[k] = v[k]; k++; }
+            name[k] = 0;
+            if (!name[0] || lx_behaviour_find(name)) continue;
+            bool known = false;
+            for (int c = 0; c < plan->custom_count && c < 4; c++) known |= !strcmp(plan->custom[c], name);
+            if (known) continue;
+            if (plan->custom_count < 4) lx_strcpy(plan->custom[plan->custom_count], LX_NAME_MAX, name);
+            plan->custom_count++;
+        }
+        lx_free(text);
+    }
+    lx_free(e);
+}
+
+void ed_build_plan(LxPlatform target, EdBuildPlan *plan) {
+    memset(plan, 0, sizeof *plan);
+    scan_behaviours(ED.project.assets, plan);
+    lx_strcpy(plan->engine, sizeof plan->engine, ed_engine_root());
+    plan->cmake = have_command("cmake");
+    bool force_compile = getenv("LUXORA_BUILD_COMPILE") != NULL;
+    if (target != LX_PLATFORM_ANDROID && !plan->custom_count && !force_compile &&
+        ed_prebuilt_player(target, plan->prebuilt_path, sizeof plan->prebuilt_path)) {
+        plan->prebuilt = true;
+        plan->can_build = true;
+        return;
+    }
+    char list[LX_NAME_MAX * 4 + 16] = "";
+    for (int i = 0; i < plan->custom_count && i < 4; i++) {
+        if (i) lx_strcpy(list + strlen(list), sizeof list - strlen(list), ", ");
+        lx_strcpy(list + strlen(list), sizeof list - strlen(list), plan->custom[i]);
+    }
+    const char *why = plan->custom_count ? "Your scenes use script behaviours" : target == LX_PLATFORM_ANDROID ? "Android builds" : "This platform";
+    if (!plan->engine[0])
+        snprintf(plan->problem, sizeof plan->problem,
+                 "%s%s%s%s need the Luxora engine source to compile. It ships with the editor as the \"Engine\" folder next to "
+                 "LuxoraEditor - keep it there, or set its location below.",
+                 why, plan->custom_count ? " (" : "", list, plan->custom_count ? ")" : "");
+    else if (!plan->cmake)
+        snprintf(plan->problem, sizeof plan->problem,
+                 "%s%s%s%s need CMake and a C compiler to compile: install CMake (cmake.org) and, on Windows, Visual Studio Build "
+                 "Tools with \"Desktop development with C++\".",
+                 why, plan->custom_count ? " (" : "", list, plan->custom_count ? ")" : "");
+    else plan->can_build = true;
+}
+
 void ed_build(LxPlatform target, bool run_after) {
     if (lx_atomic_load(&ED.building)) { ui_notify(ED.ui, "A build is already running"); return; }
     if (ED.play != ED_EDIT) ed_stop();
@@ -300,20 +419,23 @@ void ed_build(LxPlatform target, bool run_after) {
     char in[LX_PATH_MAX];
     lx_path_join(in, sizeof in, ED.project.root, "input.lxinput");
     lx_input_map_save(lx_input_map(), in);
-    const char *engine = ed_engine_root();
-    char probe[LX_PATH_MAX];
-    lx_path_join(probe, sizeof probe, engine, "CMakeLists.txt");
-    if (!engine[0] || !lx_file_exists(probe)) {
-        ui_notify(ED.ui, "Engine source not found - set LUXORA_ENGINE_ROOT");
-        LX_ERROR("Engine source folder not found (%s). Set the LUXORA_ENGINE_ROOT environment variable to the Luxora repo.", engine);
+    EdBuildPlan plan;
+    ed_build_plan(target, &plan);
+    if (!plan.can_build) {
+        ui_notify(ED.ui, "Can't build yet - see Build Settings");
+        LX_ERROR("%s", plan.problem);
         return;
     }
+    const char *engine = plan.engine;
     if (g_thread) { lx_thread_join(g_thread); g_thread = NULL; }
     memset(&g_job, 0, sizeof g_job);
     g_job.target = target;
     g_job.run = run_after;
     g_job.project = ED.project;
     lx_strcpy(g_job.engine, sizeof g_job.engine, engine);
+    g_job.use_prebuilt = plan.prebuilt;
+    lx_strcpy(g_job.prebuilt, sizeof g_job.prebuilt, plan.prebuilt_path);
+    if (plan.prebuilt) LX_INFO("Scenes use built-in behaviours only: packaging the prebuilt player (no compiler needed)");
     g_result[0] = 0;
     lx_atomic_store(&g_finished, 0);
     lx_atomic_store(&ED.building, 1);

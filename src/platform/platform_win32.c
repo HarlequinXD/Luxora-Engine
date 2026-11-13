@@ -5,6 +5,9 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
+#include <winver.h>
+#include <wchar.h>
+#include <stdio.h>
 #define VK_NO_PROTOTYPES
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
@@ -219,6 +222,119 @@ void lx_platform_set_cursor(int c) {
 }
 
 void lx_platform_set_intercept_close(bool on) { W.intercept_close = on; }
+
+/* ---- editing a built .exe: icon and version resources ---- */
+#define RES_LANG MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US)
+static void to_wide(const char *s, wchar_t *w, int cap) { MultiByteToWideChar(CP_UTF8, 0, s, -1, w, cap); }
+
+bool lx_exe_set_icon(const char *exe, const char *ico_path) {
+    size_t size;
+    unsigned char *ico = (unsigned char *)lx_file_read(ico_path, &size);
+    if (!ico || size < 6) { lx_free(ico); return false; }
+    int count = ico[4] | ico[5] << 8;
+    if (count <= 0 || size < 6 + 16 * (size_t)count) { lx_free(ico); return false; }
+    wchar_t wexe[LX_PATH_MAX];
+    to_wide(exe, wexe, LX_PATH_MAX);
+    HANDLE h = BeginUpdateResourceW(wexe, FALSE);
+    if (!h) { lx_free(ico); return false; }
+    for (int id = 1; id <= 32; id++) UpdateResourceW(h, RT_ICON, MAKEINTRESOURCEW(id), RES_LANG, NULL, 0);   /* drop the old images */
+    /* group directory: like the .ico header, but each entry ends in a resource id instead of a file offset */
+    size_t gsize = 6 + 14 * (size_t)count;
+    unsigned char *grp = lx_calloc(1, gsize);
+    memcpy(grp, ico, 6);
+    bool ok = true;
+    for (int i = 0; i < count && ok; i++) {
+        const unsigned char *e = ico + 6 + 16 * i;
+        uint32_t bytes, offset;
+        memcpy(&bytes, e + 8, 4);
+        memcpy(&offset, e + 12, 4);
+        if ((size_t)offset + bytes > size) { ok = false; break; }
+        unsigned char *g = grp + 6 + 14 * i;
+        memcpy(g, e, 12);
+        uint16_t id = (uint16_t)(i + 1);
+        memcpy(g + 12, &id, 2);
+        ok = UpdateResourceW(h, RT_ICON, MAKEINTRESOURCEW(id), RES_LANG, ico + offset, bytes) != 0;
+    }
+    if (ok) ok = UpdateResourceW(h, RT_GROUP_ICON, MAKEINTRESOURCEW(1), RES_LANG, grp, (DWORD)gsize) != 0;
+    ok = EndUpdateResourceW(h, !ok) && ok;
+    lx_free(grp);
+    lx_free(ico);
+    return ok;
+}
+
+/* VS_VERSIONINFO is a tree of length-prefixed, 32-bit aligned blocks */
+typedef struct VBuf { unsigned char *d; size_t n, cap; } VBuf;
+static void vb_put(VBuf *b, const void *p, size_t n) {
+    if (b->n + n > b->cap) { b->cap = (b->n + n) * 2 + 256; b->d = lx_realloc(b->d, b->cap); }
+    memcpy(b->d + b->n, p, n);
+    b->n += n;
+}
+static void vb_align(VBuf *b) { static const unsigned char z[4] = {0}; if (b->n & 3) vb_put(b, z, 4 - (b->n & 3)); }
+static size_t vb_begin(VBuf *b, uint16_t value_len, uint16_t type, const wchar_t *key) {
+    vb_align(b);
+    size_t at = b->n;
+    uint16_t hdr[3] = {0, value_len, type};
+    vb_put(b, hdr, 6);
+    vb_put(b, key, (wcslen(key) + 1) * sizeof(wchar_t));
+    vb_align(b);
+    return at;
+}
+static void vb_end(VBuf *b, size_t at) { uint16_t len = (uint16_t)(b->n - at); memcpy(b->d + at, &len, 2); }
+static void vb_string(VBuf *b, const wchar_t *key, const char *value) {
+    wchar_t w[256];
+    to_wide(value && value[0] ? value : " ", w, 256);
+    size_t at = vb_begin(b, (uint16_t)(wcslen(w) + 1), 1, key);
+    vb_put(b, w, (wcslen(w) + 1) * sizeof(wchar_t));
+    vb_end(b, at);
+}
+
+bool lx_exe_set_version(const char *exe, const char *product, const char *company, const char *version) {
+    unsigned v[4] = {1, 0, 0, 0};
+    sscanf(version && version[0] ? version : "1.0.0", "%u.%u.%u.%u", &v[0], &v[1], &v[2], &v[3]);
+    char ver[64], file[LX_NAME_MAX + 8];
+    snprintf(ver, sizeof ver, "%u.%u.%u", v[0], v[1], v[2]);
+    lx_strcpy(file, sizeof file, lx_path_filename(exe));
+    VBuf b = {0};
+    size_t root = vb_begin(&b, (uint16_t)sizeof(VS_FIXEDFILEINFO), 0, L"VS_VERSION_INFO");
+    VS_FIXEDFILEINFO fi;
+    memset(&fi, 0, sizeof fi);
+    fi.dwSignature = 0xFEEF04BD;
+    fi.dwStrucVersion = 0x00010000;
+    fi.dwFileVersionMS = fi.dwProductVersionMS = (v[0] << 16) | v[1];
+    fi.dwFileVersionLS = fi.dwProductVersionLS = (v[2] << 16) | v[3];
+    fi.dwFileFlagsMask = VS_FFI_FILEFLAGSMASK;
+    fi.dwFileOS = VOS_NT_WINDOWS32;
+    fi.dwFileType = VFT_APP;
+    vb_put(&b, &fi, sizeof fi);
+    size_t sfi = vb_begin(&b, 0, 1, L"StringFileInfo");
+    size_t tbl = vb_begin(&b, 0, 1, L"040904b0");
+    char copyright[LX_NAME_MAX + 32];
+    snprintf(copyright, sizeof copyright, "Copyright (C) %s", company && company[0] ? company : product);
+    vb_string(&b, L"CompanyName", company && company[0] ? company : product);
+    vb_string(&b, L"FileDescription", product);
+    vb_string(&b, L"FileVersion", ver);
+    vb_string(&b, L"InternalName", product);
+    vb_string(&b, L"LegalCopyright", copyright);
+    vb_string(&b, L"OriginalFilename", file);
+    vb_string(&b, L"ProductName", product);
+    vb_string(&b, L"ProductVersion", ver);
+    vb_end(&b, tbl);
+    vb_end(&b, sfi);
+    size_t vfi = vb_begin(&b, 0, 1, L"VarFileInfo");
+    size_t var = vb_begin(&b, 4, 0, L"Translation");
+    uint32_t trans = 0x04b00409;
+    vb_put(&b, &trans, 4);
+    vb_end(&b, var);
+    vb_end(&b, vfi);
+    vb_end(&b, root);
+    wchar_t wexe[LX_PATH_MAX];
+    to_wide(exe, wexe, LX_PATH_MAX);
+    HANDLE h = BeginUpdateResourceW(wexe, FALSE);
+    bool ok = h && UpdateResourceW(h, RT_VERSION, MAKEINTRESOURCEW(VS_VERSION_INFO), RES_LANG, b.d, (DWORD)b.n);
+    if (h) ok = EndUpdateResourceW(h, !ok) && ok;
+    lx_free(b.d);
+    return ok;
+}
 void lx_platform_set_icon(const uint8_t *rgba, int w, int h) { LX_UNUSED(rgba); LX_UNUSED(w); LX_UNUSED(h); } /* from the .exe resource */
 bool lx_platform_take_close_request(void) {
     bool r = W.close_requested;

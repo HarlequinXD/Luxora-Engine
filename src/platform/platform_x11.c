@@ -148,6 +148,8 @@ void lx_platform_shutdown(void) {
 void lx_platform_set_title(const char *title) { XStoreName(X.dpy, X.win, title); }
 
 void lx_platform_set_intercept_close(bool on) { X.intercept_close = on; }
+bool lx_exe_set_icon(const char *exe, const char *ico) { LX_UNUSED(exe); LX_UNUSED(ico); return false; }
+bool lx_exe_set_version(const char *exe, const char *p, const char *c, const char *v) { LX_UNUSED(exe); LX_UNUSED(p); LX_UNUSED(c); LX_UNUSED(v); return false; }
 
 void lx_platform_set_icon(const uint8_t *rgba, int w, int h) {
     /* _NET_WM_ICON: width, height, then ARGB pixels as CARDINALs (longs) */

@@ -60,6 +60,20 @@ jobs:
           cd "$RUNNER_TEMP/projects/CI Sample/Builds/Linux/CI Sample"
           LUXORA_SCREENSHOT=$GITHUB_WORKSPACE/shots/game.ppm LUXORA_SCREENSHOT_FRAME=60 xvfb-run -a -s "-screen 0 1280x720x24" "./CI Sample"
 
+      - name: Prebuilt player flow (the downloaded editor, no compiler)
+        run: |
+          export HOME=$RUNNER_TEMP/home LUXORA_NO_AUDIO=1
+          P=$RUNNER_TEMP/pkg
+          mkdir -p $P/Engine/Prebuilt/Linux
+          cp build/luxora_editor_nogpu $P/LuxoraEditor
+          cp build/luxora_player $P/Engine/Prebuilt/Linux/LuxoraPlayer
+          xvfb-run -a $P/LuxoraEditor --new $RUNNER_TEMP/pb "Prebuilt Game" --screenshot /dev/null --frames 3
+          xvfb-run -a $P/LuxoraEditor "$RUNNER_TEMP/pb/Prebuilt Game" --build | tee pb.log
+          grep -q "prebuilt player" pb.log
+          cd "$RUNNER_TEMP/pb/Prebuilt Game/Builds/Linux/Prebuilt Game"
+          LUXORA_VALIDATION=1 LUXORA_SCREENSHOT=$GITHUB_WORKSPACE/shots/prebuilt_game.ppm LUXORA_SCREENSHOT_FRAME=60 \
+            xvfb-run -a -s "-screen 0 1280x720x24" "./Prebuilt Game"
+
       - name: Convert screenshots
         if: always()
         run: |
@@ -85,13 +99,19 @@ jobs:
           name: screenshots
           path: shots/*.png
 
+      - name: Package
+        run: |
+          mkdir -p "linux-package/Luxora Editor/Engine/Prebuilt/Linux"
+          cp build/luxora_editor "linux-package/Luxora Editor/LuxoraEditor"
+          cp README.md "linux-package/Luxora Editor/"
+          git archive HEAD CMakeLists.txt include src player third_party resources shaders tools android | tar -x -C "linux-package/Luxora Editor/Engine"
+          cp build/luxora_player "linux-package/Luxora Editor/Engine/Prebuilt/Linux/LuxoraPlayer"
+
       - uses: actions/upload-artifact@v4
         with:
-          name: luxora-linux
+          name: Luxora-Editor-Linux
           path: |
-            build/luxora_editor
-            build/luxora_player
-            build/luxora_tests
+            linux-package/
 
   windows:
     name: Windows (MSVC)
@@ -120,7 +140,8 @@ jobs:
           Add-Type -AssemblyName System.Drawing
           $checks = @(
             @{ exe = "build\Release\LuxoraEditor.exe"; product = "Luxora Editor"; icon = "editor" },
-            @{ exe = "build-game\Release\CI Game.exe"; product = "CI Game"; icon = "custom" }
+            @{ exe = "build-game\Release\CI Game.exe"; product = "CI Game"; icon = "custom" },
+            @{ exe = "patched_player.exe"; product = "Patched Game"; icon = "patched" }
           )
           foreach ($c in $checks) {
             $v = (Get-Item $c.exe).VersionInfo
@@ -145,7 +166,7 @@ jobs:
           [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\cert.pfx", [Convert]::FromBase64String($env:CERT_PFX))
           $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
           & $signtool.FullName sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f "$env:RUNNER_TEMP\cert.pfx" /p $env:CERT_PASSWORD `
-            build\Release\LuxoraEditor.exe
+            build\Release\LuxoraEditor.exe build\Release\luxora_player.exe
           if ($LASTEXITCODE) { throw "signing failed" }
           Remove-Item "$env:RUNNER_TEMP\cert.pfx"
 
@@ -155,6 +176,12 @@ jobs:
           New-Item -ItemType Directory -Force "Luxora Editor" | Out-Null
           Copy-Item build\Release\LuxoraEditor.exe "Luxora Editor\"
           Copy-Item README.md "Luxora Editor\README.md"
+          # the engine source (to compile games that use your own scripts) and the ready-made player
+          # (games that only use built-in behaviours build without any compiler)
+          git archive --format zip -o engine.zip HEAD CMakeLists.txt include src player third_party resources shaders tools android
+          Expand-Archive engine.zip -DestinationPath "Luxora Editor\Engine"
+          New-Item -ItemType Directory -Force "Luxora Editor\Engine\Prebuilt\Windows" | Out-Null
+          Copy-Item build\Release\luxora_player.exe "Luxora Editor\Engine\Prebuilt\Windows\LuxoraPlayer.exe"
 
       - uses: actions/upload-artifact@v4
         with:

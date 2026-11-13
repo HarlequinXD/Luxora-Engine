@@ -30,6 +30,7 @@ typedef struct Editor {
     bool pending_close;
     char pending_open[LX_PATH_MAX];
     char recent[ED_MAX_RECENT][LX_PATH_MAX];
+    char engine_root_pref[LX_PATH_MAX];   /* user-chosen engine folder (Build Settings), "" = automatic */
     int recent_count;
 
     /* scene */
@@ -188,7 +189,20 @@ void ed_project_manager_build(void);
 /* build pipeline */
 void ed_build(LxPlatform target, bool run);
 void ed_build_poll(void);
-const char *ed_engine_root(void);
+const char *ed_engine_root(void);       /* engine source folder, "" when none was found */
+bool ed_prebuilt_player(LxPlatform target, char *out, size_t cap);   /* ready-made player shipped with the editor */
+/* how a build for `target` would be made, and what's missing (Build Settings shows this) */
+typedef struct EdBuildPlan {
+    bool prebuilt;                       /* no compiling needed */
+    bool can_build;
+    char prebuilt_path[LX_PATH_MAX];
+    char engine[LX_PATH_MAX];
+    int custom_count;                    /* behaviours from your scripts used by scenes/prefabs */
+    char custom[4][LX_NAME_MAX];
+    bool cmake;
+    char problem[512];                   /* why it can't build, in plain words */
+} EdBuildPlan;
+void ed_build_plan(LxPlatform target, EdBuildPlan *plan);
 
 /* helpers shared by panels */
 UiNode *ed_panel_header(UiNode *parent, UiIcon icon, const char *title);

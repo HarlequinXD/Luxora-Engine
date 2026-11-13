@@ -353,6 +353,26 @@ const char *lx_home_dir(void) {
     return home;
 }
 
+/* folder containing the running executable (forward slashes), "" when unknown */
+const char *lx_exe_dir(void) {
+    static char dir[LX_PATH_MAX];
+    static bool done;
+    if (done) return dir;
+    done = true;
+    char path[LX_PATH_MAX] = "";
+#if LX_OS_WINDOWS
+    wchar_t w[LX_PATH_MAX];
+    DWORD n = GetModuleFileNameW(NULL, w, LX_PATH_MAX);
+    if (n > 0 && n < LX_PATH_MAX) WideCharToMultiByte(CP_UTF8, 0, w, -1, path, sizeof path, NULL, NULL);
+    for (char *p = path; *p; p++) if (*p == '\\') *p = '/';
+#elif LX_OS_LINUX
+    ssize_t n = readlink("/proc/self/exe", path, sizeof path - 1);
+    path[n > 0 ? n : 0] = 0;
+#endif
+    if (path[0]) lx_path_parent(dir, sizeof dir, path);
+    return dir;
+}
+
 /* ---------------- time ---------------- */
 double lx_time(void) {
 #if LX_OS_WINDOWS

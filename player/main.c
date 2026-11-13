@@ -18,7 +18,8 @@ int lx_main(int argc, char **argv) {
     if (!dir) {
         /* default: Data/ next to the executable, else the current folder */
         char exe_dir[LX_PATH_MAX] = ".";
-        if (argc > 0) lx_path_parent(exe_dir, sizeof exe_dir, argv[0]);
+        if (lx_exe_dir()[0]) lx_strcpy(exe_dir, sizeof exe_dir, lx_exe_dir());   /* works however it was launched */
+        else if (argc > 0) lx_path_parent(exe_dir, sizeof exe_dir, argv[0]);
         if (!exe_dir[0]) strcpy(exe_dir, ".");
         lx_path_join(g_project, sizeof g_project, exe_dir, "Data");
         dir = lx_dir_exists(g_project) ? g_project : ".";

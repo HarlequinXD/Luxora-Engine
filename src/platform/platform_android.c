@@ -189,6 +189,8 @@ bool lx_platform_pump(void) {
 void lx_platform_set_title(const char *t) { LX_UNUSED(t); }
 void lx_platform_set_cursor(int c) { LX_UNUSED(c); }
 void lx_platform_set_intercept_close(bool on) { LX_UNUSED(on); }
+bool lx_exe_set_icon(const char *exe, const char *ico) { LX_UNUSED(exe); LX_UNUSED(ico); return false; }
+bool lx_exe_set_version(const char *exe, const char *p, const char *c, const char *v) { LX_UNUSED(exe); LX_UNUSED(p); LX_UNUSED(c); LX_UNUSED(v); return false; }
 void lx_platform_set_icon(const uint8_t *rgba, int w, int h) { LX_UNUSED(rgba); LX_UNUSED(w); LX_UNUSED(h); }
 bool lx_platform_take_close_request(void) { return false; }
 void lx_platform_window_minimize(void) {}

@@ -134,6 +134,19 @@ static void test_icon_images(void) {
     uint8_t *f = (uint8_t *)lx_file_read(ico, &isz);
     CHECK(f && isz > 6 && f[2] == 1 && f[4] == 9, "ico header: %d images", f ? f[4] : -1);
     lx_free(f); lx_free(sq); lx_free(back); lx_free(png); lx_free(px);
+#ifdef _WIN32
+    /* the editor stamps icons and version details into the prebuilt player */
+    const char *player = "build/Release/luxora_player.exe";
+    if (lx_file_exists(player)) {
+        size_t psz;
+        char *bytes = lx_file_read(player, &psz);
+        CHECK(bytes && lx_file_write("patched_player.exe", bytes, psz), "copy the player");
+        lx_free(bytes);
+        CHECK(lx_exe_set_version("patched_player.exe", "Patched Game", "Luxora Tests", "2.3.4"), "exe version details replaced");
+        CHECK(lx_exe_set_icon("patched_player.exe", ico), "exe icon replaced");
+        if (!getenv("LUXORA_KEEP_TEST_ICON")) remove("patched_player.exe");
+    }
+#endif
     if (!getenv("LUXORA_KEEP_TEST_ICON")) remove(ico);   /* CI builds a game with it */
 }
 

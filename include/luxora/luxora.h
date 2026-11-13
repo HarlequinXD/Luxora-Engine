@@ -58,6 +58,7 @@ const char *lx_path_filename(const char *path);
 const char *lx_path_ext(const char *path); /* ".png" or "" */
 void lx_path_parent(char *out, size_t cap, const char *path);
 const char *lx_home_dir(void);
+const char *lx_exe_dir(void);   /* folder of the running program ("" if unknown) */
 
 double lx_time(void);  /* seconds, monotonic */
 void lx_sleep_ms(int ms);

@@ -171,14 +171,59 @@ void ed_prompt(const char *title, const char *label, const char *initial, void (
 /* ======================================================================
  *  project lifecycle
  * ====================================================================== */
+/* an engine source folder has the top-level CMakeLists.txt and the runtime sources */
+static bool is_engine_dir(const char *dir) {
+    if (!dir || !dir[0]) return false;
+    char a[LX_PATH_MAX], b[LX_PATH_MAX];
+    lx_path_join(a, sizeof a, dir, "CMakeLists.txt");
+    lx_path_join(b, sizeof b, dir, "src/engine.c");
+    return lx_file_exists(a) && lx_file_exists(b);
+}
+
+/* Where the engine source is, in order: LUXORA_ENGINE_ROOT, the folder chosen in Build Settings,
+ * "Engine" next to the editor (the downloadable package), the editor's own folder and its parents
+ * (a source build), and the folder the editor was compiled in. */
 const char *ed_engine_root(void) {
     static char root[LX_PATH_MAX];
     const char *env = getenv("LUXORA_ENGINE_ROOT");
-    if (env && env[0]) return env;
+    if (is_engine_dir(env)) { lx_strcpy(root, sizeof root, env); return root; }
+    if (is_engine_dir(ED.engine_root_pref)) { lx_strcpy(root, sizeof root, ED.engine_root_pref); return root; }
+    const char *exe = lx_exe_dir();
+    if (exe[0]) {
+        lx_path_join(root, sizeof root, exe, "Engine");
+        if (is_engine_dir(root)) return root;
+        char dir[LX_PATH_MAX];
+        lx_strcpy(dir, sizeof dir, exe);
+        for (int up = 0; up < 5 && dir[0]; up++) {
+            if (is_engine_dir(dir)) { lx_strcpy(root, sizeof root, dir); return root; }
+            char parent[LX_PATH_MAX];
+            lx_path_parent(parent, sizeof parent, dir);
+            if (!strcmp(parent, dir)) break;
+            lx_strcpy(dir, sizeof dir, parent);
+        }
+    }
 #ifdef LUXORA_ENGINE_ROOT
-    lx_strcpy(root, sizeof root, LUXORA_ENGINE_ROOT);
+    if (is_engine_dir(LUXORA_ENGINE_ROOT)) { lx_strcpy(root, sizeof root, LUXORA_ENGINE_ROOT); return root; }
 #endif
+    root[0] = 0;
     return root;
+}
+
+/* Prebuilt players live in <engine>/Prebuilt/<Platform>/ or <editor folder>/Prebuilt/<Platform>/ */
+bool ed_prebuilt_player(LxPlatform target, char *out, size_t cap) {
+    if (target == LX_PLATFORM_ANDROID) return false;
+    char rel[64];
+    snprintf(rel, sizeof rel, "Prebuilt/%s/LuxoraPlayer%s", lx_platform_name(target), target == LX_PLATFORM_WINDOWS ? ".exe" : "");
+    const char *bases[3] = {ed_engine_root(), lx_exe_dir(), NULL};
+    char eng[LX_PATH_MAX];
+    if (lx_exe_dir()[0]) { lx_path_join(eng, sizeof eng, lx_exe_dir(), "Engine"); bases[2] = eng; }
+    for (int i = 0; i < 3; i++) {
+        if (!bases[i] || !bases[i][0]) continue;
+        lx_path_join(out, cap, bases[i], rel);
+        if (lx_file_exists(out)) return true;
+    }
+    out[0] = 0;
+    return false;
 }
 
 void ed_open_project(const char *root) {
