@@ -181,6 +181,10 @@ const char *ed_engine_root(void) {
 }
 
 void ed_open_project(const char *root) {
+    if (ED.in_frame) {
+        lx_strcpy(ED.pending_open, sizeof ED.pending_open, root);
+        return;
+    }
     LxProject p;
     if (!lx_project_load(&p, root)) {
         ui_notify(ED.ui, "Could not open project at %s", root);
@@ -206,7 +210,28 @@ void ed_open_project(const char *root) {
     LX_INFO("Opened project '%s' (%s)", p.name, p.root);
 }
 
+void ed_request_close_project(void) {
+    if (ED.in_frame) { ED.pending_close = true; return; }
+    ed_close_project();
+    ed_set_mode(ED_MODE_PROJECT_MANAGER);
+}
+
+void ed_run_pending(void) {
+    if (ED.pending_close) {
+        ED.pending_close = false;
+        ed_request_close_project();
+    }
+    if (ED.pending_open[0]) {
+        char root[LX_PATH_MAX];
+        lx_strcpy(root, sizeof root, ED.pending_open);
+        ED.pending_open[0] = 0;
+        ed_open_project(root);
+        if (!ED.has_project && ED.mode != ED_MODE_PROJECT_MANAGER) ed_set_mode(ED_MODE_PROJECT_MANAGER);
+    }
+}
+
 void ed_close_project(void) {
+    if (!ED.has_project) return;
     if (ED.play != ED_EDIT) ed_stop();
     lx_audio_stop_all();
     if (ED.scene) lx_scene_destroy(ED.scene);
@@ -568,7 +593,7 @@ static void m_save_as(UiNode *n) { LX_UNUSED(n); ed_save_scene_as_dialog(); }
 static void m_project_settings(UiNode *n) { ed_project_settings(n ? (int)n->tag : 0); }
 static void m_build_settings(UiNode *n) { LX_UNUSED(n); ed_build_settings(); }
 static void m_open_folder(UiNode *n) { LX_UNUSED(n); lx_platform_open_folder(ED.project.root); }
-static void close_project_now(void) { ed_close_project(); ed_set_mode(ED_MODE_PROJECT_MANAGER); }
+static void close_project_now(void) { ed_request_close_project(); }
 static void m_close_project(UiNode *n) { LX_UNUSED(n); if (ed_confirm_discard(close_project_now)) close_project_now(); }
 static void quit_now(void) { ED.quit = true; }
 static void m_exit(UiNode *n) { LX_UNUSED(n); if (ed_confirm_discard(quit_now)) quit_now(); }

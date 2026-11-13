@@ -24,6 +24,11 @@ typedef struct Editor {
     /* project */
     LxProject project;
     bool has_project;
+    /* Opening/closing a project frees GPU resources the current frame may already
+       be using, so requests made mid-frame (menu clicks) run once the frame ends. */
+    bool in_frame;
+    bool pending_close;
+    char pending_open[LX_PATH_MAX];
     char recent[ED_MAX_RECENT][LX_PATH_MAX];
     int recent_count;
 
@@ -97,6 +102,8 @@ extern Editor ED;
 void ed_set_mode(EdMode mode);
 void ed_open_project(const char *root);
 void ed_close_project(void);
+void ed_request_close_project(void);   /* close and return to the Project Manager */
+void ed_run_pending(void);             /* called by the main loop between frames */
 void ed_build_shell(void);
 void ed_update(float dt);
 void ed_render(void);

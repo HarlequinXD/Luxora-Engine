@@ -1,5 +1,6 @@
 /* Build pipeline: compiles the Luxora player with the project's scripts, stages the game data
  * and packages a runnable build for Windows, Linux or Android. Runs on a background thread. */
+#include <ctype.h>
 #include "editor.h"
 
 typedef struct BuildJob {
@@ -47,6 +48,19 @@ static int copy_tree(const char *from, const char *to) {
     }
     lx_free(e);
     return count;
+}
+
+/* Strips characters that would break a shell argument or a Windows resource string.
+   file_name additionally keeps only characters that are safe in a file name. */
+static void rc_safe(char *dst, size_t cap, const char *src, bool file_name) {
+    size_t n = 0;
+    for (const unsigned char *c = (const unsigned char *)(src ? src : ""); *c && n + 1 < cap; c++) {
+        bool ok = file_name ? (isalnum(*c) || *c == ' ' || *c == '-' || *c == '_' || *c == '.' || *c >= 0x80)
+                            : (*c >= 0x20 && *c != '"' && *c != '\\' && *c != '`' && *c != '$' && *c != '%');
+        if (ok) dst[n++] = (char)*c;
+    }
+    while (n && (dst[n - 1] == ' ' || dst[n - 1] == '.')) n--;
+    dst[n] = 0;
 }
 
 static bool have_command(const char *probe) {
@@ -105,15 +119,30 @@ static bool build_desktop(const BuildJob *j) {
         return false;
     }
     status("Configuring %s build...", plat);
-    snprintf(cmd, sizeof cmd, "cmake -S \"%s\" -B \"%s\" -DCMAKE_BUILD_TYPE=%s -DLUXORA_BUILD_EDITOR=OFF -DLUXORA_BUILD_TESTS=OFF -DLUXORA_GAME_PROJECT=\"%s\"%s",
-             j->engine, bdir, p->build.development_build ? "RelWithDebInfo" : "Release", p->root, toolchain);
+    /* Windows stamps these into the .exe (Explorer > Properties > Details) */
+    char gname[LX_NAME_MAX], gcompany[LX_NAME_MAX], gversion[32], gexe[LX_NAME_MAX], gicon[LX_PATH_MAX], icon_arg[LX_PATH_MAX + 32];
+    rc_safe(gname, sizeof gname, p->name, false);
+    rc_safe(gcompany, sizeof gcompany, p->company, false);
+    rc_safe(gversion, sizeof gversion, p->version[0] ? p->version : "1.0.0", false);
+    rc_safe(gexe, sizeof gexe, p->name, true);
+    if (!gexe[0]) lx_strcpy(gexe, sizeof gexe, "Game");
+    /* a project can ship its own icon as Icon.ico in its folder; otherwise games get the controller icon */
+    lx_path_join(gicon, sizeof gicon, p->root, "Icon.ico");
+    icon_arg[0] = 0;
+    if (lx_file_exists(gicon)) snprintf(icon_arg, sizeof icon_arg, " -DLUXORA_GAME_ICON=\"%s\"", gicon);
+    snprintf(cmd, sizeof cmd, "cmake -S \"%s\" -B \"%s\" -DCMAKE_BUILD_TYPE=%s -DLUXORA_BUILD_EDITOR=OFF -DLUXORA_BUILD_TESTS=OFF -DLUXORA_GAME_PROJECT=\"%s\""
+             " -DLUXORA_GAME_NAME=\"%s\" -DLUXORA_GAME_COMPANY=\"%s\" -DLUXORA_GAME_VERSION=\"%s\" -DLUXORA_GAME_EXE=\"%s\"%s%s",
+             j->engine, bdir, p->build.development_build ? "RelWithDebInfo" : "Release", p->root, gname, gcompany, gversion, gexe,
+             icon_arg, toolchain);
     if (run(cmd, NULL) != 0) { LX_ERROR("CMake configure failed"); return false; }
     status("Compiling %s player...", plat);
     snprintf(cmd, sizeof cmd, "cmake --build \"%s\" --config %s --target luxora_player --parallel", bdir,
              p->build.development_build ? "RelWithDebInfo" : "Release");
     if (run(cmd, NULL) != 0) { LX_ERROR("Compilation failed - check the errors above (your scripts are compiled too)"); return false; }
     status("Packaging %s...", plat);
-    const char *exe_name = j->target == LX_PLATFORM_WINDOWS ? "luxora_player.exe" : "luxora_player";
+    char exe_name[LX_NAME_MAX + 8];
+    if (j->target == LX_PLATFORM_WINDOWS) snprintf(exe_name, sizeof exe_name, "%s.exe", gexe);
+    else lx_strcpy(exe_name, sizeof exe_name, "luxora_player");
     char exe[LX_PATH_MAX];
     lx_path_join(exe, sizeof exe, bdir, exe_name);
     if (!lx_file_exists(exe)) {
@@ -125,7 +154,8 @@ static bool build_desktop(const BuildJob *j) {
     lx_path_remove(out);
     lx_mkdir_p(out);
     char dst[LX_PATH_MAX], fname[LX_NAME_MAX + 8];
-    snprintf(fname, sizeof fname, "%s%s", p->name, j->target == LX_PLATFORM_WINDOWS ? ".exe" : "");
+    snprintf(fname, sizeof fname, "%s%s", j->target == LX_PLATFORM_WINDOWS ? gexe : p->name,
+             j->target == LX_PLATFORM_WINDOWS ? ".exe" : "");
     lx_path_join(dst, sizeof dst, out, fname);
     if (!copy_file(exe, dst)) { LX_ERROR("Could not copy the executable to %s", dst); return false; }
 #if !LX_OS_WINDOWS

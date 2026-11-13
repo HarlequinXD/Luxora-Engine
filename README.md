@@ -18,7 +18,7 @@ git clone https://github.com/HarlequinXD/Luxora-Engine
 cd Luxora-Engine
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
-./build/luxora_editor            # Windows: build\Release\luxora_editor.exe
+./build/luxora_editor            # Windows: build\Release\LuxoraEditor.exe
 ```
 
 Requirements: a C11 compiler (MSVC 2022, GCC, Clang), CMake 3.20+, and a GPU driver with Vulkan 1.3 (or 1.2 with `VK_KHR_dynamic_rendering`). **No Vulkan SDK is needed to build.** The headers are vendored, the loader is opened at runtime, and shaders ship precompiled as SPIR-V. On Linux you also need the X11 development headers (`libx11-dev`).
@@ -76,6 +76,8 @@ You can add actions and axes, rebind them by pressing the input you want, set de
 Use **Build → Build Settings** and choose a platform, then click **Build** or **Build and Run**:
 
 - **Windows / Linux**: the editor runs CMake to compile the player together with your scripts, then writes `Builds/<Platform>/<Game>/` containing the executable and a `Data/` folder.
+- **Windows .exe details**: the game's name, publisher and version from Project Settings are stamped into the executable (shown in Explorer under Properties → Details), together with a Windows 10/11 manifest. Games get a game-controller icon by default. To use your own, put an `Icon.ico` in the project folder.
+- **Windows SmartScreen**: Windows warns about any program that isn't code-signed by a known publisher. To remove the warning for your releases, sign the `.exe` with a code-signing certificate. The CI workflow signs automatically when the `WINDOWS_CERT_PFX` and `WINDOWS_CERT_PASSWORD` secrets are set.
 - **Android**: needs `ANDROID_HOME` (SDK with the NDK and CMake), JDK 17 and Gradle 8.7+. Luxora produces an APK and can install it over `adb`. Vulkan and AAudio require API 26+.
 
 ## Repository layout

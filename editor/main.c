@@ -168,13 +168,20 @@ int main(int argc, char **argv) {
         lx_input_update(ED.dt);
         if (ED.mode == ED_MODE_EDITOR) ed_update(ED.dt);
         if (lx_renderer_begin_frame()) {
+            ED.in_frame = true;
             if (ED.mode == ED_MODE_EDITOR) ed_render();
             ui_frame(ED.ui, ED.dt, lx_v4(0.1f, 0.1f, 0.11f, 1));
             if (shot && frame == shot_frames) lx_renderer_screenshot(shot);
             lx_renderer_end_frame();
+            ED.in_frame = false;
             frame++;
             if (shot && frame > shot_frames && !smoke) ED.quit = true;
-        } else lx_sleep_ms(16);
+        } else {
+            /* minimised or the swapchain is being rebuilt: UI events still ran, nothing is in flight */
+            ED.in_frame = false;
+            lx_sleep_ms(16);
+        }
+        ed_run_pending();
         if (build_game && ED.has_project) {
             extern int ed_last_build_result;
             static bool started;

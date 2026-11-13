@@ -34,6 +34,30 @@ static void s_game_stop(void) {
     SMOKE_CHECK(!ED.game_view, "Stop restores the Scene view");
 }
 
+static char g_reopen[LX_PATH_MAX];
+static void s_close_project(void) {
+    lx_strcpy(g_reopen, sizeof g_reopen, ED.project.root);
+    ED.dirty = false;
+    /* exactly what File > Close Project does: it is clicked while a frame is being built */
+    ED.in_frame = true;
+    UiNode *menu_item = find_node(ui_root(ED.ui), NULL, "Close Project");
+    if (menu_item && menu_item->on_click) menu_item->on_click(menu_item);
+    else ed_request_close_project();
+    SMOKE_CHECK(ED.has_project, "Close Project waits for the frame to finish");
+    ED.in_frame = false;
+}
+static void s_closed(void) {
+    SMOKE_CHECK(!ED.has_project && ED.mode == ED_MODE_PROJECT_MANAGER, "Close Project returns to the Project Manager");
+}
+static void s_reopen_project(void) {
+    ED.in_frame = true;
+    ed_open_project(g_reopen);
+    ED.in_frame = false;
+}
+static void s_reopened(void) {
+    SMOKE_CHECK(ED.has_project && ED.mode == ED_MODE_EDITOR && ED.scene, "Project reopens from the Project Manager");
+}
+
 static UiNode *g_first_widget;
 static void s_mat_select(void) {
     char p[LX_PATH_MAX];
@@ -179,13 +203,17 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {209, s_game_back, "scene view"},
     {211, s_game_play, "play switches to game view"},
     {214, s_game_stop, "stop restores scene view"},
+    {216, s_close_project, "close project"},
+    {219, s_closed, "back at the project manager"},
+    {222, s_reopen_project, "reopen the project"},
+    {226, s_reopened, "project is open again"},
 };
 
 bool ed_smoke_step(int frame) {
     for (size_t i = 0; i < sizeof STEPS / sizeof STEPS[0]; i++)
         if (STEPS[i].frame == frame) {
             LX_INFO("[smoke] %s", STEPS[i].what);
-            if (ED.mode == ED_MODE_EDITOR) STEPS[i].fn();
+            if (ED.mode == ED_MODE_EDITOR || frame >= 216) STEPS[i].fn(); /* the last steps run in the Project Manager */
         }
-    return frame < 220;
+    return frame < 232;
 }

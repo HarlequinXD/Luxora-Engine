@@ -138,7 +138,9 @@ bool lx_platform_init(const LxWindowDesc *d) {
     wc.lpfnWndProc = wndproc;
     wc.hInstance = inst;
     wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
-    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
+    /* icon resource 1 is embedded by CMake (editor: Luxora icon, games: controller or the project's Icon.ico) */
+    wc.hIcon = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR);
+    wc.hIconSm = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
     wc.lpszClassName = L"LuxoraWindow";
     RegisterClassExW(&wc);
 
