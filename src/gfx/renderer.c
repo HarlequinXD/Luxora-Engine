@@ -343,7 +343,7 @@ static VkShaderModule shader_module(const uint32_t *code, size_t size) {
 }
 
 /* ------------------------------------------------------------------ pipelines */
-enum { VTX_NONE, VTX_MESH, VTX_MESH_POS_ONLY, VTX_UI };
+enum { VTX_NONE, VTX_MESH, VTX_MESH_POS_ONLY, VTX_MESH_POS_NORMAL, VTX_UI };
 
 typedef struct PipeDesc {
     const uint32_t *vs; size_t vs_size;
@@ -371,10 +371,11 @@ static VkPipeline pipeline_create(const PipeDesc *d) {
     VkVertexInputBindingDescription bindings[2];
     VkVertexInputAttributeDescription attrs[9];
     uint32_t nb = 0, na = 0;
-    if (d->vertex == VTX_MESH || d->vertex == VTX_MESH_POS_ONLY) {
+    if (d->vertex == VTX_MESH || d->vertex == VTX_MESH_POS_ONLY || d->vertex == VTX_MESH_POS_NORMAL) {
         bindings[nb++] = (VkVertexInputBindingDescription){0, sizeof(LxVertex), VK_VERTEX_INPUT_RATE_VERTEX};
         bindings[nb++] = (VkVertexInputBindingDescription){1, 80, VK_VERTEX_INPUT_RATE_INSTANCE};
         attrs[na++] = (VkVertexInputAttributeDescription){0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0};
+        if (d->vertex == VTX_MESH_POS_NORMAL) attrs[na++] = (VkVertexInputAttributeDescription){1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12};
         if (d->vertex == VTX_MESH) {
             attrs[na++] = (VkVertexInputAttributeDescription){1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12};
             attrs[na++] = (VkVertexInputAttributeDescription){2, 0, VK_FORMAT_R32G32_SFLOAT, 24};
@@ -913,7 +914,7 @@ static void create_static_resources(void) {
     memset(&p, 0, sizeof p);
     p.vs = lx_spv_outline_vert; p.vs_size = sizeof lx_spv_outline_vert;
     p.fs = lx_spv_outline_frag; p.fs_size = sizeof lx_spv_outline_frag;
-    p.layout = R.outline_layout; p.vertex = VTX_MESH; p.color = R.hdr_format; p.depth = R.depth_format;
+    p.layout = R.outline_layout; p.vertex = VTX_MESH_POS_NORMAL; p.color = R.hdr_format; p.depth = R.depth_format;
     p.depth_test = true; p.compare = VK_COMPARE_OP_LESS_OR_EQUAL; p.cull = VK_CULL_MODE_FRONT_BIT;
     R.outline = pipeline_create(&p);
 

@@ -63,6 +63,19 @@ jobs:
         run: |
           python3 -c "import glob; from PIL import Image; [Image.open(f).save(f[:-4]+'.png') for f in glob.glob('shots/*.ppm')]"
           ls -la shots || true
+          # small previews embedded in the log (handy where artifacts can't be downloaded)
+          python3 - <<'PY'
+          import glob, base64, io
+          from PIL import Image
+          for f in sorted(glob.glob('shots/*.png')):
+              im = Image.open(f).convert('RGB')
+              im.thumbnail((960, 960))
+              b = io.BytesIO(); im.save(b, 'JPEG', quality=80)
+              print('LXSHOT-BEGIN', f.split('/')[-1])
+              data = base64.b64encode(b.getvalue()).decode()
+              for i in range(0, len(data), 1000): print('LXSHOT', data[i:i+1000])
+              print('LXSHOT-END')
+          PY
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -84,7 +97,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+        run: cmake -S . -B build -A x64
       - name: Build
         run: cmake --build build --config Release --parallel
       - name: Unit tests

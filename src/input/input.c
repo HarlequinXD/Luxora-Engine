@@ -412,6 +412,17 @@ struct lx_js_event { uint32_t time; int16_t value; uint8_t type; uint8_t number;
 #define LX_JS_EVENT_AXIS 0x02
 #define LX_JS_EVENT_INIT 0x80
 #define LX_JSIOCGNAME(len) (((2u) << 30) | ((unsigned)(len) << 16) | ((unsigned)'j' << 8) | 0x13u)
+#define LX_JSIOCGAXES (((2u) << 30) | (1u << 16) | ((unsigned)'j' << 8) | 0x11u)
+#define LX_JSIOCGBUTTONS (((2u) << 30) | (1u << 16) | ((unsigned)'j' << 8) | 0x12u)
+
+/* the joystick interface also exposes some mice, touchpads and tablets: only accept real controllers */
+static bool looks_like_gamepad(int fd, const char *name) {
+    uint8_t axes = 0, buttons = 0;
+    if (ioctl(fd, LX_JSIOCGAXES, &axes) < 0 || ioctl(fd, LX_JSIOCGBUTTONS, &buttons) < 0) return false;
+    static const char *reject[] = {"Mouse", "mouse", "Touchpad", "touchpad", "TouchPad", "Keyboard", "keyboard", "Tablet", "Pen", "Stylus", "Trackpoint", "TrackPoint"};
+    for (size_t i = 0; i < sizeof reject / sizeof reject[0]; i++) if (strstr(name, reject[i])) return false;
+    return axes >= 2 && buttons >= 4;
+}
 
 static void poll_pads(void) {
     if (!IN.js_init) {
@@ -421,7 +432,7 @@ static void poll_pads(void) {
     if (lx_time() >= IN.next_scan) {
         IN.next_scan = lx_time() + 2.0;
         for (int i = 0; i < LX_MAX_PADS; i++) {
-            if (IN.js_fd[i] >= 0) continue;
+            if (IN.js_fd[i] >= 0 || IN.js_fd[i] == -2) continue;
             char path[32];
             snprintf(path, sizeof path, "/dev/input/js%d", i);
             int fd = open(path, O_RDONLY | O_NONBLOCK);
@@ -430,6 +441,13 @@ static void poll_pads(void) {
             LxPadState *p = &g_lx_pads[i];
             memset(p, 0, sizeof *p);
             if (ioctl(fd, LX_JSIOCGNAME(sizeof p->name), p->name) < 0) snprintf(p->name, sizeof p->name, "Joystick %d", i + 1);
+            if (!looks_like_gamepad(fd, p->name)) {
+                LX_INFO("Ignoring non-gamepad joystick device: %s", p->name);
+                close(fd);
+                IN.js_fd[i] = -2; /* never retry this slot during this run */
+                memset(p, 0, sizeof *p);
+                continue;
+            }
             p->connected = true;
             LX_INFO("Gamepad connected: %s", p->name);
         }
@@ -438,6 +456,7 @@ static void poll_pads(void) {
         int fd = IN.js_fd[i];
         if (fd < 0) continue;
         LxPadState *p = &g_lx_pads[i];
+        if (!p->connected) continue;
         struct lx_js_event ev;
         ssize_t got;
         while ((got = read(fd, &ev, sizeof ev)) == (ssize_t)sizeof ev) {
