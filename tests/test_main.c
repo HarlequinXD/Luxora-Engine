@@ -137,6 +137,158 @@ static void test_icon_images(void) {
     if (!getenv("LUXORA_KEEP_TEST_ICON")) remove(ico);   /* CI builds a game with it */
 }
 
+/* ---------------- physics ---------------- */
+static int g_enter, g_exit, g_trig_in, g_trig_out;
+static float g_hit_impulse;
+static void ev_enter(LxBehaviourCtx *c, const LxCollision *col) { LX_UNUSED(c); g_enter++; if (col->impulse > g_hit_impulse) g_hit_impulse = col->impulse; }
+static void ev_exit(LxBehaviourCtx *c, LxEntity o) { LX_UNUSED(c); LX_UNUSED(o); g_exit++; }
+static void ev_tin(LxBehaviourCtx *c, LxEntity o) { LX_UNUSED(c); LX_UNUSED(o); g_trig_in++; }
+static void ev_tout(LxBehaviourCtx *c, LxEntity o) { LX_UNUSED(c); LX_UNUSED(o); g_trig_out++; }
+
+static LxScene *phys_scene(void) {
+    LxScene *s = lx_scene_create("Physics");
+    LxEntity g = lx_entity_create(s, "Ground");
+    lx_entity_set_position(s, g, lx_v3(0, -0.5f, 0));
+    LxCollider *c = lx_add_collider(s, g, LX_COLLIDER_BOX);
+    c->size = lx_v3(40, 1, 40);
+    return s;
+}
+static void run(LxScene *s, float seconds) {
+    for (int i = 0; i < (int)(seconds * 60); i++) lx_scene_simulate(s, 1.0f / 60.0f);
+}
+static LxEntity body(LxScene *s, const char *name, LxColliderShape shape, LxVec3 pos) {
+    LxEntity e = lx_entity_create(s, name);
+    lx_entity_set_position(s, e, pos);
+    lx_add_collider(s, e, shape);
+    lx_add_rigidbody(s, e);
+    return e;
+}
+
+static void test_physics(void) {
+    printf("physics\n");
+    /* resting sphere and box */
+    LxScene *s = phys_scene();
+    LxEntity sp = body(s, "Sphere", LX_COLLIDER_SPHERE, lx_v3(-2, 3, 0));
+    LxEntity bx = body(s, "Box", LX_COLLIDER_BOX, lx_v3(2, 3, 0));
+    LxEntity cap = body(s, "Capsule", LX_COLLIDER_CAPSULE, lx_v3(5, 3, 0));
+    lx_entity_set_euler(s, cap, lx_v3(0, 0, 90));
+    run(s, 4);
+    LxVec3 ps = lx_entity_world_position(s, sp), pb = lx_entity_world_position(s, bx), pc = lx_entity_world_position(s, cap);
+    CHECK(NEAR(ps.y, 0.5f, 0.03f), "sphere rests on the ground (y=%g)", ps.y);
+    CHECK(NEAR(pb.y, 0.5f, 0.03f), "box rests on the ground (y=%g)", pb.y);
+    CHECK(NEAR(pc.y, 0.5f, 0.05f), "capsule lying down rests on its side (y=%g)", pc.y);
+    LxVec3 up = lx_quat_rotate(lx_entity_world_rotation(s, bx), lx_v3(0, 1, 0));
+    CHECK(up.y > 0.99f, "box stays upright (up.y=%g)", up.y);
+    CHECK(lx_rigidbody_sleeping(s, bx) && lx_rigidbody_sleeping(s, sp), "resting bodies fall asleep");
+    CHECK(!isnan(ps.x + pb.x + pc.x), "no NaNs");
+    lx_scene_destroy(s);
+
+    /* stacking */
+    s = phys_scene();
+    LxEntity st[4];
+    for (int i = 0; i < 4; i++) st[i] = body(s, "Stack", LX_COLLIDER_BOX, lx_v3(0.02f * i, 0.5f + i * 1.01f, 0));
+    run(s, 5);
+    LxVec3 top = lx_entity_world_position(s, st[3]);
+    CHECK(NEAR(top.y, 3.5f, 0.08f) && fabsf(top.x) < 0.25f, "4-box stack stands (top %g,%g)", top.x, top.y);
+    lx_scene_destroy(s);
+
+    /* bounciness and friction */
+    s = phys_scene();
+    LxEntity ball = body(s, "Ball", LX_COLLIDER_SPHERE, lx_v3(0, 4, 0));
+    lx_get_collider(s, ball)->bounciness = 0.9f;
+    lx_get_collider(s, lx_entity_find(s, "Ground"))->bounciness = 0.9f;
+    float peak = 0;
+    bool bounced = false;
+    for (int i = 0; i < 240; i++) {
+        lx_scene_simulate(s, 1.0f / 60.0f);
+        LxVec3 v = lx_rigidbody_velocity(s, ball);
+        if (v.y > 0.5f) bounced = true;
+        if (bounced) peak = lx_maxf(peak, lx_entity_world_position(s, ball).y);
+    }
+    CHECK(peak > 2.0f, "bouncy ball bounces back up (peak %g)", peak);
+    LxEntity slide = body(s, "Slider", LX_COLLIDER_BOX, lx_v3(-10, 0.5f, 5));
+    LxEntity ice = body(s, "Ice", LX_COLLIDER_BOX, lx_v3(-10, 0.5f, 10));
+    lx_get_collider(s, ice)->friction = 0;
+    lx_get_collider(s, lx_entity_find(s, "Ground"))->friction = 0.6f;
+    lx_rigidbody_set_velocity(s, slide, lx_v3(5, 0, 0));
+    lx_rigidbody_set_velocity(s, ice, lx_v3(5, 0, 0));
+    run(s, 1.5f);
+    float vs = lx_len3(lx_rigidbody_velocity(s, slide)), vi = lx_len3(lx_rigidbody_velocity(s, ice));
+    CHECK(vs < 0.5f && vi > 3.0f, "friction stops a box (v=%g), ice keeps sliding (v=%g)", vs, vi);
+    lx_scene_destroy(s);
+
+    /* events */
+    LxBehaviourDesc ev = {0};
+    ev.name = "PhysicsEvents";
+    ev.on_collision_enter = ev_enter;
+    ev.on_collision_exit = ev_exit;
+    ev.on_trigger_enter = ev_tin;
+    ev.on_trigger_exit = ev_tout;
+    lx_register_behaviour(&ev);
+    s = phys_scene();
+    LxEntity faller = body(s, "Faller", LX_COLLIDER_SPHERE, lx_v3(0, 6, 0));
+    lx_add_behaviour(s, faller, "PhysicsEvents");
+    LxEntity zone = lx_entity_create(s, "Zone");
+    lx_entity_set_position(s, zone, lx_v3(0, 3, 0));
+    LxCollider *zc = lx_add_collider(s, zone, LX_COLLIDER_BOX);
+    zc->size = lx_v3(2, 1, 2);
+    zc->is_trigger = true;
+    g_enter = g_exit = g_trig_in = g_trig_out = 0;
+    g_hit_impulse = 0;
+    run(s, 3);
+    CHECK(g_trig_in == 1 && g_trig_out == 1, "trigger enter/exit once each (%d/%d)", g_trig_in, g_trig_out);
+    CHECK(g_enter >= 1 && g_hit_impulse > 1.0f, "collision enter with an impact impulse (%d, %g)", g_enter, g_hit_impulse);
+    lx_rigidbody_add_impulse(s, faller, lx_v3(0, 8, 0));
+    run(s, 0.3f);
+    CHECK(g_exit >= 1, "collision exit when it jumps off (%d)", g_exit);
+    run(s, 3);   /* let it land again */
+    /* queries */
+    LxRaycastHit hit;
+    CHECK(lx_physics_raycast(s, lx_v3(3, 10, 3), lx_v3(0, -1, 0), 100, LX_ALL_LAYERS, &hit) && NEAR(hit.distance, 10, 0.01f) &&
+              hit.normal.y > 0.99f, "raycast hits the ground (d=%g)", hit.distance);
+    CHECK(!lx_physics_raycast(s, lx_v3(-5, 3, 0.8f), lx_v3(1, 0, 0), 10, LX_ALL_LAYERS, NULL), "raycast ignores triggers");
+    LxEntity found[4];
+    int n = lx_physics_overlap_sphere(s, lx_v3(0, 0.5f, 0), 0.6f, LX_ALL_LAYERS, found, 4);
+    CHECK(n == 2, "overlap sphere finds the ball and the ground (%d)", n);
+    CHECK(lx_physics_sphere_cast(s, lx_v3(-5, 0.5f, 0), 0.4f, lx_v3(1, 0, 0), 20, LX_ALL_LAYERS, &hit) && hit.entity == faller &&
+              NEAR(hit.distance, 4.1f, 0.15f), "sphere cast hits the ball (d=%g)", hit.distance);
+    lx_scene_destroy(s);
+
+    /* character controller: ground, walls, steps, mesh colliders */
+    s = phys_scene();
+    LxEntity wall = lx_entity_create(s, "Wall");
+    lx_entity_set_position(s, wall, lx_v3(5, 1, 0));
+    lx_add_collider(s, wall, LX_COLLIDER_BOX)->size = lx_v3(1, 2, 10);
+    LxEntity stair = lx_entity_create(s, "Step");
+    lx_entity_set_position(s, stair, lx_v3(-4, 0.1f, 0));
+    lx_add_collider(s, stair, LX_COLLIDER_BOX)->size = lx_v3(2, 0.2f, 4);
+    LxEntity ch = lx_entity_create(s, "Player");
+    lx_entity_set_position(s, ch, lx_v3(0, 0.5f, 0));
+    lx_add_character(s, ch);
+    for (int i = 0; i < 30; i++) lx_character_move(s, ch, lx_v3(0, -0.2f, 0));
+    CHECK(lx_character_grounded(s, ch) && NEAR(lx_entity_world_position(s, ch).y, 0, 0.03f), "character lands on the ground (y=%g)",
+          lx_entity_world_position(s, ch).y);
+    for (int i = 0; i < 120; i++) lx_character_move(s, ch, lx_v3(0.1f, -0.1f, 0));
+    LxVec3 cp = lx_entity_world_position(s, ch);
+    CHECK(cp.x < 4.5f - 0.3f && cp.x > 4.0f, "character stops at the wall (x=%g)", cp.x);
+    for (int i = 0; i < 400 && lx_entity_world_position(s, ch).x > -4.0f; i++) lx_character_move(s, ch, lx_v3(-0.05f, -0.05f, 0));
+    for (int i = 0; i < 5; i++) lx_character_move(s, ch, lx_v3(0, -0.05f, 0));
+    cp = lx_entity_world_position(s, ch);
+    CHECK(cp.x < -4 && NEAR(cp.y, 0.2f, 0.05f), "character climbs onto a 20 cm step (x=%g y=%g)", cp.x, cp.y);
+    lx_scene_destroy(s);
+
+    /* mesh collider + slope */
+    s = lx_scene_create("Mesh");
+    LxEntity plane = lx_spawn_primitive(s, LX_PRIM_PLANE, "Plane", lx_v3(0, 0, 0));
+    lx_get_collider(s, plane)->shape = LX_COLLIDER_MESH;
+    lx_entity_set_euler(s, plane, lx_v3(0, 0, -20));
+    LxEntity roll = body(s, "Roller", LX_COLLIDER_SPHERE, lx_v3(0, 2, 0));
+    run(s, 1.5f);
+    LxVec3 rp = lx_entity_world_position(s, roll);
+    CHECK(rp.x > 0.5f && rp.y > -3.0f, "sphere rolls down a tilted mesh collider (x=%g y=%g)", rp.x, rp.y);
+    lx_scene_destroy(s);
+}
+
 static void test_meshes(void) {
     printf("meshes\n");
     LxMesh *cube = lx_asset_mesh("builtin:cube");
@@ -531,6 +683,7 @@ int main(void) {
     test_input();
     test_reflection_probe();
     test_icon_images();
+    test_physics();
     lx_assets_clear();
     lx_jobs_shutdown();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

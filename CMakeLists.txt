@@ -33,6 +33,7 @@ set(LUXORA_SOURCES
   src/gi/bvh.c src/gi/photon_gi.c
   src/audio/audio.c
   src/crowd/crowd.c
+  src/physics/physics.c
   src/scene/scene.c src/scene/serialize.c src/scene/behaviours.c
   src/project/project.c
   src/input/input.c

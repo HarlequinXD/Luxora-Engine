@@ -94,6 +94,50 @@ LX_INLINE LxQuat lx_quat_euler_deg(LxVec3 e) {
     return lx_quat_norm(lx_quat_mul(lx_quat_mul(qy, qx), qz));
 }
 
+LX_INLINE LxQuat lx_quat_conj(LxQuat q) { LxQuat r = {-q.x, -q.y, -q.z, q.w}; return r; }
+/* Inverse of lx_quat_euler_deg (Y, then X, then Z). */
+LX_INLINE LxVec3 lx_quat_to_euler_deg(LxQuat q) {
+    float xx = q.x * q.x, yy = q.y * q.y, zz = q.z * q.z;
+    float xy = q.x * q.y, xz = q.x * q.z, yz = q.y * q.z, wx = q.w * q.x, wy = q.w * q.y, wz = q.w * q.z;
+    float r00 = 1 - 2 * (yy + zz), r02 = 2 * (xz + wy), r10 = 2 * (xy + wz), r11 = 1 - 2 * (xx + zz);
+    float r12 = 2 * (yz - wx), r20 = 2 * (xz - wy), r22 = 1 - 2 * (xx + yy);
+    float sx = -r12;
+    sx = sx > 1 ? 1 : (sx < -1 ? -1 : sx);
+    LxVec3 e;
+    e.x = asinf(sx);
+    if (fabsf(sx) < 0.9999f) { e.y = atan2f(r02, r22); e.z = atan2f(r10, r11); }
+    else { e.y = atan2f(-r20, r00); e.z = 0; }
+    return lx_scale3(e, LX_RAD2DEG);
+}
+/* Rotation whose local X, Y, Z axes are the given orthonormal vectors. */
+LX_INLINE LxQuat lx_quat_from_basis(LxVec3 x, LxVec3 y, LxVec3 z) {
+    float tr = x.x + y.y + z.z;
+    LxQuat q;
+    if (tr > 0) {
+        float s = sqrtf(tr + 1.0f) * 2;
+        q.w = 0.25f * s; q.x = (y.z - z.y) / s; q.y = (z.x - x.z) / s; q.z = (x.y - y.x) / s;
+    } else if (x.x > y.y && x.x > z.z) {
+        float s = sqrtf(1.0f + x.x - y.y - z.z) * 2;
+        q.w = (y.z - z.y) / s; q.x = 0.25f * s; q.y = (y.x + x.y) / s; q.z = (z.x + x.z) / s;
+    } else if (y.y > z.z) {
+        float s = sqrtf(1.0f + y.y - x.x - z.z) * 2;
+        q.w = (z.x - x.z) / s; q.x = (y.x + x.y) / s; q.y = 0.25f * s; q.z = (z.y + y.z) / s;
+    } else {
+        float s = sqrtf(1.0f + z.z - x.x - y.y) * 2;
+        q.w = (x.y - y.x) / s; q.x = (z.x + x.z) / s; q.y = (z.y + y.z) / s; q.z = 0.25f * s;
+    }
+    return lx_quat_norm(q);
+}
+/* Rotation that makes local -Z (forward) point along `forward`. */
+LX_INLINE LxQuat lx_quat_look(LxVec3 forward, LxVec3 up) {
+    LxVec3 z = lx_scale3(lx_norm3(forward), -1.0f);
+    LxVec3 x = lx_cross3(up, z);
+    if (lx_dot3(x, x) < 1e-8f) x = lx_cross3(lx_v3(0, 0, 1), z);
+    x = lx_norm3(x);
+    LxVec3 y = lx_cross3(z, x);
+    return lx_quat_from_basis(x, y, z);
+}
+
 /* ---------------- matrices ---------------- */
 LX_INLINE LxMat4 lx_mat4_identity(void) {
     LxMat4 r = {{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}};

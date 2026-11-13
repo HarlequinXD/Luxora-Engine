@@ -84,6 +84,7 @@ static void defaults(LxProject *p) {
     lx_strcpy(p->startup_scene, sizeof p->startup_scene, "Scenes/Main.lxscene");
     p->graphics = lx_graphics_defaults(2);
     p->audio = lx_audio_defaults();
+    p->physics = lx_physics_defaults();
     p->build.target = lx_platform_current();
     if (p->build.target == LX_PLATFORM_ANDROID) p->build.target = LX_PLATFORM_LINUX;
     p->build.window_width = 1280;
@@ -113,6 +114,9 @@ bool lx_project_save(const LxProject *p) {
     lx_sb_printf(&sb, "reflections = %d\nreflection_resolution = %d\nssr = %d\nssr_steps = %d\nssr_distance = %g\nssr_thickness = %g\nssr_roughness = %g\n",
                  g->reflections_enabled, g->reflection_resolution, g->ssr_enabled, g->ssr_steps, g->ssr_max_distance, g->ssr_thickness,
                  g->ssr_max_roughness);
+    const LxPhysicsSettings *ph = &p->physics;
+    lx_sb_printf(&sb, "\n[physics]\ngravity = %g %g %g\nfixed_timestep = %g\nsolver_iterations = %d\n", ph->gravity.x, ph->gravity.y,
+                 ph->gravity.z, ph->fixed_timestep, ph->solver_iterations);
     lx_sb_printf(&sb, "\n[audio]\nmaster = %g\nbus_sfx = %g\nbus_music = %g\nbus_voice = %g\nbus_ambient = %g\n", a->master_volume,
                  a->bus_volume[0], a->bus_volume[1], a->bus_volume[2], a->bus_volume[3]);
     lx_sb_printf(&sb, "sample_rate = %d\nspeed_of_sound = %g\npropagation = %d\nrays = %d\nbounces = %d\nair_absorption = %g\ndoppler = %d\n",
@@ -178,6 +182,11 @@ bool lx_project_load(LxProject *p, const char *root) {
             else if (!strcmp(k, "ssr_distance")) g->ssr_max_distance = f;
             else if (!strcmp(k, "ssr_thickness")) g->ssr_thickness = f;
             else if (!strcmp(k, "ssr_roughness")) g->ssr_max_roughness = f;
+        } else if (!strcmp(section, "physics")) {
+            LxPhysicsSettings *ph = &p->physics;
+            if (!strcmp(k, "gravity")) ph->gravity = lx_parse_vec3(v);
+            else if (!strcmp(k, "fixed_timestep")) ph->fixed_timestep = f > 0.0005f ? f : 1.0f / 60.0f;
+            else if (!strcmp(k, "solver_iterations")) ph->solver_iterations = n > 0 ? n : 10;
         } else if (!strcmp(section, "audio")) {
             if (!strcmp(k, "master")) a->master_volume = f;
             else if (!strcmp(k, "bus_sfx")) a->bus_volume[LX_BUS_SFX] = f;

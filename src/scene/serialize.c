@@ -50,6 +50,25 @@ static void write_entity(LxStrBuf *sb, const LxScene *s, LxEntity e, int id_of_p
         lx_sb_printf(sb, "crowd.agents = %d\ncrowd.radius = %g\ncrowd.speed = %g\ncrowd.mesh = %s\ncrowd.material = %s\n",
                      c->agent_count, c->area_radius, c->agent_speed, c->mesh, c->material);
     }
+    static const char *shape_names[] = {"box", "sphere", "capsule", "mesh"};
+    if (d->comps & LX_COMP_COLLIDER) {
+        const LxCollider *c = &d->collider;
+        lx_sb_printf(sb, "collider.shape = %s\ncollider.center = %g %g %g\ncollider.size = %g %g %g\ncollider.radius = %g\n",
+                     shape_names[(int)c->shape & 3], c->center.x, c->center.y, c->center.z, c->size.x, c->size.y, c->size.z, c->radius);
+        lx_sb_printf(sb, "collider.height = %g\ncollider.trigger = %d\ncollider.friction = %g\ncollider.bounce = %g\ncollider.layer = %d\n",
+                     c->height, c->is_trigger, c->friction, c->bounciness, c->layer);
+    }
+    if (d->comps & LX_COMP_RIGIDBODY) {
+        const LxRigidbody *b = &d->body;
+        lx_sb_printf(sb, "body.mass = %g\nbody.damping = %g\nbody.angular_damping = %g\nbody.gravity = %d\nbody.kinematic = %d\n"
+                         "body.freeze_rotation = %d\n",
+                     b->mass, b->linear_damping, b->angular_damping, b->use_gravity, b->is_kinematic, b->freeze_rotation);
+    }
+    if (d->comps & LX_COMP_CHARACTER) {
+        const LxCharacterController *c = &d->character;
+        lx_sb_printf(sb, "character.radius = %g\ncharacter.height = %g\ncharacter.step = %g\ncharacter.slope = %g\ncharacter.push = %g\n",
+                     c->radius, c->height, c->step_height, c->slope_limit_deg, c->push_power);
+    }
     if (d->comps & LX_COMP_REFLECTION_PROBE) {
         const LxReflectionProbe *p = &d->probe;
         lx_sb_printf(sb, "probe.size = %g %g %g\nprobe.intensity = %g\nprobe.blend = %g\nprobe.box = %d\nprobe.realtime = %d\n", p->size.x,
@@ -180,6 +199,39 @@ LxScene *lx_scene_deserialize(const char *text) {
             else if (!strcmp(f, "speed")) c->agent_speed = (float)atof(v);
             else if (!strcmp(f, "mesh")) lx_strcpy(c->mesh, sizeof c->mesh, v);
             else if (!strcmp(f, "material")) lx_strcpy(c->material, sizeof c->material, v);
+        } else if (!strncmp(k, "collider.", 9)) {
+            const char *f = k + 9;
+            LxCollider *c = (d->comps & LX_COMP_COLLIDER) ? &d->collider : lx_add_collider(s, cur_e, LX_COLLIDER_BOX);
+            if (!strcmp(f, "shape")) c->shape = !strcmp(v, "sphere") ? LX_COLLIDER_SPHERE : !strcmp(v, "capsule") ? LX_COLLIDER_CAPSULE
+                                              : !strcmp(v, "mesh") ? LX_COLLIDER_MESH : LX_COLLIDER_BOX;
+            else if (!strcmp(f, "center")) c->center = lx_parse_vec3(v);
+            else if (!strcmp(f, "size")) c->size = lx_parse_vec3(v);
+            else if (!strcmp(f, "radius")) c->radius = (float)atof(v);
+            else if (!strcmp(f, "height")) c->height = (float)atof(v);
+            else if (!strcmp(f, "trigger")) c->is_trigger = lx_parse_bool(v);
+            else if (!strcmp(f, "friction")) c->friction = (float)atof(v);
+            else if (!strcmp(f, "bounce")) c->bounciness = (float)atof(v);
+            else if (!strcmp(f, "layer")) c->layer = atoi(v);
+        } else if (!strncmp(k, "body.", 5)) {
+            const char *f = k + 5;
+            bool had_collider = (d->comps & LX_COMP_COLLIDER) != 0;
+            LxRigidbody *b = lx_add_rigidbody(s, cur_e);
+            d = lx_entity_data(s, cur_e);
+            if (!had_collider) d->comps &= ~(uint32_t)LX_COMP_COLLIDER;   /* the file lists its own collider */
+            if (!strcmp(f, "mass")) b->mass = (float)atof(v);
+            else if (!strcmp(f, "damping")) b->linear_damping = (float)atof(v);
+            else if (!strcmp(f, "angular_damping")) b->angular_damping = (float)atof(v);
+            else if (!strcmp(f, "gravity")) b->use_gravity = lx_parse_bool(v);
+            else if (!strcmp(f, "kinematic")) b->is_kinematic = lx_parse_bool(v);
+            else if (!strcmp(f, "freeze_rotation")) b->freeze_rotation = lx_parse_bool(v);
+        } else if (!strncmp(k, "character.", 10)) {
+            const char *f = k + 10;
+            LxCharacterController *c = lx_add_character(s, cur_e);
+            if (!strcmp(f, "radius")) c->radius = (float)atof(v);
+            else if (!strcmp(f, "height")) c->height = (float)atof(v);
+            else if (!strcmp(f, "step")) c->step_height = (float)atof(v);
+            else if (!strcmp(f, "slope")) c->slope_limit_deg = (float)atof(v);
+            else if (!strcmp(f, "push")) c->push_power = (float)atof(v);
         } else if (!strncmp(k, "probe.", 6)) {
             const char *f = k + 6;
             LxReflectionProbe *p = lx_add_reflection_probe(s, cur_e);

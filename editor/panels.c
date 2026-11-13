@@ -19,6 +19,9 @@ uint32_t ed_color_for_icon(UiIcon icon) {
     case UI_ICON_LIGHT: case UI_ICON_SUN: case UI_ICON_BULB: case UI_ICON_SPOT: return UI_HEX(0xf2cc60);
     case UI_ICON_CROWD: return UI_HEX(0xff7b72);
     case UI_ICON_PROBE: return UI_HEX(0x8be9fd);
+    case UI_ICON_COLLIDER: return UI_HEX(0x7ee787);
+    case UI_ICON_RIGIDBODY: return UI_HEX(0xffa657);
+    case UI_ICON_CHARACTER: return UI_HEX(0x79c0ff);
     case UI_ICON_PLAY: return UI_HEX(0x3fb950);
     case UI_ICON_TRASH: case UI_ICON_ERROR: return UI_HEX(0xe5534b);
     case UI_ICON_WARNING: return UI_HEX(0xe3b341);
@@ -35,6 +38,7 @@ UiIcon ed_icon_for_entity(LxScene *s, LxEntity e) {
         return l->type == LX_LIGHT_DIRECTIONAL ? UI_ICON_SUN : l->type == LX_LIGHT_SPOT ? UI_ICON_SPOT : UI_ICON_BULB;
     }
     if (c & LX_COMP_CROWD) return UI_ICON_CROWD;
+    if (c & LX_COMP_CHARACTER) return UI_ICON_CHARACTER;
     if (c & LX_COMP_REFLECTION_PROBE) return UI_ICON_PROBE;
     if (c & LX_COMP_MESH) {
         const char *m = lx_get_mesh(s, e)->mesh;
@@ -47,6 +51,7 @@ UiIcon ed_icon_for_entity(LxScene *s, LxEntity e) {
     }
     if (c & LX_COMP_AUDIO_SOURCE) return UI_ICON_SPEAKER;
     if (c & LX_COMP_AUDIO_LISTENER) return UI_ICON_LISTENER;
+    if (c & LX_COMP_COLLIDER) return UI_ICON_COLLIDER;
     return UI_ICON_ENTITY;
 }
 
@@ -383,6 +388,8 @@ static bool g_open_transform = true, g_open_camera = true, g_open_light = true, 
 static bool g_open_probe = true;
 static void probe_recapture(UiNode *n) { LX_UNUSED(n); lx_reflections_refresh(); ui_notify(ED.ui, "Reflection probes re-capturing"); }
 static const char *LIGHT_TYPES[] = {"Directional", "Point", "Spot"};
+static const char *COLLIDER_SHAPES[] = {"Box", "Sphere", "Capsule", "Mesh (static)"};
+static bool g_open_collider = true, g_open_body = true, g_open_character = true;
 static const char *BUSES[] = {"SFX", "Music", "Voice", "Ambient"};
 static const char *g_behaviour_names[64];
 static int g_behaviour_index;
@@ -566,6 +573,16 @@ static void add_component(UiNode *n) {
     case LX_COMP_BEHAVIOUR: lx_add_behaviour(s, e, lx_behaviour_count() ? lx_behaviour_at(0)->name : "Rotator"); break;
     case LX_COMP_CROWD: lx_add_crowd(s, e, 500); break;
     case LX_COMP_REFLECTION_PROBE: lx_add_reflection_probe(s, e); break;
+    case LX_COMP_COLLIDER: {
+        /* pick the shape that fits the mesh */
+        LxMeshRenderer *m = lx_get_mesh(s, e);
+        LxColliderShape shape = !m ? LX_COLLIDER_BOX : strstr(m->mesh, "sphere") ? LX_COLLIDER_SPHERE
+                                : strstr(m->mesh, "capsule") ? LX_COLLIDER_CAPSULE : strncmp(m->mesh, "builtin:", 8) ? LX_COLLIDER_MESH : LX_COLLIDER_BOX;
+        lx_add_collider(s, e, shape);
+        break;
+    }
+    case LX_COMP_RIGIDBODY: lx_add_rigidbody(s, e); break;
+    case LX_COMP_CHARACTER: lx_add_character(s, e); break;
     }
     ED.inspector_dirty = true;
     ED.hierarchy_hash = 0;
@@ -580,8 +597,9 @@ static void add_component_menu(UiNode *b) {
         {LX_COMP_MESH, "Mesh Renderer", UI_ICON_MESH}, {LX_COMP_LIGHT, "Light", UI_ICON_BULB}, {LX_COMP_CAMERA, "Camera", UI_ICON_CAMERA},
         {LX_COMP_AUDIO_SOURCE, "Audio Source", UI_ICON_SPEAKER}, {LX_COMP_AUDIO_LISTENER, "Audio Listener", UI_ICON_LISTENER},
         {LX_COMP_BEHAVIOUR, "Behaviour (Script)", UI_ICON_BEHAVIOUR}, {LX_COMP_CROWD, "Crowd", UI_ICON_CROWD},
-        {LX_COMP_REFLECTION_PROBE, "Reflection Probe", UI_ICON_PROBE}};
-    for (int i = 0; i < 8; i++) {
+        {LX_COMP_REFLECTION_PROBE, "Reflection Probe", UI_ICON_PROBE}, {LX_COMP_COLLIDER, "Collider", UI_ICON_COLLIDER},
+        {LX_COMP_RIGIDBODY, "Rigidbody", UI_ICON_RIGIDBODY}, {LX_COMP_CHARACTER, "Character Controller", UI_ICON_CHARACTER}};
+    for (int i = 0; i < (int)(sizeof comps / sizeof comps[0]); i++) {
         UiNode *it = ui_menu_item(ED.ui, p, comps[i].name, NULL, add_component);
         it->icon = comps[i].icon;
         it->icon_color = ed_color_for_icon(comps[i].icon);
@@ -735,6 +753,78 @@ static void build_entity_inspector(UiNode *body) {
         } else
             for (int i = 0; i < LX_BEHAVIOUR_PARAMS; i++)
                 if (desc->param_names[i]) float_row(sec, desc->param_names[i], &d->behaviour.params[i], 0.05f, -1e9f, 1e9f);
+    }
+    if (d->comps & LX_COMP_COLLIDER) {
+        sec = comp_section(body, UI_ICON_COLLIDER, d->collider.is_trigger ? "Collider (Trigger)" : "Collider", &g_open_collider,
+                           LX_COMP_COLLIDER);
+        UiNode *row = ed_prop_row(sec, "Shape");
+        UiNode *dd = ui_dropdown(ui, row, (int *)&d->collider.shape, COLLIDER_SHAPES, 4);
+        dd->grow = 1;
+        dd->on_change = structural_changed;
+        ed_vec3_row(sec, "Center", &d->collider.center.x, 0.02f, ed_field_changed);
+        switch (d->collider.shape) {
+        case LX_COLLIDER_BOX: ed_vec3_row(sec, "Size", &d->collider.size.x, 0.02f, ed_field_changed); break;
+        case LX_COLLIDER_SPHERE: float_row(sec, "Radius", &d->collider.radius, 0.01f, 0.001f, 10000)->on_change = ed_field_changed; break;
+        case LX_COLLIDER_CAPSULE:
+            float_row(sec, "Radius", &d->collider.radius, 0.01f, 0.001f, 10000)->on_change = ed_field_changed;
+            float_row(sec, "Height", &d->collider.height, 0.02f, 0.001f, 10000)->on_change = ed_field_changed;
+            break;
+        case LX_COLLIDER_MESH: {
+            UiNode *l = ui_label(ui, sec, (d->comps & LX_COMP_MESH) ? "Uses the Mesh Renderer's triangles. Static scenery only (a Rigidbody "
+                                                                       "simulates it as its bounding box)."
+                                                                     : "Needs a Mesh Renderer.");
+            l->font = UI_FONT_SMALL;
+            l->fg = (d->comps & LX_COMP_MESH) ? t->text_dim : t->warning;
+            l->wrap = true;
+            break;
+        }
+        }
+        UiNode *tr = bool_row(sec, "Is Trigger", &d->collider.is_trigger);
+        tr->on_change = structural_changed;
+        lx_strcpy(tr->tooltip, sizeof tr->tooltip, "Detects things entering it (on_trigger_enter) instead of blocking them");
+        if (!d->collider.is_trigger) {
+            slider_row(sec, "Friction", &d->collider.friction, 0, 1)->on_change = ed_field_changed;
+            slider_row(sec, "Bounciness", &d->collider.bounciness, 0, 1)->on_change = ed_field_changed;
+        }
+        UiNode *lr = ed_prop_row(sec, "Layer");
+        UiNode *ln = ui_int(ui, lr, &d->collider.layer, 0, 31);
+        ln->grow = 1;
+        ln->on_change = ed_field_changed;
+        if (!(d->comps & LX_COMP_RIGIDBODY)) {
+            UiNode *hint = ui_label(ui, sec, "Static: never moves. Add a Rigidbody to make it fall, roll and get pushed.");
+            hint->font = UI_FONT_SMALL;
+            hint->fg = t->text_dim;
+            hint->wrap = true;
+        }
+    }
+    if (d->comps & LX_COMP_RIGIDBODY) {
+        sec = comp_section(body, UI_ICON_RIGIDBODY, "Rigidbody", &g_open_body, LX_COMP_RIGIDBODY);
+        float_row(sec, "Mass (kg)", &d->body.mass, 0.1f, 0.001f, 1e7f)->on_change = ed_field_changed;
+        float_row(sec, "Damping", &d->body.linear_damping, 0.01f, 0, 100)->on_change = ed_field_changed;
+        float_row(sec, "Angular Damping", &d->body.angular_damping, 0.01f, 0, 100)->on_change = ed_field_changed;
+        bool_row(sec, "Use Gravity", &d->body.use_gravity)->on_change = ed_field_changed;
+        UiNode *k = bool_row(sec, "Is Kinematic", &d->body.is_kinematic);
+        k->on_change = ed_field_changed;
+        lx_strcpy(k->tooltip, sizeof k->tooltip, "Moved by your scripts, not by physics; still pushes other bodies");
+        bool_row(sec, "Freeze Rotation", &d->body.freeze_rotation)->on_change = ed_field_changed;
+        if (!(d->comps & (LX_COMP_COLLIDER | LX_COMP_CHARACTER))) {
+            UiNode *w = ui_label(ui, sec, "Needs a Collider to collide with anything.");
+            w->icon = UI_ICON_WARNING;
+            w->icon_color = t->warning;
+            w->font = UI_FONT_SMALL;
+        }
+    }
+    if (d->comps & LX_COMP_CHARACTER) {
+        sec = comp_section(body, UI_ICON_CHARACTER, "Character Controller", &g_open_character, LX_COMP_CHARACTER);
+        float_row(sec, "Radius", &d->character.radius, 0.01f, 0.05f, 100)->on_change = ed_field_changed;
+        float_row(sec, "Height", &d->character.height, 0.02f, 0.1f, 100)->on_change = ed_field_changed;
+        float_row(sec, "Step Height", &d->character.step_height, 0.01f, 0, 10)->on_change = ed_field_changed;
+        slider_row(sec, "Slope Limit", &d->character.slope_limit_deg, 1, 89)->on_change = ed_field_changed;
+        float_row(sec, "Push Power", &d->character.push_power, 0.05f, 0, 100)->on_change = ed_field_changed;
+        UiNode *hint = ui_label(ui, sec, "Move it from a script with lx_character_move(). The origin is at the feet.");
+        hint->font = UI_FONT_SMALL;
+        hint->fg = t->text_dim;
+        hint->wrap = true;
     }
     if (d->comps & LX_COMP_REFLECTION_PROBE) {
         sec = comp_section(body, UI_ICON_PROBE, "Reflection Probe", &g_open_probe, LX_COMP_REFLECTION_PROBE);

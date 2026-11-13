@@ -213,6 +213,15 @@ typedef struct LxBehaviourInstance {
     const LxBehaviourDesc *desc;
 } LxBehaviourInstance;
 
+/* runtime-only physics bookkeeping per entity */
+typedef struct LxPhysState {
+    LxVec3 force, torque;       /* accumulated until the next step */
+    LxVec3 last_pos;            /* pose written by the last step (detects scripts teleporting bodies) */
+    LxQuat last_rot;
+    float sleep_timer;
+    bool asleep, has_last;
+} LxPhysState;
+
 typedef struct LxEntityData {
     uint32_t generation;
     bool alive, active;
@@ -229,6 +238,10 @@ typedef struct LxEntityData {
     LxBehaviourRef behaviour;
     LxCrowdComponent crowd;
     LxReflectionProbe probe;
+    LxCollider collider;
+    LxRigidbody body;
+    LxCharacterController character;
+    LxPhysState phys;
     LxBehaviourInstance binst;
     LxCrowd *crowd_sim;
     int audio_voice;  /* runtime voice index or -1 */
@@ -249,7 +262,18 @@ struct LxScene {
     LxEntity *order_cache;    /* alive entities in creation order */
     int order_count, order_cap;
     bool order_dirty;
+    struct LxPhysicsWorld *physics;  /* created when simulation starts */
+    float last_dt;                   /* last simulate() delta */
 };
+
+/* physics (src/physics) */
+void lx_physics_simulate(LxScene *s, float dt);   /* fixed steps + events; called by lx_scene_simulate */
+void lx_physics_world_free(LxScene *s);
+/* behaviours (src/scene/behaviours.c): physics events */
+void lx_behaviour_collision_enter(LxScene *s, LxEntity self, const LxCollision *c);
+void lx_behaviour_collision_exit(LxScene *s, LxEntity self, LxEntity other);
+void lx_behaviour_trigger(LxScene *s, LxEntity self, LxEntity other, bool enter);
+void lx_behaviour_fixed_update(LxScene *s, float fixed_dt);
 
 LxEntityData *lx_entity_data(const LxScene *s, LxEntity e);
 #define LX_INDEX_BITS 20u

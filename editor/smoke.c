@@ -182,6 +182,21 @@ static void s_set1(void) { s_settings(1); }
 static void s_set2(void) { s_settings(2); }
 static void s_set3(void) { s_settings(3); }
 static void s_set4(void) { s_settings(4); }
+static void s_set5(void) { s_settings(5); }
+static LxEntity g_phys_cube, g_player;
+static float g_cube_y0;
+static void s_physics_objects(void) {
+    g_phys_cube = ed_create("Physics Cube");
+    g_player = ed_create("Character");
+    g_cube_y0 = lx_entity_world_position(ED.scene, g_phys_cube).y;
+    SMOKE_CHECK(lx_get_rigidbody(ED.scene, g_phys_cube) && lx_get_collider(ED.scene, g_phys_cube), "Physics Cube has a collider and a rigidbody");
+    SMOKE_CHECK(lx_get_character(ED.scene, g_player) != NULL, "Character has a character controller");
+    ed_select(g_phys_cube);   /* inspector shows the physics sections, viewport the wireframe */
+}
+static void s_physics_fell(void) {
+    float y = lx_entity_world_position(ED.scene, g_phys_cube).y;
+    SMOKE_CHECK(y < g_cube_y0 - 0.01f, "the physics cube falls in play mode (%.2f -> %.2f)", g_cube_y0, y);
+}
 static void s_build_settings(void) { ui_close_modal(ED.ui); ed_build_settings(); }
 static void s_about(void) { ui_close_modal(ED.ui); ed_about(); }
 static void s_shortcuts(void) { ui_close_modal(ED.ui); ed_shortcuts_help(); }
@@ -241,6 +256,7 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {46, s_set2, "project settings: sound"},
     {52, s_set3, "project settings: input"},
     {60, s_set4, "project settings: platforms"},
+    {63, s_set5, "project settings: physics"},
     {66, s_build_settings, "build settings"},
     {72, s_about, "about"},
     {78, s_shortcuts, "shortcuts"},
@@ -255,7 +271,9 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {120, s_content_root, "content browser root"},
     {124, s_menu, "create menu"},
     {128, s_close, "close menus"},
+    {130, s_physics_objects, "create physics objects"},
     {132, s_play, "play"},
+    {149, s_physics_fell, "physics runs in play mode"},
     {150, s_pause, "pause"},
     {154, s_step, "step"},
     {158, s_game_view, "game view"},

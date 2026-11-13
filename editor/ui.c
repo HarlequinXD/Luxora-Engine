@@ -528,6 +528,29 @@ void ui_draw_icon(UiCtx *ui, UiIcon icon, float x, float y, float s, uint32_t c)
         ui_draw_line(ui, P(0.27f, 0.27f), P(0.73f, 0.73f), s * 0.075f, c);
         ui_draw_line(ui, P(0.73f, 0.27f), P(0.27f, 0.73f), s * 0.075f, c);
         break;
+    case UI_ICON_COLLIDER: {
+        /* wireframe cube */
+        float a = 0.22f, b = 0.62f, o = 0.16f;
+        ui_draw_border(ui, x + s * a, y + s * (a + o), s * (b - a + 0.0f), s * (b - a), c, 0, t);
+        ui_draw_border(ui, x + s * (a + o), y + s * a, s * (b - a), s * (b - a), c2, 0, t);
+        ui_draw_line(ui, P(a, a + o), P(a + o, a), t, c2);
+        ui_draw_line(ui, P(b, a + o), P(b + o, a), t, c2);
+        ui_draw_line(ui, P(a, b + o), P(a + o, b), t, c2);
+        ui_draw_line(ui, P(b, b + o), P(b + o, b), t, c2);
+        break;
+    }
+    case UI_ICON_RIGIDBODY:
+        /* a falling ball with motion lines */
+        ui_draw_circle(ui, x + s * 0.56f, y + s * 0.62f, s * 0.25f, c, 20);
+        ui_draw_circle(ui, x + s * 0.49f, y + s * 0.55f, s * 0.07f, UI_RGBA(255, 255, 255, 150), 10);
+        ui_draw_line(ui, P(0.22f, 0.12f), P(0.22f, 0.4f), t, c2);
+        ui_draw_line(ui, P(0.4f, 0.08f), P(0.4f, 0.3f), t, c2);
+        ui_draw_line(ui, P(0.58f, 0.1f), P(0.58f, 0.28f), t, c2);
+        break;
+    case UI_ICON_CHARACTER:
+        ui_draw_circle(ui, x + s * 0.5f, y + s * 0.22f, s * 0.13f, c, 16);
+        ui_draw_rect(ui, x + s * 0.34f, y + s * 0.4f, s * 0.32f, s * 0.48f, c, s * 0.15f);
+        break;
     case UI_ICON_PROBE: {
         /* a mirror ball: dark sphere reflecting a bright horizon, with a highlight */
         float cx = x + s * 0.5f, cy = y + s * 0.5f, r = s * 0.4f;

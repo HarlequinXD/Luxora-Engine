@@ -144,8 +144,56 @@ static void ensure_crowd(LxScene *s, LxEntityData *d) {
     }
 }
 
+/* ---- calling into behaviours from physics ---- */
+static const LxBehaviourDesc *started_desc(LxScene *s, LxEntity e, LxBehaviourCtx *ctx) {
+    LxEntityData *d = lx_entity_data(s, e);
+    if (!d || !d->active || !(d->comps & LX_COMP_BEHAVIOUR) || !d->binst.desc) return NULL;
+    ctx->scene = s;
+    ctx->self = e;
+    ctx->state = d->binst.state;
+    ctx->params = d->behaviour.params;
+    return d->binst.desc;
+}
+void lx_behaviour_collision_enter(LxScene *s, LxEntity self, const LxCollision *c) {
+    LxBehaviourCtx ctx;
+    const LxBehaviourDesc *d = started_desc(s, self, &ctx);
+    if (d && d->on_collision_enter) d->on_collision_enter(&ctx, c);
+}
+void lx_behaviour_collision_exit(LxScene *s, LxEntity self, LxEntity other) {
+    LxBehaviourCtx ctx;
+    const LxBehaviourDesc *d = started_desc(s, self, &ctx);
+    if (d && d->on_collision_exit) d->on_collision_exit(&ctx, other);
+}
+void lx_behaviour_trigger(LxScene *s, LxEntity self, LxEntity other, bool enter) {
+    LxBehaviourCtx ctx;
+    const LxBehaviourDesc *d = started_desc(s, self, &ctx);
+    if (!d) return;
+    if (enter && d->on_trigger_enter) d->on_trigger_enter(&ctx, other);
+    if (!enter && d->on_trigger_exit) d->on_trigger_exit(&ctx, other);
+}
+void lx_behaviour_fixed_update(LxScene *s, float fixed_dt) {
+    for (int i = 1; i < s->count; i++) {
+        LxEntityData *d = &s->entities[i];
+        if (!d->alive || !d->active || !(d->comps & LX_COMP_BEHAVIOUR) || !d->binst.started || !d->binst.desc ||
+            !d->binst.desc->on_fixed_update) continue;
+        LxBehaviourCtx ctx = {s, lx_entity_make((uint32_t)i, d->generation & 0xfffu), d->binst.state, d->behaviour.params};
+        d->binst.desc->on_fixed_update(&ctx, fixed_dt);
+    }
+}
+
+static void late_update(LxScene *s, float dt) {
+    for (int i = 1; i < s->count; i++) {
+        LxEntityData *d = &s->entities[i];
+        if (!d->alive || !d->active || !(d->comps & LX_COMP_BEHAVIOUR) || !d->binst.started || !d->binst.desc ||
+            !d->binst.desc->on_late_update) continue;
+        LxBehaviourCtx ctx = {s, lx_entity_make((uint32_t)i, d->generation & 0xfffu), d->binst.state, d->behaviour.params};
+        d->binst.desc->on_late_update(&ctx, dt);
+    }
+}
+
 void lx_scene_simulate(LxScene *s, float dt) {
     s->simulating = true;
+    s->last_dt = dt;
     int n = s->count;
     for (int i = 1; i < n; i++) {
         LxEntityData *d = &s->entities[i];
@@ -189,6 +237,9 @@ void lx_scene_simulate(LxScene *s, float dt) {
         }
     }
     lx_scene_update_transforms(s);
+    lx_physics_simulate(s, dt);
+    late_update(s, dt);
+    lx_scene_update_transforms(s);
 }
 
 void lx_scene_stop_simulation(LxScene *s) {
@@ -201,6 +252,8 @@ void lx_scene_stop_simulation(LxScene *s) {
         }
         lx_free(d->binst.state);
         memset(&d->binst, 0, sizeof d->binst);
+        memset(&d->phys, 0, sizeof d->phys);
     }
+    lx_physics_world_free(s);
     s->simulating = false;
 }

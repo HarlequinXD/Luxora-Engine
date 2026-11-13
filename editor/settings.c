@@ -3,13 +3,15 @@
 #include "editor.h"
 
 static int g_category;
-static UiNode *g_settings_body, *g_nav[5];
+#define SETTINGS_PAGES 6
+static UiNode *g_settings_body, *g_nav[SETTINGS_PAGES];
 static bool g_dummy_open = true;
 
 static void save_project(UiNode *n) {
     LX_UNUSED(n);
     *lx_graphics_settings() = ED.project.graphics;
     *lx_audio_settings() = ED.project.audio;
+    *lx_physics_settings() = ED.project.physics;
     lx_renderer_set_vsync(ED.project.graphics.vsync);
     lx_project_save(&ED.project);
     ed_update_title();
@@ -151,6 +153,70 @@ static void build_graphics(UiNode *b) {
     s = ed_section(b, UI_ICON_MESH, "Geometry", &g_dummy_open, NULL);
     row_bool(s, "Automatic LODs", &g->lod_enabled);
     row_slider(s, "LOD Bias", &g->lod_bias, 0.2f, 3);
+}
+
+/* ---------------- Physics ---------------- */
+void ed_settings_rebuild(void);
+static int g_phys_hz;
+static bool g_layers[8][8];
+static void phys_rate_changed(UiNode *n) {
+    if (g_phys_hz < 10) g_phys_hz = 10;
+    ED.project.physics.fixed_timestep = 1.0f / (float)g_phys_hz;
+    save_project(n);
+}
+static void layer_changed(UiNode *n) {
+    int i = (int)n->tag / 8, j = (int)n->tag % 8;
+    g_layers[j][i] = g_layers[i][j];   /* collisions are symmetric */
+    uint32_t *mask = ED.project.physics.layer_mask;
+    for (int a = 0; a < 8; a++)
+        for (int b = 0; b < 8; b++) {
+            if (g_layers[a][b]) mask[a] |= 1u << b;
+            else mask[a] &= ~(1u << b);
+        }
+    save_project(n);
+    ed_settings_rebuild();
+}
+static void build_physics(UiNode *b) {
+    UiCtx *ui = ED.ui;
+    LxPhysicsSettings *p = &ED.project.physics;
+    UiNode *s = ed_section(b, UI_ICON_RIGIDBODY, "Simulation", &g_dummy_open, NULL);
+    ed_vec3_row(s, "Gravity (m/s²)", &p->gravity.x, 0.05f, save_project);
+    g_phys_hz = (int)(1.0f / (p->fixed_timestep > 0 ? p->fixed_timestep : 1.0f / 60.0f) + 0.5f);
+    row_int(s, "Physics Rate (Hz)", &g_phys_hz, 10, 1000)->on_change = phys_rate_changed;
+    row_int(s, "Solver Iterations", &p->solver_iterations, 1, 100);
+    note(s, UI_ICON_INFO, "Higher rates and more iterations make tall stacks and fast objects more stable at a CPU cost. "
+                          "60 Hz with 10 iterations suits most games.");
+    s = ed_section(b, UI_ICON_COLLIDER, "Layer Collisions (layers 0-7)", &g_dummy_open, NULL);
+    note(s, UI_ICON_INFO, "A Collider's Layer decides what it can hit. Untick a box to make two layers pass through each other. "
+                          "Queries take a layer mask too.");
+    UiNode *head = ui_box(ui, s, UI_ROW);
+    head->h = 22;
+    UiNode *pad = ui_label(ui, head, "");
+    pad->w = 70;
+    for (int j = 0; j < 8; j++) {
+        char t[8];
+        snprintf(t, sizeof t, "%d", j);
+        UiNode *l = ui_label(ui, head, t);
+        l->w = 32;
+        l->center_text = true;
+    }
+    for (int i = 0; i < 8; i++) {
+        UiNode *row = ui_box(ui, s, UI_ROW);
+        row->h = 26;
+        char t[16];
+        snprintf(t, sizeof t, "Layer %d", i);
+        UiNode *l = ui_label(ui, row, t);
+        l->w = 70;
+        for (int j = 0; j < 8; j++) {
+            g_layers[i][j] = (p->layer_mask[i] >> j) & 1u;
+            UiNode *spacer = ui_box(ui, row, UI_ROW);
+            spacer->w = 32;
+            if (j < i) continue;   /* the matrix is symmetric: show one half */
+            UiNode *cb = ui_checkbox(ui, spacer, "", &g_layers[i][j]);
+            cb->tag = i * 8 + j;
+            cb->on_change = layer_changed;
+        }
+    }
 }
 
 /* ---------------- Sound ---------------- */
@@ -660,12 +726,13 @@ static void build_input(UiNode *b) {
 static void build_category(void) {
     ui_clear(ED.ui, g_settings_body);
     g_input_detail = g_input_list = NULL;
-    for (int i = 0; i < 5; i++) if (g_nav[i]) g_nav[i]->selected = i == g_category;
+    for (int i = 0; i < SETTINGS_PAGES; i++) if (g_nav[i]) g_nav[i]->selected = (int)g_nav[i]->tag == g_category;
     switch (g_category) {
     case 0: build_general(g_settings_body); break;
     case 1: build_graphics(g_settings_body); break;
     case 2: build_sound(g_settings_body); break;
     case 3: build_input(g_settings_body); break;
+    case 5: build_physics(g_settings_body); break;
     default: build_platforms(g_settings_body); break;
     }
 }
@@ -685,16 +752,18 @@ void ed_project_settings(int category) {
     UiNode *nav = ui_box(ui, body, UI_COL);
     nav->w = 190;
     nav->gap = 2;
-    static const char *names[] = {"General", "Graphics", "Sound", "Input Manager", "Platforms"};
-    static const UiIcon icons[] = {UI_ICON_APP, UI_ICON_MONITOR, UI_ICON_SPEAKER, UI_ICON_GAMEPAD, UI_ICON_PHONE};
-    for (int i = 0; i < 5; i++) {
+    /* page ids stay stable (menus open pages by id); Physics is id 5 but listed after Sound */
+    static const char *names[] = {"General", "Graphics", "Sound", "Physics", "Input Manager", "Platforms"};
+    static const UiIcon icons[] = {UI_ICON_APP, UI_ICON_MONITOR, UI_ICON_SPEAKER, UI_ICON_RIGIDBODY, UI_ICON_GAMEPAD, UI_ICON_PHONE};
+    static const int ids[] = {0, 1, 2, 5, 3, 4};
+    for (int i = 0; i < SETTINGS_PAGES; i++) {
         UiNode *b = ui_button(ui, nav, names[i], nav_pick);
         b->icon = icons[i];
         b->icon_color = ed_color_for_icon(icons[i]);
         b->center_text = false;
         b->bg = 0;
         b->h = 32;
-        b->tag = i;
+        b->tag = ids[i];
         b->bg_active = t->selection;
         g_nav[i] = b;
     }

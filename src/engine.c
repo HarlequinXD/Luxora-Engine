@@ -23,6 +23,7 @@ void lx_engine_set_project(const LxProject *p) {
     lx_assets_set_root(p->assets);
     *lx_graphics_settings() = p->graphics;
     *lx_audio_settings() = p->audio;
+    *lx_physics_settings() = p->physics;
     char input[LX_PATH_MAX];
     lx_path_join(input, sizeof input, p->root, "input.lxinput");
     if (!lx_input_map_load(lx_input_map(), input)) lx_input_map_defaults(lx_input_map());

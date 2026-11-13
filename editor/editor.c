@@ -527,6 +527,28 @@ LxEntity ed_create(const char *what) {
         if (!strcmp(what, prims[i])) {
             e = lx_spawn_primitive(s, (LxPrimitive)i, prims[i], lx_v3(at.x, i == 2 ? 0 : (i >= 3 ? 1.0f : 0.5f), at.z));
         }
+    if (!e && !strcmp(what, "Physics Cube")) {
+        e = lx_spawn_primitive(s, LX_PRIM_CUBE, "Physics Cube", lx_v3(at.x, 2.5f, at.z));
+        lx_add_rigidbody(s, e);
+    } else if (!e && !strcmp(what, "Physics Sphere")) {
+        e = lx_spawn_primitive(s, LX_PRIM_SPHERE, "Physics Sphere", lx_v3(at.x, 2.5f, at.z));
+        lx_add_rigidbody(s, e);
+    } else if (!e && !strcmp(what, "Character")) {
+        /* a character controller with a capsule body to see it by (origin at the feet) */
+        e = lx_entity_create(s, "Player");
+        lx_entity_set_position(s, e, lx_v3(at.x, 0, at.z));
+        lx_add_character(s, e);
+        LxEntity bodyv = lx_spawn_primitive(s, LX_PRIM_CAPSULE, "Body", lx_v3(0, 0.9f, 0));
+        lx_remove_component(s, bodyv, LX_COMP_COLLIDER);
+        lx_entity_set_scale(s, bodyv, lx_v3(0.7f, 0.9f, 0.7f));
+        lx_entity_set_parent(s, bodyv, e);
+    } else if (!e && !strcmp(what, "Trigger Zone")) {
+        e = lx_entity_create(s, "Trigger Zone");
+        lx_entity_set_position(s, e, lx_v3(at.x, 1.0f, at.z));
+        LxCollider *c = lx_add_collider(s, e, LX_COLLIDER_BOX);
+        c->size = lx_v3(4, 2, 4);
+        c->is_trigger = true;
+    }
     if (!e) {
         e = lx_entity_create(s, what);
         lx_entity_set_position(s, e, lx_v3(at.x, 1.5f, at.z));
@@ -745,6 +767,12 @@ static void create_items(UiNode *p) {
     item(p, "Point Light", NULL, UI_ICON_BULB, m_create);
     item(p, "Spot Light", NULL, UI_ICON_SPOT, m_create);
     item(p, "Reflection Probe", NULL, UI_ICON_PROBE, m_create);
+    ui_menu_separator(ED.ui, p);
+    ui_menu_separator(ED.ui, p);
+    item(p, "Character", NULL, UI_ICON_CHARACTER, m_create);
+    item(p, "Physics Cube", NULL, UI_ICON_RIGIDBODY, m_create);
+    item(p, "Physics Sphere", NULL, UI_ICON_RIGIDBODY, m_create);
+    item(p, "Trigger Zone", NULL, UI_ICON_COLLIDER, m_create);
     ui_menu_separator(ED.ui, p);
     item(p, "Audio Source", NULL, UI_ICON_SPEAKER, m_create);
     item(p, "Crowd", NULL, UI_ICON_CROWD, m_create);

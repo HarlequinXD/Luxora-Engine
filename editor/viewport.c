@@ -414,6 +414,74 @@ static void draw_gizmo(UiCtx *ui) {
     else ui_draw_ring(ui, sc.x, sc.y, 7 * ui_scale(ui), 2, cc, 16);
 }
 
+/* ---- collider wireframes for the selection ---- */
+static void wire_line(UiCtx *ui, LxVec3 a, LxVec3 b, uint32_t col) {
+    LxVec2 sa, sb;
+    if (to_screen(a, &sa) && to_screen(b, &sb)) ui_draw_line(ui, sa.x, sa.y, sb.x, sb.y, 1.5f * ui_scale(ui), col);
+}
+static void wire_circle(UiCtx *ui, LxVec3 c, LxVec3 u, LxVec3 v, float r, float a0, float a1, uint32_t col) {
+    const int N = 32;
+    LxVec3 prev = lx_add3(c, lx_add3(lx_scale3(u, cosf(a0) * r), lx_scale3(v, sinf(a0) * r)));
+    for (int i = 1; i <= N; i++) {
+        float a = a0 + (a1 - a0) * (float)i / N;
+        LxVec3 p = lx_add3(c, lx_add3(lx_scale3(u, cosf(a) * r), lx_scale3(v, sinf(a) * r)));
+        wire_line(ui, prev, p, col);
+        prev = p;
+    }
+}
+static void wire_capsule(UiCtx *ui, LxVec3 c, LxVec3 ax, LxVec3 ay, LxVec3 az, float r, float hseg, uint32_t col) {
+    LxVec3 top = lx_madd3(c, ay, hseg), bot = lx_madd3(c, ay, -hseg);
+    wire_circle(ui, top, ax, az, r, 0, 2 * LX_PI, col);
+    wire_circle(ui, bot, ax, az, r, 0, 2 * LX_PI, col);
+    LxVec3 sides[4] = {ax, lx_scale3(ax, -1), az, lx_scale3(az, -1)};
+    for (int i = 0; i < 4; i++) wire_line(ui, lx_madd3(top, sides[i], r), lx_madd3(bot, sides[i], r), col);
+    wire_circle(ui, top, ax, ay, r, 0, LX_PI, col);
+    wire_circle(ui, top, az, ay, r, 0, LX_PI, col);
+    wire_circle(ui, bot, ax, ay, r, LX_PI, 2 * LX_PI, col);
+    wire_circle(ui, bot, az, ay, r, LX_PI, 2 * LX_PI, col);
+}
+static void draw_collider(UiCtx *ui, LxEntity e) {
+    LxMat4 w = lx_entity_world_matrix(ED.scene, e);
+    LxVec3 c0 = lx_v3(w.m[0], w.m[1], w.m[2]), c1 = lx_v3(w.m[4], w.m[5], w.m[6]), c2 = lx_v3(w.m[8], w.m[9], w.m[10]);
+    LxVec3 sc = lx_v3(lx_len3(c0), lx_len3(c1), lx_len3(c2));
+    if (sc.x < 1e-6f || sc.y < 1e-6f || sc.z < 1e-6f) return;
+    LxVec3 ax = lx_scale3(c0, 1 / sc.x), ay = lx_scale3(c1, 1 / sc.y), az = lx_scale3(c2, 1 / sc.z);
+    LxVec3 pos = lx_v3(w.m[12], w.m[13], w.m[14]);
+    LxCharacterController *ch = lx_get_character(ED.scene, e);
+    if (ch) {
+        float r = ch->radius * lx_maxf(sc.x, sc.z), h = lx_maxf(ch->height * sc.y, 2 * r);
+        wire_capsule(ui, lx_madd3(pos, lx_v3(0, 1, 0), h * 0.5f), lx_v3(1, 0, 0), lx_v3(0, 1, 0), lx_v3(0, 0, 1), r, h * 0.5f - r,
+                     UI_RGBA(121, 192, 255, 220));
+    }
+    LxCollider *col = lx_get_collider(ED.scene, e);
+    if (!col) return;
+    uint32_t color = col->is_trigger ? UI_RGBA(242, 204, 96, 220) : UI_RGBA(126, 231, 135, 220);
+    LxVec3 c = lx_mat4_point(w, col->center);
+    switch (col->shape) {
+    case LX_COLLIDER_BOX: {
+        LxVec3 h = lx_v3(col->size.x * sc.x * 0.5f, col->size.y * sc.y * 0.5f, col->size.z * sc.z * 0.5f), v[8];
+        for (int i = 0; i < 8; i++)
+            v[i] = lx_add3(c, lx_add3(lx_scale3(ax, (i & 1) ? h.x : -h.x), lx_add3(lx_scale3(ay, (i & 2) ? h.y : -h.y), lx_scale3(az, (i & 4) ? h.z : -h.z))));
+        static const int edges[12][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3}, {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+        for (int i = 0; i < 12; i++) wire_line(ui, v[edges[i][0]], v[edges[i][1]], color);
+        break;
+    }
+    case LX_COLLIDER_SPHERE: {
+        float r = col->radius * lx_maxf(sc.x, lx_maxf(sc.y, sc.z));
+        wire_circle(ui, c, ax, ay, r, 0, 2 * LX_PI, color);
+        wire_circle(ui, c, ax, az, r, 0, 2 * LX_PI, color);
+        wire_circle(ui, c, ay, az, r, 0, 2 * LX_PI, color);
+        break;
+    }
+    case LX_COLLIDER_CAPSULE: {
+        float r = col->radius * lx_maxf(sc.x, sc.z);
+        wire_capsule(ui, c, ax, ay, az, r, lx_maxf(col->height * sc.y * 0.5f - r, 0), color);
+        break;
+    }
+    default: break;   /* mesh colliders match the mesh you already see */
+    }
+}
+
 /* the influence box of a selected reflection probe */
 static void draw_probe_box(UiCtx *ui, LxEntity e, LxVec3 c) {
     LxReflectionProbe *p = lx_get_reflection_probe(ED.scene, e);
@@ -431,6 +499,9 @@ static void draw_probe_box(UiCtx *ui, LxEntity e, LxVec3 c) {
 }
 
 static void draw_icons(UiCtx *ui) {
+    if (ED.selected && lx_entity_valid(ED.scene, ED.selected) &&
+        (lx_entity_components(ED.scene, ED.selected) & (LX_COMP_COLLIDER | LX_COMP_CHARACTER)))
+        draw_collider(ui, ED.selected);
     if (!ED.show_icons) return;
     int n = lx_scene_entity_count(ED.scene);
     float sz = 22 * ui_scale(ui);

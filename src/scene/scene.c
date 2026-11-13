@@ -57,12 +57,14 @@ LxScene *lx_scene_create_default(const char *name) {
     LxEntity cube = lx_entity_create(s, "Cube");
     lx_entity_set_position(s, cube, lx_v3(0, 0.5f, 0));
     lx_add_mesh(s, cube, "builtin:cube", "builtin:default");
+    lx_add_collider(s, cube, LX_COLLIDER_BOX);
     return s;
 }
 
 void lx_scene_destroy(LxScene *s) {
     if (!s) return;
     lx_scene_stop_simulation(s);
+    lx_physics_world_free(s);
     for (int i = 1; i < s->count; i++)
         if (s->entities[i].crowd_sim) lx_crowd_destroy(s->entities[i].crowd_sim);
     lx_free(s->entities);
@@ -165,6 +167,10 @@ static void copy_components(LxEntityData *dst, const LxEntityData *src) {
     dst->audio = src->audio;
     dst->behaviour = src->behaviour;
     dst->crowd = src->crowd;
+    dst->probe = src->probe;
+    dst->collider = src->collider;
+    dst->body = src->body;
+    dst->character = src->character;
 }
 
 static LxEntity duplicate_rec(LxScene *s, LxEntity e, LxEntity parent) {
@@ -430,6 +436,101 @@ LxCrowdComponent *lx_add_crowd(LxScene *s, LxEntity e, int agents) {
     return &d->crowd;
 }
 
+LxCollider *lx_add_collider(LxScene *s, LxEntity e, LxColliderShape shape) {
+    LxEntityData *d = lx_entity_data(s, e);
+    if (!d) return NULL;
+    LxCollider *c = &d->collider;
+    memset(c, 0, sizeof *c);
+    c->shape = shape;
+    c->friction = 0.6f;
+    c->size = lx_v3(1, 1, 1);
+    c->radius = 0.5f;
+    c->height = 2.0f;
+    if (d->comps & LX_COMP_MESH) {
+        /* fit the mesh */
+        LxAabb b = lx_asset_mesh(d->mesh.mesh)->bounds;
+        LxVec3 ext = lx_aabb_extent(b);
+        c->center = lx_aabb_center(b);
+        c->size = lx_scale3(ext, 2.0f);
+        if (c->size.y < 0.1f) { c->center.y -= (0.1f - c->size.y) * 0.5f; c->size.y = 0.1f; }   /* planes: a thin slab below the surface */
+        c->radius = shape == LX_COLLIDER_SPHERE ? lx_maxf(ext.x, lx_maxf(ext.y, ext.z)) : lx_maxf(ext.x, ext.z);
+        c->height = ext.y * 2.0f;
+    }
+    d->comps |= LX_COMP_COLLIDER;
+    return c;
+}
+
+LxRigidbody *lx_add_rigidbody(LxScene *s, LxEntity e) {
+    LxEntityData *d = lx_entity_data(s, e);
+    if (!d) return NULL;
+    if (!(d->comps & LX_COMP_RIGIDBODY)) {
+        memset(&d->body, 0, sizeof d->body);
+        d->body.mass = 1.0f;
+        d->body.angular_damping = 0.05f;
+        d->body.use_gravity = true;
+        memset(&d->phys, 0, sizeof d->phys);
+    }
+    d->comps |= LX_COMP_RIGIDBODY;
+    if (!(d->comps & (LX_COMP_COLLIDER | LX_COMP_CHARACTER)))
+        lx_add_collider(s, e, (d->comps & LX_COMP_MESH) && strstr(d->mesh.mesh, "sphere") ? LX_COLLIDER_SPHERE : LX_COLLIDER_BOX);
+    return &d->body;
+}
+
+LxCharacterController *lx_add_character(LxScene *s, LxEntity e) {
+    LxEntityData *d = lx_entity_data(s, e);
+    if (!d) return NULL;
+    if (!(d->comps & LX_COMP_CHARACTER)) {
+        LxCharacterController *c = &d->character;
+        memset(c, 0, sizeof *c);
+        c->radius = 0.35f;
+        c->height = 1.8f;
+        c->step_height = 0.35f;
+        c->slope_limit_deg = 50.0f;
+        c->push_power = 1.0f;
+    }
+    d->comps |= LX_COMP_CHARACTER;
+    return &d->character;
+}
+
+LxQuat lx_entity_world_rotation(LxScene *s, LxEntity e) {
+    LxEntityData *d = lx_entity_data(s, e);
+    if (!d) return lx_quat_identity();
+    LxQuat q = d->rotation;
+    for (LxEntity p = d->parent; p; p = lx_entity_data(s, p)->parent) q = lx_quat_mul(lx_entity_data(s, p)->rotation, q);
+    return q;
+}
+
+void lx_entity_set_rotation(LxScene *s, LxEntity e, LxQuat q) {
+    LxEntityData *d = lx_entity_data(s, e);
+    if (!d) return;
+    d->rotation = lx_quat_norm(q);
+    d->euler = lx_quat_to_euler_deg(d->rotation);
+    touch_static(s, d);
+}
+
+void lx_entity_set_world_pose(LxScene *s, LxEntity e, LxVec3 pos, LxQuat rot) {
+    LxEntityData *d = lx_entity_data(s, e);
+    if (!d) return;
+    if (!d->parent) {
+        d->position = pos;
+        d->rotation = lx_quat_norm(rot);
+    } else {
+        LxMat4 pw = lx_entity_world_matrix(s, d->parent);
+        d = lx_entity_data(s, e);
+        d->position = lx_mat4_point(lx_mat4_inverse(pw), pos);
+        d->rotation = lx_quat_norm(lx_quat_mul(lx_quat_conj(lx_entity_world_rotation(s, d->parent)), rot));
+    }
+    d->euler = lx_quat_to_euler_deg(d->rotation);
+    touch_static(s, d);
+}
+
+void lx_entity_look_at(LxScene *s, LxEntity e, LxVec3 target, LxVec3 up) {
+    LxVec3 p = lx_entity_world_position(s, e);
+    LxVec3 f = lx_sub3(target, p);
+    if (lx_len3sq(f) < 1e-10f) return;
+    lx_entity_set_world_pose(s, e, p, lx_quat_look(f, up));
+}
+
 LxReflectionProbe *lx_add_reflection_probe(LxScene *s, LxEntity e) {
     LxEntityData *d = lx_entity_data(s, e);
     if (!d) return NULL;
@@ -456,6 +557,9 @@ GETTER(lx_get_audio_source, LxAudioSource, LX_COMP_AUDIO_SOURCE, audio)
 GETTER(lx_get_behaviour, LxBehaviourRef, LX_COMP_BEHAVIOUR, behaviour)
 GETTER(lx_get_crowd, LxCrowdComponent, LX_COMP_CROWD, crowd)
 GETTER(lx_get_reflection_probe, LxReflectionProbe, LX_COMP_REFLECTION_PROBE, probe)
+GETTER(lx_get_collider, LxCollider, LX_COMP_COLLIDER, collider)
+GETTER(lx_get_rigidbody, LxRigidbody, LX_COMP_RIGIDBODY, body)
+GETTER(lx_get_character, LxCharacterController, LX_COMP_CHARACTER, character)
 
 void lx_remove_component(LxScene *s, LxEntity e, LxComponentBits c) {
     LxEntityData *d = lx_entity_data(s, e);
@@ -474,6 +578,9 @@ LxEntity lx_spawn_primitive(LxScene *s, LxPrimitive p, const char *name, LxVec3 
     char ref[64];
     snprintf(ref, sizeof ref, "builtin:%s", lx_primitive_name(p));
     lx_add_mesh(s, e, ref, "builtin:default");
+    /* primitives come with a matching collider (static until you add a Rigidbody) */
+    static const LxColliderShape shapes[] = {LX_COLLIDER_BOX, LX_COLLIDER_SPHERE, LX_COLLIDER_BOX, LX_COLLIDER_MESH, LX_COLLIDER_CAPSULE};
+    lx_add_collider(s, e, shapes[p]);
     return e;
 }
 

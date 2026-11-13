@@ -281,6 +281,9 @@ typedef enum LxComponentBits {
     LX_COMP_BEHAVIOUR = 1 << 5,
     LX_COMP_CROWD = 1 << 6,
     LX_COMP_REFLECTION_PROBE = 1 << 7,
+    LX_COMP_COLLIDER = 1 << 8,
+    LX_COMP_RIGIDBODY = 1 << 9,
+    LX_COMP_CHARACTER = 1 << 10,
 } LxComponentBits;
 
 typedef struct LxCamera {
@@ -344,6 +347,51 @@ typedef struct LxReflectionProbe {
     bool realtime;
 } LxReflectionProbe;
 
+/* ---- Physics components ----
+ * Collider alone            = static scenery (never moves)
+ * Collider + Rigidbody      = simulated body (or kinematic: moved by your code, pushes others)
+ * Character Controller      = capsule moved with lx_character_move(), slides along walls, climbs steps
+ * Sizes are local and scaled by the entity's scale. */
+typedef struct LxPhysicsSettings {
+    LxVec3 gravity;             /* m/s^2, default (0, -9.81, 0) */
+    float fixed_timestep;       /* seconds, default 1/60 */
+    int solver_iterations;      /* default 10 */
+    uint32_t layer_mask[32];    /* bit j of layer_mask[i]: layer i collides with layer j */
+} LxPhysicsSettings;
+
+typedef enum LxColliderShape { LX_COLLIDER_BOX, LX_COLLIDER_SPHERE, LX_COLLIDER_CAPSULE, LX_COLLIDER_MESH } LxColliderShape;
+typedef struct LxCollider {
+    LxColliderShape shape;
+    LxVec3 center;          /* offset from the entity origin */
+    LxVec3 size;            /* box: full size */
+    float radius;           /* sphere, capsule */
+    float height;           /* capsule: total height along local Y */
+    bool is_trigger;        /* reports overlaps (on_trigger_enter/exit) instead of colliding */
+    float friction;         /* 0 ice .. 1 rubber */
+    float bounciness;       /* 0 dead .. 1 superball */
+    int layer;              /* 0..31, see LxPhysicsSettings.layer_mask */
+} LxCollider;
+
+typedef struct LxRigidbody {
+    float mass;             /* kg */
+    float linear_damping, angular_damping;
+    bool use_gravity;
+    bool is_kinematic;      /* not simulated: moved by code, pushes dynamic bodies */
+    bool freeze_rotation;   /* never tips over (characters, pickups) */
+    LxVec3 velocity;        /* world space, live while playing (writeable) */
+    LxVec3 angular_velocity;/* radians/second, live */
+} LxRigidbody;
+
+typedef enum LxCharacterFlags { LX_CHAR_GROUNDED = 1, LX_CHAR_SIDES = 2, LX_CHAR_ABOVE = 4 } LxCharacterFlags;
+typedef struct LxCharacterController {
+    float radius, height;   /* capsule; the entity origin is at the feet */
+    float step_height;      /* climbs stairs/ledges up to this */
+    float slope_limit_deg;  /* steeper surfaces are walls */
+    float push_power;       /* how hard it shoves rigidbodies */
+    bool grounded;          /* live: standing on walkable ground */
+    LxVec3 velocity;        /* live: world velocity of the last move */
+} LxCharacterController;
+
 typedef struct LxEnvironment {
     LxVec3 sky_zenith, sky_horizon, ground_color;
     float ambient_intensity;
@@ -395,6 +443,10 @@ LxVec3 lx_entity_world_position(LxScene *s, LxEntity e);
 LxVec3 lx_entity_forward(LxScene *s, LxEntity e); /* -Z in world */
 LxVec3 lx_entity_right(LxScene *s, LxEntity e);
 void lx_scene_update_transforms(LxScene *s);
+LxQuat lx_entity_world_rotation(LxScene *s, LxEntity e);
+void lx_entity_set_rotation(LxScene *s, LxEntity e, LxQuat q);                      /* local */
+void lx_entity_set_world_pose(LxScene *s, LxEntity e, LxVec3 pos, LxQuat rot);       /* handles parents */
+void lx_entity_look_at(LxScene *s, LxEntity e, LxVec3 target, LxVec3 up);
 
 /* Components */
 LxCamera *lx_add_camera(LxScene *s, LxEntity e);
@@ -405,6 +457,9 @@ void lx_add_audio_listener(LxScene *s, LxEntity e);
 LxBehaviourRef *lx_add_behaviour(LxScene *s, LxEntity e, const char *behaviour_name);
 LxCrowdComponent *lx_add_crowd(LxScene *s, LxEntity e, int agents);
 LxReflectionProbe *lx_add_reflection_probe(LxScene *s, LxEntity e);
+LxCollider *lx_add_collider(LxScene *s, LxEntity e, LxColliderShape shape); /* sized to the mesh when there is one */
+LxRigidbody *lx_add_rigidbody(LxScene *s, LxEntity e);
+LxCharacterController *lx_add_character(LxScene *s, LxEntity e);
 LxCamera *lx_get_camera(LxScene *s, LxEntity e);
 LxLight *lx_get_light(LxScene *s, LxEntity e);
 LxMeshRenderer *lx_get_mesh(LxScene *s, LxEntity e);
@@ -412,6 +467,9 @@ LxAudioSource *lx_get_audio_source(LxScene *s, LxEntity e);
 LxBehaviourRef *lx_get_behaviour(LxScene *s, LxEntity e);
 LxCrowdComponent *lx_get_crowd(LxScene *s, LxEntity e);
 LxReflectionProbe *lx_get_reflection_probe(LxScene *s, LxEntity e);
+LxCollider *lx_get_collider(LxScene *s, LxEntity e);
+LxRigidbody *lx_get_rigidbody(LxScene *s, LxEntity e);
+LxCharacterController *lx_get_character(LxScene *s, LxEntity e);
 void lx_remove_component(LxScene *s, LxEntity e, LxComponentBits comp);
 
 LxEntity lx_spawn_primitive(LxScene *s, LxPrimitive p, const char *name, LxVec3 pos);
@@ -441,6 +499,14 @@ typedef struct LxBehaviourCtx {
     float *params;    /* editable in the inspector */
 } LxBehaviourCtx;
 
+/* What a behaviour learns about a collision. `normal` points away from `other`, towards you. */
+typedef struct LxCollision {
+    LxEntity other;
+    LxVec3 point, normal;
+    float impulse;              /* strength of the hit (N*s): use it for impact sounds/damage */
+    LxVec3 relative_velocity;   /* other's velocity relative to you at the contact */
+} LxCollision;
+
 typedef struct LxBehaviourDesc {
     const char *name;
     size_t state_size;
@@ -449,6 +515,13 @@ typedef struct LxBehaviourDesc {
     void (*on_start)(LxBehaviourCtx *ctx);
     void (*on_update)(LxBehaviourCtx *ctx, float dt);
     void (*on_destroy)(LxBehaviourCtx *ctx);
+    /* optional: */
+    void (*on_fixed_update)(LxBehaviourCtx *ctx, float fixed_dt);   /* before each physics step */
+    void (*on_late_update)(LxBehaviourCtx *ctx, float dt);          /* after physics: cameras */
+    void (*on_collision_enter)(LxBehaviourCtx *ctx, const LxCollision *c);
+    void (*on_collision_exit)(LxBehaviourCtx *ctx, LxEntity other);
+    void (*on_trigger_enter)(LxBehaviourCtx *ctx, LxEntity other);
+    void (*on_trigger_exit)(LxBehaviourCtx *ctx, LxEntity other);
 } LxBehaviourDesc;
 
 void lx_register_behaviour(const LxBehaviourDesc *desc);
@@ -462,9 +535,47 @@ void lx_register_builtin_behaviours(void);
  * The build generates the call for every script file automatically. */
 #define LX_SCRIPT_REGISTER(name) void lx_script_##name(void)
 
-/* Runs behaviours (start on first tick) and crowds for a scene. */
+/* Runs behaviours (start on first tick), physics and crowds for a scene. */
 void lx_scene_simulate(LxScene *s, float dt);
 void lx_scene_stop_simulation(LxScene *s);
+
+/* ===================================================================
+ *  Physics
+ * =================================================================== */
+
+LxPhysicsSettings *lx_physics_settings(void);
+LxPhysicsSettings lx_physics_defaults(void);
+
+typedef struct LxRaycastHit {
+    LxEntity entity;
+    LxVec3 point, normal;
+    float distance;
+} LxRaycastHit;
+#define LX_ALL_LAYERS 0xffffffffu
+
+/* Queries test colliders (and character controllers) as they are right now. Triggers are ignored. */
+bool lx_physics_raycast(LxScene *s, LxVec3 origin, LxVec3 dir, float max_dist, uint32_t layer_mask, LxRaycastHit *hit);
+bool lx_physics_sphere_cast(LxScene *s, LxVec3 origin, float radius, LxVec3 dir, float max_dist, uint32_t layer_mask,
+                            LxRaycastHit *hit);
+int lx_physics_overlap_sphere(LxScene *s, LxVec3 center, float radius, uint32_t layer_mask, LxEntity *out, int max_out);
+int lx_physics_overlap_box(LxScene *s, LxVec3 center, LxVec3 half_extents, LxQuat rot, uint32_t layer_mask, LxEntity *out,
+                           int max_out);
+
+/* Rigidbodies (no-ops for entities without one) */
+void lx_rigidbody_add_force(LxScene *s, LxEntity e, LxVec3 force);           /* N, applied over the next step */
+void lx_rigidbody_add_impulse(LxScene *s, LxEntity e, LxVec3 impulse);       /* N*s, instant (jumps, explosions) */
+void lx_rigidbody_add_impulse_at(LxScene *s, LxEntity e, LxVec3 impulse, LxVec3 world_point); /* also spins it */
+void lx_rigidbody_add_torque(LxScene *s, LxEntity e, LxVec3 torque);
+void lx_rigidbody_set_velocity(LxScene *s, LxEntity e, LxVec3 v);
+LxVec3 lx_rigidbody_velocity(LxScene *s, LxEntity e);
+void lx_rigidbody_wake(LxScene *s, LxEntity e);
+bool lx_rigidbody_sleeping(LxScene *s, LxEntity e);
+void lx_physics_explosion(LxScene *s, LxVec3 center, float radius, float impulse); /* pushes nearby bodies */
+
+/* Character controller: moves by `displacement` (already multiplied by dt), sliding along walls,
+ * climbing steps and snapping to slopes. Add gravity yourself. Returns LxCharacterFlags. */
+int lx_character_move(LxScene *s, LxEntity e, LxVec3 displacement);
+bool lx_character_grounded(LxScene *s, LxEntity e);
 
 /* ===================================================================
  *  Rendering + global illumination
@@ -584,6 +695,8 @@ void lx_crowd_add_obstacle(LxCrowd *c, LxVec3 center, float radius);
 typedef enum LxPlatform { LX_PLATFORM_WINDOWS, LX_PLATFORM_LINUX, LX_PLATFORM_ANDROID, LX_PLATFORM_COUNT } LxPlatform;
 #define LX_MAX_BUILD_SCENES 32
 
+
+
 typedef struct LxBuildSettings {
     LxPlatform target;
     char scenes[LX_MAX_BUILD_SCENES][LX_REF_MAX];
@@ -607,6 +720,7 @@ typedef struct LxProject {
     char startup_scene[LX_REF_MAX];
     LxGraphicsSettings graphics;
     LxAudioSettings audio;
+    LxPhysicsSettings physics;
     LxBuildSettings build;
 } LxProject;
 
