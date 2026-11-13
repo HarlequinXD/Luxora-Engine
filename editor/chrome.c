@@ -1,4 +1,4 @@
-/* Window chrome: Inferno draws its own title bar (Project Manager and editor), with the app icon,
+/* Window chrome: Luxora draws its own title bar (Project Manager and editor), with the app icon,
  * a draggable title, minimise / maximise / close, edge resizing and the save-before-closing prompt. */
 #include "editor.h"
 #include "app_icon.h"
@@ -182,5 +182,5 @@ void ed_request_quit(void) {
     if (ui_has_modal(ED.ui) && ED.save_prompt_open) return;   /* already asking */
     if (ED.mode == ED_MODE_EDITOR && ED.play != ED_EDIT) ed_stop();
     if (ED.mode != ED_MODE_EDITOR || !ED.dirty) { quit_now(); return; }
-    ed_save_prompt("closing Inferno Editor", quit_now);
+    ed_save_prompt("closing Luxora Editor", quit_now);
 }

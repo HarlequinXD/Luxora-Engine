@@ -1,4 +1,4 @@
-/* Inferno (the Luxora engine editor): shared state between editor modules. */
+/* Luxora Editor: shared state between editor modules. */
 #ifndef LX_EDITOR_H
 #define LX_EDITOR_H
 #include "ui.h"

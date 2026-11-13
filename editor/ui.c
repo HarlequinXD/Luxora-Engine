@@ -79,7 +79,7 @@ uint32_t ui_lerp_color(uint32_t a, uint32_t b, float t) {
     return r;
 }
 
-/* Inferno: obsidian surfaces with a faint warmth, ember accents, and soft vertical gradients. */
+/* Hell theme: obsidian surfaces with a faint warmth, ember accents, and soft vertical gradients. */
 static void default_theme(UiTheme *t) {
     t->window = UI_HEX(0x0d0909);
     t->window_top = UI_HEX(0x150d0c);

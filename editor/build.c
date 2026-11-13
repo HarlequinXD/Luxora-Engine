@@ -415,7 +415,7 @@ void ed_build_plan(LxPlatform target, EdBuildPlan *plan) {
                      lx_platform_name(target), lx_platform_name(target));
         else if (!ed_prebuilt_player(target, plan->prebuilt_path, sizeof plan->prebuilt_path))
             snprintf(plan->problem, sizeof plan->problem,
-                     "The game player that comes with the editor is missing (Runtime/%s/LuxoraPlayer next to Inferno). "
+                     "The game player that comes with the editor is missing (Runtime/%s/LuxoraPlayer next to LuxoraEditor). "
                      "Download the editor again to restore it.", lx_platform_name(target));
         else if (plan->scripts && !ed_scripts_supported())
             snprintf(plan->problem, sizeof plan->problem, "This editor build has no script compiler for this CPU.");

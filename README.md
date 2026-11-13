@@ -1,7 +1,5 @@
 # Luxora Engine
 
-The editor is **Inferno Editor**.
-
 A real-time 3D game engine written in **C11**, rendering with **Vulkan 1.3**, with a professional editor built on its own retained-mode UI toolkit. Luxora builds games for **Windows, Linux and Android** from one codebase.
 
 | | |
@@ -20,7 +18,7 @@ git clone https://github.com/HarlequinXD/Luxora-Engine
 cd Luxora-Engine
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
-./build/luxora_editor            # Windows: build\Release\InfernoEditor.exe
+./build/luxora_editor            # Windows: build\Release\LuxoraEditor.exe
 ```
 
 Requirements: a C11 compiler (MSVC 2022, GCC, Clang), CMake 3.20+, and a GPU driver with Vulkan 1.3 (or 1.2 with `VK_KHR_dynamic_rendering`). **No Vulkan SDK is needed to build.** The headers are vendored, the loader is opened at runtime, and shaders ship precompiled as SPIR-V. On Linux you also need the X11 development headers (`libx11-dev`).
