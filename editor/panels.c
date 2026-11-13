@@ -382,7 +382,6 @@ static const char *LIGHT_TYPES[] = {"Directional", "Point", "Spot"};
 static const char *BUSES[] = {"SFX", "Music", "Voice", "Ambient"};
 static const char *g_behaviour_names[64];
 static int g_behaviour_index;
-static LxMaterial g_mat_edit;
 
 static void transform_changed(UiNode *n) {
     LX_UNUSED(n);
@@ -585,6 +584,10 @@ static void add_component_menu(UiNode *b) {
     }
 }
 
+static bool material_is_file(const char *ref);
+static void build_material_editor(UiNode *parent, const char *ref);
+static void make_material_editable(UiNode *n);
+
 static void build_entity_inspector(UiNode *body) {
     UiCtx *ui = ED.ui;
     const UiTheme *t = ui_theme(ui);
@@ -656,6 +659,25 @@ static void build_entity_inspector(UiNode *body) {
         ui_set_text(info, "%d triangles · %d LOD%s", lx_mesh_triangle_count(m), lx_mesh_lod_count(m), lx_mesh_lod_count(m) == 1 ? "" : "s");
         info->font = UI_FONT_SMALL;
         info->fg = t->text_dim;
+        char mat_title[LX_REF_MAX + 16];
+        snprintf(mat_title, sizeof mat_title, "Material  ·  %s", lx_path_filename(d->mesh.material));
+        UiNode *ms = comp_section(body, UI_ICON_MATERIAL, mat_title, &g_open_material, 0);
+        if (material_is_file(d->mesh.material)) {
+            build_material_editor(ms, d->mesh.material);
+            UiNode *shared = ui_label(ui, ms, "Shared by every object that uses this material.");
+            shared->font = UI_FONT_SMALL;
+            shared->fg = t->text_dim;
+        } else {
+            UiNode *note = ui_label(ui, ms, "Built-in materials are read-only.");
+            note->icon = UI_ICON_LOCK;
+            note->icon_size = 13;
+            note->fg = t->text_dim;
+            UiNode *mk = ui_button(ui, ms, "Make Editable Copy", make_material_editable);
+            mk->icon = UI_ICON_MATERIAL;
+            mk->icon_color = ed_color_for_icon(UI_ICON_MATERIAL);
+            mk->h = 28;
+            lx_strcpy(mk->tooltip, sizeof mk->tooltip, "Copies this material into Assets/Materials and assigns it to this object");
+        }
     }
     if (d->comps & LX_COMP_AUDIO_SOURCE) {
         sec = comp_section(body, UI_ICON_SPEAKER, "Audio Source", &g_open_audio, LX_COMP_AUDIO_SOURCE);
@@ -733,30 +755,85 @@ static void build_entity_inspector(UiNode *body) {
     add->border = t->border_light;
 }
 
-static void material_save(UiNode *n) {
-    LX_UNUSED(n);
-    if (lx_material_save(&g_mat_edit, ED.inspector_asset)) {
-        char ref[LX_REF_MAX];
-        ed_relative_asset(ref, sizeof ref, ED.inspector_asset);
-        lx_assets_reload(ref);
-        lx_scene_mark_static_dirty(ED.scene);
-        ui_notify(ED.ui, "Material saved");
-    }
-}
-static void material_live(UiNode *n) {
-    LX_UNUSED(n);
-    /* live preview: write into the cached copy used by the renderer */
-    char ref[LX_REF_MAX];
-    ed_relative_asset(ref, sizeof ref, ED.inspector_asset);
-    *lx_asset_material(ref) = g_mat_edit;
-}
-static void open_external(UiNode *n) { LX_UNUSED(n); lx_platform_open_folder(ED.inspector_asset); }
+/* ---------------- material editing (shared by the asset inspector and Mesh Renderer) ----------------
+ * Widgets bind straight to the cached material the renderer draws with, so every change is
+ * visible immediately. The .lxmat file is written when the edit gesture ends. */
+static char g_mat_pending[LX_REF_MAX];
 
-static UiNode *mat_float(UiNode *sec, const char *label, float *v, float a, float b) {
-    UiNode *n = slider_row(sec, label, v, a, b);
-    n->on_change = material_live;
+static bool material_is_file(const char *ref) {
+    if (!ref || !ref[0] || !strncmp(ref, "builtin:", 8)) return false;
+    char path[LX_PATH_MAX];
+    lx_asset_path(path, sizeof path, ref);
+    return lx_file_exists(path);
+}
+
+static void material_changed(UiNode *n) {
+    lx_strcpy(g_mat_pending, sizeof g_mat_pending, n->path);
+    if (ED.scene) lx_scene_mark_static_dirty(ED.scene); /* albedo/absorption feed GI and acoustics */
+}
+
+static void material_flush(void) {
+    if (!g_mat_pending[0] || lx_mouse_down(LX_MOUSE_LEFT) || ui_wants_keyboard(ED.ui) || ui_popup_open(ED.ui)) return;
+    char path[LX_PATH_MAX];
+    lx_asset_path(path, sizeof path, g_mat_pending);
+    if (!lx_material_save(lx_asset_material(g_mat_pending), path)) ui_notify(ED.ui, "Could not save %s", g_mat_pending);
+    g_mat_pending[0] = 0;
+}
+
+static UiNode *mat_bind(UiNode *n, const char *ref) {
+    lx_strcpy(n->path, sizeof n->path, ref);
+    n->on_change = material_changed;
     return n;
 }
+
+static void build_material_editor(UiNode *parent, const char *ref) {
+    LxMaterial *m = lx_asset_material(ref);
+    UiNode *c = color_row(parent, "Albedo", &m->albedo.x, 1);
+    mat_bind(c, ref);
+    mat_bind(slider_row(parent, "Metallic", &m->metallic, 0, 1), ref);
+    mat_bind(slider_row(parent, "Roughness", &m->roughness, 0.02f, 1), ref);
+    mat_bind(color_row(parent, "Emission", &m->emissive.x, 1), ref);
+    mat_bind(float_row(parent, "Emission Strength", &m->emissive_strength, 0.1f, 0, 1000), ref);
+    UiNode *tx = asset_field(parent, "Albedo Map", m->albedo_map, sizeof m->albedo_map, "texture");
+    mat_bind(tx, ref);
+    tx = asset_field(parent, "Normal Map", m->normal_map, sizeof m->normal_map, "texture");
+    mat_bind(tx, ref);
+    mat_bind(float_row(parent, "UV Scale", &m->uv_scale, 0.05f, 0.001f, 1000), ref);
+    UiNode *a1 = mat_bind(slider_row(parent, "Sound Absorption", &m->acoustic_absorption, 0, 1), ref);
+    lx_strcpy(a1->tooltip, sizeof a1->tooltip, "Sound energy swallowed on each reflection (carpet ~0.6, concrete ~0.02)");
+    UiNode *a2 = mat_bind(slider_row(parent, "Sound Transmission", &m->acoustic_transmission, 0, 1), ref);
+    lx_strcpy(a2->tooltip, sizeof a2->tooltip, "Sound passing through the surface (walls block most)");
+}
+
+/* built-in materials have no file: copy one into Materials/ so it can be edited */
+static void make_material_editable(UiNode *n) {
+    LxMeshRenderer *mr = lx_get_mesh(ED.scene, ED.inspector_entity);
+    if (!mr) return;
+    LxMaterial copy = *lx_asset_material(mr->material);
+    char base[LX_NAME_MAX], ref[LX_REF_MAX], path[LX_PATH_MAX];
+    size_t k = 0;
+    for (const char *c = lx_entity_name(ED.scene, ED.inspector_entity); *c && k < sizeof base - 1; c++)
+        base[k++] = (isalnum((unsigned char)*c) || *c == '_' || *c == '-') ? *c : '_';
+    base[k] = 0;
+    if (!base[0]) lx_strcpy(base, sizeof base, "Material");
+    for (int i = 0; i < 1000; i++) {
+        if (i) snprintf(ref, sizeof ref, "Materials/%s %d.lxmat", base, i + 1);
+        else snprintf(ref, sizeof ref, "Materials/%s.lxmat", base);
+        lx_asset_path(path, sizeof path, ref);
+        if (!lx_file_exists(path)) break;
+    }
+    lx_strcpy(copy.name, sizeof copy.name, base);
+    if (!lx_material_save(&copy, path)) { ui_notify(ED.ui, "Could not create %s", ref); return; }
+    lx_strcpy(mr->material, sizeof mr->material, ref);
+    ED.inspector_dirty = true;
+    ED.content_dirty = true;
+    ed_mark_changed();
+    ed_commit();
+    ui_notify(ED.ui, "Created %s - edit it right here", ref);
+    LX_UNUSED(n);
+}
+
+static void open_external(UiNode *n) { LX_UNUSED(n); lx_platform_open_folder(ED.inspector_asset); }
 
 static void build_asset_inspector(UiNode *body) {
     UiCtx *ui = ED.ui;
@@ -782,36 +859,14 @@ static void build_asset_inspector(UiNode *body) {
     pl->fg = t->text_dim;
     ui_pad(pl, 12, 0, 8, 0);
     if (icon == UI_ICON_MATERIAL) {
-        if (!lx_material_load(&g_mat_edit, path)) g_mat_edit = lx_material_default();
         UiNode *sec = ed_section(body, UI_ICON_MATERIAL, "Material", &g_open_material, NULL);
-        UiNode *c = color_row(sec, "Albedo", &g_mat_edit.albedo.x, 1);
-        c->on_change = material_live;
-        mat_float(sec, "Metallic", &g_mat_edit.metallic, 0, 1);
-        mat_float(sec, "Roughness", &g_mat_edit.roughness, 0.02f, 1);
-        c = color_row(sec, "Emission", &g_mat_edit.emissive.x, 1);
-        c->on_change = material_live;
-        UiNode *em = float_row(sec, "Emission Strength", &g_mat_edit.emissive_strength, 0.1f, 0, 1000);
-        em->on_change = material_live;
-        UiNode *tx = asset_field(sec, "Albedo Map", g_mat_edit.albedo_map, sizeof g_mat_edit.albedo_map, "texture");
-        tx->on_change = material_live;
-        tx = asset_field(sec, "Normal Map", g_mat_edit.normal_map, sizeof g_mat_edit.normal_map, "texture");
-        tx->on_change = material_live;
-        UiNode *uv = float_row(sec, "UV Scale", &g_mat_edit.uv_scale, 0.05f, 0.001f, 1000);
-        uv->on_change = material_live;
-        UiNode *ac = ed_section(body, UI_ICON_SOUND, "Acoustics", &g_open_audio, NULL);
-        UiNode *a1 = mat_float(ac, "Absorption", &g_mat_edit.acoustic_absorption, 0, 1);
-        lx_strcpy(a1->tooltip, sizeof a1->tooltip, "How much sound energy the surface swallows on each reflection (carpet ~0.6, concrete ~0.02)");
-        UiNode *a2 = mat_float(ac, "Transmission", &g_mat_edit.acoustic_transmission, 0, 1);
-        lx_strcpy(a2->tooltip, sizeof a2->tooltip, "How much sound passes through the surface (walls block most)");
-        UiNode *row = ui_box(ui, body, UI_ROW);
-        ui_pad(row, 12, 12, 12, 12);
-        row->h = 56;
-        UiNode *save = ui_button(ui, row, "Save Material", material_save);
-        save->icon = UI_ICON_SAVE;
-        save->grow = 1;
-        save->bg = t->accent;
-        save->bg_hover = t->accent_hover;
-        save->fg = t->accent_text;
+        build_material_editor(sec, ref);
+        UiNode *hint = ui_label(ui, body, "Changes show instantly and are saved automatically.");
+        hint->font = UI_FONT_SMALL;
+        hint->fg = t->text_dim;
+        hint->icon = UI_ICON_SAVE;
+        hint->icon_size = 12;
+        ui_pad(hint, 12, 4, 0, 0);
     } else if (icon == UI_ICON_TEXTURE) {
         LxTexture *tex = lx_asset_texture(ref);
         if (tex) {
@@ -884,9 +939,12 @@ void ed_preview_sound(UiNode *n) {
 
 static void inspector_frame(UiNode *body) {
     if (!ED.scene) return;
+    material_flush();
     LxEntityData *d = lx_entity_data(ED.scene, ED.selected);
     uint32_t comps = d ? d->comps : 0;
     bool asset_changed = strcmp(ED.inspector_asset, ED.selected_asset) != 0;
+    /* an asset is shown and nothing changed: keep the existing widgets (they edit live data) */
+    if (!ED.inspector_dirty && ED.selected_asset[0] && !asset_changed && body->first) return;
     if (!ED.inspector_dirty && ED.inspector_entity == ED.selected && comps == ED.inspector_comps &&
         ED.inspector_storage == (const void *)ED.scene->entities && !asset_changed && d) {
         return;

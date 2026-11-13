@@ -196,5 +196,7 @@ int main(int argc, char **argv) {
     lx_platform_shutdown();
     lx_jobs_shutdown();
     if (errors) fprintf(stderr, "Vulkan validation reported %d errors\n", errors);
-    return errors ? 3 : build_exit;
+    extern int ed_smoke_failures;
+    if (ed_smoke_failures) fprintf(stderr, "%d smoke checks failed\n", ed_smoke_failures);
+    return errors ? 3 : ed_smoke_failures ? 5 : build_exit;
 }
