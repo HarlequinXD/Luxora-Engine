@@ -63,6 +63,7 @@ typedef struct LxWindowDesc {
     bool vsync;
     bool maximized;
     bool fullscreen;
+    bool borderless;   /* no system frame: the app draws its own title bar (the editor) */
 } LxWindowDesc;
 
 bool lx_platform_init(const LxWindowDesc *desc);
@@ -75,7 +76,16 @@ bool lx_platform_vk_create_surface(void *instance, void *out_surface);
 void *lx_platform_vk_loader(void);  /* vkGetInstanceProcAddr */
 uint32_t lx_platform_surface_generation(void); /* changes when the native window is recreated (Android) */
 void lx_platform_set_title(const char *title);
-void lx_platform_set_cursor(int cursor); /* 0 arrow, 1 text, 2 resize-h, 3 resize-v, 4 hand */
+void lx_platform_set_cursor(int cursor); /* 0 arrow, 1 text, 2 resize-h, 3 resize-v, 4 hand, 5 resize NW-SE, 6 resize NE-SW */
+/* Window chrome, for apps that draw their own title bar. */
+enum { LX_EDGE_LEFT = 1, LX_EDGE_RIGHT = 2, LX_EDGE_TOP = 4, LX_EDGE_BOTTOM = 8 };
+void lx_platform_set_intercept_close(bool on); /* close button / Alt+F4 become a request (see below) instead of quitting */
+bool lx_platform_take_close_request(void);
+void lx_platform_window_minimize(void);
+void lx_platform_window_toggle_maximize(void);
+bool lx_platform_window_maximized(void);
+void lx_platform_window_begin_move(void);         /* call on mouse-down in the title bar: the OS moves (and snaps) it */
+void lx_platform_window_begin_resize(int edges);  /* LX_EDGE_* mask, call on mouse-down at a window edge */
 const char *lx_platform_clipboard_get(void);
 void lx_platform_clipboard_set(const char *text);
 /* Runs a shell command, streaming each output line to cb. Returns exit code. */

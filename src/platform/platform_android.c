@@ -188,6 +188,13 @@ bool lx_platform_pump(void) {
 
 void lx_platform_set_title(const char *t) { LX_UNUSED(t); }
 void lx_platform_set_cursor(int c) { LX_UNUSED(c); }
+void lx_platform_set_intercept_close(bool on) { LX_UNUSED(on); }
+bool lx_platform_take_close_request(void) { return false; }
+void lx_platform_window_minimize(void) {}
+void lx_platform_window_toggle_maximize(void) {}
+bool lx_platform_window_maximized(void) { return true; }
+void lx_platform_window_begin_move(void) {}
+void lx_platform_window_begin_resize(int edges) { LX_UNUSED(edges); }
 const char *lx_platform_clipboard_get(void) { return A.clipboard; }
 void lx_platform_clipboard_set(const char *t) { lx_strcpy(A.clipboard, sizeof A.clipboard, t); }
 int lx_platform_run_process(const char *c, const char *w, void (*cb)(const char *, void *), void *u) {

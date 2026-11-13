@@ -13,9 +13,10 @@ static struct {
     HWND hwnd;
     HMODULE libvk;
     PFN_vkGetInstanceProcAddr gipa;
-    HCURSOR cursors[5];
+    HCURSOR cursors[7];
     int cursor;
     bool quit;
+    bool borderless, intercept_close, close_requested;
     WCHAR high_surrogate;
     char clipboard[8192];
 } W;
@@ -49,7 +50,28 @@ static LxKey map_vk(WPARAM vk) {
 
 static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-    case WM_CLOSE: W.quit = true; return 0;
+    case WM_CLOSE:
+        if (W.intercept_close) W.close_requested = true;
+        else W.quit = true;
+        return 0;
+    case WM_NCCALCSIZE:
+        /* borderless: the client area covers the whole window (the app draws the title bar), but the
+           window keeps WS_THICKFRAME so Windows still snaps, animates and resizes it. When maximised,
+           Windows positions it past the screen edge by the frame size; pull the client area back in. */
+        if (W.borderless && wp) {
+            if (IsZoomed(h)) {
+                NCCALCSIZE_PARAMS *p = (NCCALCSIZE_PARAMS *)lp;
+                int fx = GetSystemMetrics(SM_CXFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+                int fy = GetSystemMetrics(SM_CYFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+                p->rgrc[0].left += fx; p->rgrc[0].right -= fx;
+                p->rgrc[0].top += fy; p->rgrc[0].bottom -= fy;
+            }
+            return 0;
+        }
+        break;
+    case WM_NCACTIVATE:
+        if (W.borderless) return DefWindowProcW(h, msg, wp, -1);   /* don't paint a frame on focus changes */
+        break;
     case WM_SIZE:
         g_lx_input.width = LOWORD(lp);
         g_lx_input.height = HIWORD(lp);
@@ -57,7 +79,10 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_KEYDOWN: case WM_SYSKEYDOWN: case WM_KEYUP: case WM_SYSKEYUP: {
         LxKey k = map_vk(wp);
         if (k) g_lx_input.keys[k] = (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN);
-        if (wp == VK_F4 && (GetKeyState(VK_MENU) & 0x8000)) W.quit = true;
+        if (wp == VK_F4 && (GetKeyState(VK_MENU) & 0x8000)) {
+            if (W.intercept_close) W.close_requested = true;
+            else W.quit = true;
+        }
         return 0;
     }
     case WM_CHAR: {
@@ -147,9 +172,12 @@ bool lx_platform_init(const LxWindowDesc *d) {
     wchar_t title[256];
     MultiByteToWideChar(CP_UTF8, 0, d->title ? d->title : "Luxora", -1, title, 256);
     int w = d->width > 0 ? d->width : 1600, h = d->height > 0 ? d->height : 900;
-    DWORD style = d->fullscreen ? (WS_POPUP | WS_VISIBLE) : WS_OVERLAPPEDWINDOW;
+    W.borderless = d->borderless && !d->fullscreen;
+    DWORD style = d->fullscreen ? (WS_POPUP | WS_VISIBLE)
+                : W.borderless ? (WS_POPUP | WS_THICKFRAME | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX)
+                : WS_OVERLAPPEDWINDOW;
     RECT r = {0, 0, w, h};
-    AdjustWindowRect(&r, style, FALSE);
+    if (!W.borderless) AdjustWindowRect(&r, style, FALSE);
     int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
     if (d->fullscreen) { x = 0; y = 0; r.right = GetSystemMetrics(SM_CXSCREEN); r.left = 0; r.bottom = GetSystemMetrics(SM_CYSCREEN); r.top = 0; }
     W.hwnd = CreateWindowExW(0, wc.lpszClassName, title, style, x, y, r.right - r.left, r.bottom - r.top, NULL, NULL, inst, NULL);
@@ -159,6 +187,10 @@ bool lx_platform_init(const LxWindowDesc *d) {
     W.cursors[2] = LoadCursorW(NULL, (LPCWSTR)IDC_SIZEWE);
     W.cursors[3] = LoadCursorW(NULL, (LPCWSTR)IDC_SIZENS);
     W.cursors[4] = LoadCursorW(NULL, (LPCWSTR)IDC_HAND);
+    W.cursors[5] = LoadCursorW(NULL, (LPCWSTR)IDC_SIZENWSE);
+    W.cursors[6] = LoadCursorW(NULL, (LPCWSTR)IDC_SIZENESW);
+    if (W.borderless) /* apply the frame change so WM_NCCALCSIZE removes the caption */
+        SetWindowPos(W.hwnd, NULL, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER);
 
     typedef UINT(WINAPI * GetDpiForWindowFn)(HWND);
     GetDpiForWindowFn gdfw = (GetDpiForWindowFn)GetProcAddress(user32, "GetDpiForWindow");
@@ -183,7 +215,32 @@ void lx_platform_set_title(const char *title) {
 }
 
 void lx_platform_set_cursor(int c) {
-    if (c >= 0 && c < 5 && c != W.cursor) { W.cursor = c; SetCursor(W.cursors[c]); }
+    if (c >= 0 && c < 7 && c != W.cursor) { W.cursor = c; SetCursor(W.cursors[c]); }
+}
+
+void lx_platform_set_intercept_close(bool on) { W.intercept_close = on; }
+bool lx_platform_take_close_request(void) {
+    bool r = W.close_requested;
+    W.close_requested = false;
+    return r;
+}
+void lx_platform_window_minimize(void) { ShowWindow(W.hwnd, SW_MINIMIZE); }
+bool lx_platform_window_maximized(void) { return IsZoomed(W.hwnd) != 0; }
+void lx_platform_window_toggle_maximize(void) { ShowWindow(W.hwnd, IsZoomed(W.hwnd) ? SW_RESTORE : SW_MAXIMIZE); }
+/* Windows' own move/size loop: Aero snap, shake, multi-monitor all work. It swallows the button
+   release, so clear the button state here. */
+void lx_platform_window_begin_move(void) {
+    ReleaseCapture();
+    g_lx_input.mouse[LX_MOUSE_LEFT] = false;
+    SendMessageW(W.hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+}
+void lx_platform_window_begin_resize(int edges) {
+    static const WPARAM ht[16] = {0, HTLEFT, HTRIGHT, 0, HTTOP, HTTOPLEFT, HTTOPRIGHT, 0, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, 0, 0, 0, 0, 0};
+    WPARAM h = ht[edges & 15];
+    if (!h) return;
+    ReleaseCapture();
+    g_lx_input.mouse[LX_MOUSE_LEFT] = false;
+    SendMessageW(W.hwnd, WM_NCLBUTTONDOWN, h, 0);
 }
 
 const char *lx_platform_clipboard_get(void) {

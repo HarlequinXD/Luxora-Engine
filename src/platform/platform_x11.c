@@ -18,12 +18,13 @@
 static struct {
     Display *dpy;
     Window win;
-    Atom wm_delete, net_wm_state, net_wm_max_h, net_wm_max_v, net_wm_fullscreen;
+    Atom wm_delete, net_wm_state, net_wm_max_h, net_wm_max_v, net_wm_fullscreen, net_wm_moveresize, motif_hints;
     XIM im;
     XIC ic;
     void *libvk;
     PFN_vkGetInstanceProcAddr gipa;
-    Cursor cursors[5];
+    Cursor cursors[7];
+    bool intercept_close, close_requested;
     int current_cursor;
     char clipboard[8192];
 } X;
@@ -101,6 +102,13 @@ bool lx_platform_init(const LxWindowDesc *d) {
     X.net_wm_max_h = XInternAtom(X.dpy, "_NET_WM_STATE_MAXIMIZED_HORZ", False);
     X.net_wm_max_v = XInternAtom(X.dpy, "_NET_WM_STATE_MAXIMIZED_VERT", False);
     X.net_wm_fullscreen = XInternAtom(X.dpy, "_NET_WM_STATE_FULLSCREEN", False);
+    X.net_wm_moveresize = XInternAtom(X.dpy, "_NET_WM_MOVERESIZE", False);
+    X.motif_hints = XInternAtom(X.dpy, "_MOTIF_WM_HINTS", False);
+    if (d->borderless && !d->fullscreen) {
+        /* ask the window manager for no decorations: flags = decorations, decorations = none */
+        long hints[5] = {2, 0, 0, 0, 0};
+        XChangeProperty(X.dpy, X.win, X.motif_hints, X.motif_hints, 32, PropModeReplace, (unsigned char *)hints, 5);
+    }
     if (d->maximized || d->fullscreen) {
         Atom atoms[2] = {X.net_wm_max_h, X.net_wm_max_v};
         if (d->fullscreen) atoms[0] = X.net_wm_fullscreen;
@@ -117,6 +125,8 @@ bool lx_platform_init(const LxWindowDesc *d) {
     X.cursors[2] = XCreateFontCursor(X.dpy, XC_sb_h_double_arrow);
     X.cursors[3] = XCreateFontCursor(X.dpy, XC_sb_v_double_arrow);
     X.cursors[4] = XCreateFontCursor(X.dpy, XC_hand2);
+    X.cursors[5] = XCreateFontCursor(X.dpy, XC_bottom_right_corner);
+    X.cursors[6] = XCreateFontCursor(X.dpy, XC_bottom_left_corner);
 
     g_lx_input.width = w;
     g_lx_input.height = h;
@@ -137,8 +147,82 @@ void lx_platform_shutdown(void) {
 
 void lx_platform_set_title(const char *title) { XStoreName(X.dpy, X.win, title); }
 
+void lx_platform_set_intercept_close(bool on) { X.intercept_close = on; }
+bool lx_platform_take_close_request(void) {
+    bool r = X.close_requested;
+    X.close_requested = false;
+    return r;
+}
+
+static void send_wm_state(long action, Atom a, Atom b) {
+    XEvent e;
+    memset(&e, 0, sizeof e);
+    e.xclient.type = ClientMessage;
+    e.xclient.window = X.win;
+    e.xclient.message_type = X.net_wm_state;
+    e.xclient.format = 32;
+    e.xclient.data.l[0] = action;   /* 0 remove, 1 add, 2 toggle */
+    e.xclient.data.l[1] = (long)a;
+    e.xclient.data.l[2] = (long)b;
+    e.xclient.data.l[3] = 1;
+    XSendEvent(X.dpy, DefaultRootWindow(X.dpy), False, SubstructureRedirectMask | SubstructureNotifyMask, &e);
+    XFlush(X.dpy);
+}
+
+bool lx_platform_window_maximized(void) {
+    Atom type;
+    int format;
+    unsigned long n = 0, after;
+    unsigned char *data = NULL;
+    bool h = false, v = false;
+    if (XGetWindowProperty(X.dpy, X.win, X.net_wm_state, 0, 64, False, XA_ATOM, &type, &format, &n, &after, &data) == Success && data) {
+        Atom *a = (Atom *)data;
+        for (unsigned long i = 0; i < n; i++) {
+            if (a[i] == X.net_wm_max_h) h = true;
+            if (a[i] == X.net_wm_max_v) v = true;
+        }
+        XFree(data);
+    }
+    return h && v;
+}
+void lx_platform_window_toggle_maximize(void) { send_wm_state(lx_platform_window_maximized() ? 0 : 1, X.net_wm_max_h, X.net_wm_max_v); }
+void lx_platform_window_minimize(void) {
+    XIconifyWindow(X.dpy, X.win, DefaultScreen(X.dpy));
+    XFlush(X.dpy);
+}
+
+/* hands the pointer to the window manager (_NET_WM_MOVERESIZE): it moves/resizes, snaps and tiles */
+static void wm_move_resize(long direction) {
+    Window root, child;
+    int rx, ry, wx, wy;
+    unsigned int mask;
+    XQueryPointer(X.dpy, X.win, &root, &child, &rx, &ry, &wx, &wy, &mask);
+    XUngrabPointer(X.dpy, CurrentTime);
+    XEvent e;
+    memset(&e, 0, sizeof e);
+    e.xclient.type = ClientMessage;
+    e.xclient.window = X.win;
+    e.xclient.message_type = X.net_wm_moveresize;
+    e.xclient.format = 32;
+    e.xclient.data.l[0] = rx;
+    e.xclient.data.l[1] = ry;
+    e.xclient.data.l[2] = direction;
+    e.xclient.data.l[3] = 1;   /* left button */
+    e.xclient.data.l[4] = 1;   /* normal application */
+    XSendEvent(X.dpy, DefaultRootWindow(X.dpy), False, SubstructureRedirectMask | SubstructureNotifyMask, &e);
+    XFlush(X.dpy);
+    /* the window manager now owns the drag and we will not see the button release */
+    g_lx_input.mouse[LX_MOUSE_LEFT] = false;
+}
+void lx_platform_window_begin_move(void) { wm_move_resize(8); }
+void lx_platform_window_begin_resize(int edges) {
+    static const long dir[16] = {-1, 7, 3, -1, 1, 0, 2, -1, 5, 6, 4, -1, -1, -1, -1, -1};
+    long d = dir[edges & 15];
+    if (d >= 0) wm_move_resize(d);
+}
+
 void lx_platform_set_cursor(int c) {
-    if (c < 0 || c > 4 || c == X.current_cursor) return;
+    if (c < 0 || c > 6 || c == X.current_cursor) return;
     X.current_cursor = c;
     XDefineCursor(X.dpy, X.win, X.cursors[c]);
 }
@@ -155,7 +239,10 @@ bool lx_platform_pump(void) {
         if (XFilterEvent(&ev, None)) continue;
         switch (ev.type) {
         case ClientMessage:
-            if ((Atom)ev.xclient.data.l[0] == X.wm_delete) running = false;
+            if ((Atom)ev.xclient.data.l[0] == X.wm_delete) {
+                if (X.intercept_close) X.close_requested = true;
+                else running = false;
+            }
             break;
         case ConfigureNotify:
             g_lx_input.width = ev.xconfigure.width;

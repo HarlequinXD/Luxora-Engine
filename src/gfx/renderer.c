@@ -397,7 +397,6 @@ typedef struct PipeDesc {
     bool depth_test, depth_write, blend, depth_bias;
     bool additive;           /* ONE + ONE (signed: the SSR composite subtracts too) */
     int color_count;         /* 3 = main-pass MRT (colour, normal, reflection weight) */
-    bool mrt_color_only;     /* MRT pipeline that leaves the extra targets untouched (sky) */
     VkCompareOp compare;
     VkCullModeFlags cull;
 } PipeDesc;
@@ -484,7 +483,8 @@ static VkPipeline pipeline_create(const PipeDesc *d) {
     uint32_t ncolor = d->color ? (d->color_count > 1 ? (uint32_t)d->color_count : 1u) : 0u;
     VkFormat formats[3] = {d->color, R.gnormal_format, R.gspec_format};
     cbs_arr[0] = cb;
-    for (uint32_t i = 1; i < ncolor; i++) cbs_arr[i].colorWriteMask = d->mrt_color_only ? 0 : 0xf;
+    /* every attachment must use identical blend state (no independentBlend requirement) */
+    for (uint32_t i = 1; i < ncolor; i++) cbs_arr[i] = cb;
     VkPipelineColorBlendStateCreateInfo cbs = {VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
     cbs.attachmentCount = ncolor;
     cbs.pAttachments = cbs_arr;
@@ -1103,7 +1103,8 @@ static void create_static_resources(void) {
     p.fs = lx_spv_sky_frag; p.fs_size = sizeof lx_spv_sky_frag;
     p.layout = R.scene_only_layout; p.color = R.hdr_format; p.depth = R.depth_format;
     R.sky = pipeline_create(&p);
-    p.color_count = 3; p.mrt_color_only = true;   /* leaves "no reflection" in the SSR targets */
+    p.fs = lx_spv_sky_mrt_frag; p.fs_size = sizeof lx_spv_sky_mrt_frag;
+    p.color_count = 3;   /* writes "no reflection" into the SSR targets */
     R.sky_mrt = pipeline_create(&p);
 
     memset(&p, 0, sizeof p);
