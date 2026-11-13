@@ -97,6 +97,17 @@ static bool stage_data(const LxProject *p, const char *data_dir) {
     return true;
 }
 
+/* The game's custom icon from Build Settings, or NULL for the default. */
+static uint8_t *load_game_icon(const LxProject *p, int *w, int *h) {
+    if (!p->build.icon[0]) return NULL;
+    char path[LX_PATH_MAX];
+    lx_path_join(path, sizeof path, p->assets, p->build.icon);
+    uint8_t *px = lx_image_load(path, w, h);
+    if (!px) LX_WARN("Game icon %s could not be loaded - using the default icon", p->build.icon);
+    else if (*w < 256 || *h < 256) LX_WARN("Game icon is %dx%d; 512x512 or larger looks best on high-DPI screens", *w, *h);
+    return px;
+}
+
 static bool build_desktop(const BuildJob *j) {
     const LxProject *p = &j->project;
     const char *plat = lx_platform_name(j->target);
@@ -126,10 +137,19 @@ static bool build_desktop(const BuildJob *j) {
     rc_safe(gversion, sizeof gversion, p->version[0] ? p->version : "1.0.0", false);
     rc_safe(gexe, sizeof gexe, p->name, true);
     if (!gexe[0]) lx_strcpy(gexe, sizeof gexe, "Game");
-    /* a project can ship its own icon as Icon.ico in its folder; otherwise games get the controller icon */
-    lx_path_join(gicon, sizeof gicon, p->root, "Icon.ico");
+    /* icon: Build Settings > Game Icon (converted to a multi-size .ico), else an Icon.ico in the
+       project folder, else the default game-controller icon */
     icon_arg[0] = 0;
-    if (lx_file_exists(gicon)) snprintf(icon_arg, sizeof icon_arg, " -DLUXORA_GAME_ICON=\"%s\"", gicon);
+    int iw, ih;
+    uint8_t *ipx = load_game_icon(p, &iw, &ih);
+    if (ipx) {
+        lx_path_join(gicon, sizeof gicon, bdir, "GameIcon.ico");
+        if (lx_ico_write(gicon, ipx, iw, ih)) snprintf(icon_arg, sizeof icon_arg, " -DLUXORA_GAME_ICON=\"%s\"", gicon);
+        lx_free(ipx);
+    } else {
+        lx_path_join(gicon, sizeof gicon, p->root, "Icon.ico");
+        if (lx_file_exists(gicon)) snprintf(icon_arg, sizeof icon_arg, " -DLUXORA_GAME_ICON=\"%s\"", gicon);
+    }
     snprintf(cmd, sizeof cmd, "cmake -S \"%s\" -B \"%s\" -DCMAKE_BUILD_TYPE=%s -DLUXORA_BUILD_EDITOR=OFF -DLUXORA_BUILD_TESTS=OFF -DLUXORA_GAME_PROJECT=\"%s\""
              " -DLUXORA_GAME_NAME=\"%s\" -DLUXORA_GAME_COMPANY=\"%s\" -DLUXORA_GAME_VERSION=\"%s\" -DLUXORA_GAME_EXE=\"%s\"%s%s",
              j->engine, bdir, p->build.development_build ? "RelWithDebInfo" : "Release", p->root, gname, gcompany, gversion, gexe,
@@ -200,11 +220,37 @@ static bool build_android(const BuildJob *j) {
     /* the assets path handed to gradle is the folder that contains Data/ */
     char assets_root[LX_PATH_MAX];
     lx_path_join(assets_root, sizeof assets_root, bdir, "assets");
+    /* launcher icon: Build Settings > Game Icon as mipmaps, else the default in android/app/src/main/res */
+    char res_arg[LX_PATH_MAX + 32] = "";
+    int iw, ih;
+    uint8_t *ipx = load_game_icon(p, &iw, &ih);
+    if (ipx) {
+        static const struct { const char *dir; int size; } dens[] = {{"mipmap-mdpi", 48}, {"mipmap-hdpi", 72}, {"mipmap-xhdpi", 96},
+                                                                    {"mipmap-xxhdpi", 144}, {"mipmap-xxxhdpi", 192}};
+        char res[LX_PATH_MAX];
+        lx_path_join(res, sizeof res, bdir, "res");
+        lx_path_remove(res);
+        bool ok = true;
+        for (int i = 0; i < 5; i++) {
+            char d[LX_PATH_MAX], f[LX_PATH_MAX];
+            lx_path_join(d, sizeof d, res, dens[i].dir);
+            lx_mkdir_p(d);
+            lx_path_join(f, sizeof f, d, "ic_launcher.png");
+            uint8_t *sq = lx_image_square(ipx, iw, ih, dens[i].size);
+            size_t n;
+            uint8_t *png = lx_png_encode(sq, dens[i].size, dens[i].size, &n);
+            ok = lx_file_write(f, png, n) && ok;
+            lx_free(png);
+            lx_free(sq);
+        }
+        lx_free(ipx);
+        if (ok) snprintf(res_arg, sizeof res_arg, " -PluxoraRes=\"%s\"", res);
+    }
     snprintf(cmd, sizeof cmd,
              "%s -p \"%s\" assembleDebug --no-daemon -PluxoraProject=\"%s\" -PluxoraAppId=%s -PluxoraAppName=\"%s\" -PluxoraMinSdk=%d "
-             "-PluxoraOrientation=%s -PluxoraAssets=\"%s\" -PluxoraBuildDir=\"%s/gradle\"",
+             "-PluxoraOrientation=%s -PluxoraAssets=\"%s\" -PluxoraBuildDir=\"%s/gradle\"%s",
              gradle, gradle_dir, p->root, p->build.android_package, app_name, p->build.android_min_sdk,
-             p->build.android_orientation ? "portrait" : "sensorLandscape", assets_root, bdir);
+             p->build.android_orientation ? "portrait" : "sensorLandscape", assets_root, bdir, res_arg);
     if (run(cmd, NULL) != 0) { LX_ERROR("Gradle build failed"); return false; }
     char apk[LX_PATH_MAX];
     lx_path_join(apk, sizeof apk, bdir, "gradle/outputs/apk/debug/app-debug.apk");

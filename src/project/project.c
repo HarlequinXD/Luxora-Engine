@@ -121,6 +121,7 @@ bool lx_project_save(const LxProject *p) {
                  b->development_build, b->fullscreen, b->window_width, b->window_height);
     lx_sb_printf(&sb, "android_package = %s\nandroid_min_sdk = %d\nandroid_orientation = %s\noutput_dir = %s\n", b->android_package,
                  b->android_min_sdk, b->android_orientation ? "portrait" : "landscape", b->output_dir);
+    lx_sb_printf(&sb, "icon = %s\n", b->icon);
     for (int i = 0; i < b->scene_count; i++) lx_sb_printf(&sb, "scene = %s\n", b->scenes[i]);
     char path[LX_PATH_MAX];
     lx_path_join(path, sizeof path, p->root, "project.lxproj");
@@ -202,6 +203,7 @@ bool lx_project_load(LxProject *p, const char *root) {
             else if (!strcmp(k, "android_min_sdk")) b->android_min_sdk = n;
             else if (!strcmp(k, "android_orientation")) b->android_orientation = !strcmp(v, "portrait");
             else if (!strcmp(k, "output_dir")) lx_strcpy(b->output_dir, sizeof b->output_dir, v);
+            else if (!strcmp(k, "icon")) lx_strcpy(b->icon, sizeof b->icon, v);
             else if (!strcmp(k, "scene") && b->scene_count < LX_MAX_BUILD_SCENES)
                 lx_strcpy(b->scenes[b->scene_count++], sizeof b->scenes[0], v);
         }

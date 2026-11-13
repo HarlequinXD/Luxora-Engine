@@ -54,6 +54,19 @@ int lx_run(const LxAppDesc *d) {
         } else LX_WARN("No project found in %s", d->project_dir);
     }
     if (!lx_platform_init(&wd)) return 1;
+    if (E.has_project && E.project.build.icon[0]) {
+        /* the game's icon for the window/taskbar (Windows also has it embedded in the .exe) */
+        char ip[LX_PATH_MAX];
+        lx_asset_path(ip, sizeof ip, E.project.build.icon);
+        int iw, ih;
+        uint8_t *px = lx_image_load(ip, &iw, &ih);
+        if (px) {
+            uint8_t *sq = lx_image_square(px, iw, ih, 128);
+            lx_platform_set_icon(sq, 128, 128);
+            lx_free(sq);
+            lx_free(px);
+        }
+    }
     if (!lx_renderer_init()) { lx_platform_shutdown(); return 2; }
     if (E.has_project) *lx_graphics_settings() = E.project.graphics;
     lx_renderer_set_vsync(lx_graphics_settings()->vsync);

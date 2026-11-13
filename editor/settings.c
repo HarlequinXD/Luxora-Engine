@@ -753,12 +753,142 @@ static void bs_remove(UiNode *n) {
     build_settings_fill();
 }
 static void bs_close(UiNode *n) { LX_UNUSED(n); g_build_body = NULL; ui_close_modal(ED.ui); }
+
+/* ---- Game Icon ---- */
+#include "app_icon.h"
+static UiNode *g_icon_preview, *g_icon_hint;
+static uint32_t g_icon_tex, g_default_icon_tex;
+static char g_icon_tex_ref[LX_REF_MAX];
+
+static uint32_t default_game_icon(void) {
+    if (!g_default_icon_tex) {
+        int w, h;
+        uint8_t *px = lx_png_decode(lx_game_icon_64_png, sizeof lx_game_icon_64_png, &w, &h);
+        if (px) { g_default_icon_tex = lx_ui_texture_from_rgba(px, w, h); lx_free(px); }
+    }
+    return g_default_icon_tex;
+}
+
+/* preview texture for the current icon setting (re-made when the setting changes) */
+static uint32_t icon_preview_texture(const char **problem) {
+    const char *ref = ED.project.build.icon;
+    *problem = NULL;
+    if (!ref[0]) return default_game_icon();
+    if (g_icon_tex && !strcmp(g_icon_tex_ref, ref)) return g_icon_tex;
+    if (g_icon_tex) { lx_ui_texture_free(g_icon_tex); g_icon_tex = 0; }
+    lx_strcpy(g_icon_tex_ref, sizeof g_icon_tex_ref, ref);
+    char path[LX_PATH_MAX];
+    lx_path_join(path, sizeof path, ED.project.assets, ref);
+    int w, h;
+    uint8_t *px = lx_image_load(path, &w, &h);
+    if (!px) { *problem = "Image not found or not a PNG/TGA/BMP - the default icon will be used."; return default_game_icon(); }
+    if (w != h) *problem = "Not square: the centre will be cropped.";
+    else if (w < 256) *problem = "Small image: 512x512 or larger looks best.";
+    uint8_t *sq = lx_image_square(px, w, h, 96);
+    g_icon_tex = lx_ui_texture_from_rgba(sq, 96, 96);
+    lx_free(sq);
+    lx_free(px);
+    return g_icon_tex;
+}
+
+static void icon_refresh(void) {
+    const char *problem;
+    if (g_icon_preview) g_icon_preview->texture = icon_preview_texture(&problem);
+    else icon_preview_texture(&problem);
+    if (g_icon_hint) {
+        ui_set_text(g_icon_hint, "%s", problem ? problem
+                                       : ED.project.build.icon[0] ? "Used for the Windows .exe, the Android launcher and the game window."
+                                                                  : "Default icon. Choose a square PNG (512x512 or larger) to use your own.");
+        g_icon_hint->fg = problem ? ui_theme(ED.ui)->warning : ui_theme(ED.ui)->text_dim;
+    }
+}
+static void icon_changed(UiNode *n) { LX_UNUSED(n); lx_project_save(&ED.project); icon_refresh(); }
+static void icon_set(const char *ref) {
+    lx_strcpy(ED.project.build.icon, sizeof ED.project.build.icon, ref);
+    lx_project_save(&ED.project);
+    build_settings_fill();
+}
+static void icon_drop(UiNode *n, const char *type, const char *payload) { LX_UNUSED(n); LX_UNUSED(type); icon_set(payload); }
+static void icon_pick(UiNode *n) { icon_set(n->text); }
+static void icon_clear(UiNode *n) { LX_UNUSED(n); icon_set(""); }
+
+static void collect_images(UiNode *menu, const char *dir, const char *rel, int *count) {
+    LxDirEntry *e;
+    int n = lx_dir_list(dir, &e);
+    for (int i = 0; i < n && *count < 200; i++) {
+        char full[LX_PATH_MAX], ref[LX_REF_MAX];
+        lx_path_join(full, sizeof full, dir, e[i].name);
+        if (rel[0]) snprintf(ref, sizeof ref, "%s/%s", rel, e[i].name);
+        else lx_strcpy(ref, sizeof ref, e[i].name);
+        if (e[i].is_dir) { collect_images(menu, full, ref, count); continue; }
+        const char *x = lx_path_ext(e[i].name);
+        if (strcmp(x, ".png") && strcmp(x, ".PNG") && strcmp(x, ".tga") && strcmp(x, ".bmp")) continue;
+        UiNode *it = ui_menu_item(ED.ui, menu, ref, NULL, icon_pick);
+        it->icon = UI_ICON_TEXTURE;
+        it->icon_color = ed_color_for_icon(UI_ICON_TEXTURE);
+        (*count)++;
+    }
+    lx_free(e);
+}
+static void icon_choose(UiNode *b) {
+    UiNode *p = ui_popup(ED.ui, b->x, b->y + b->ch, 320);
+    int count = 0;
+    collect_images(p, ED.project.assets, "", &count);
+    if (!count) {
+        UiNode *it = ui_menu_item(ED.ui, p, "No images yet - add a PNG to Assets/Textures", NULL, NULL);
+        it->disabled = true;
+    }
+}
+
+static void icon_section(UiNode *right) {
+    UiCtx *ui = ED.ui;
+    const UiTheme *t = ui_theme(ui);
+    UiNode *hl = ui_label(ui, right, "Game Icon");
+    hl->font = UI_FONT_BOLD;
+    UiNode *row = ui_box(ui, right, UI_ROW);
+    row->h = 72;
+    row->gap = 12;
+    row->cross_align = UI_ALIGN_CENTER;
+    const char *problem;
+    g_icon_preview = ui_image(ui, row, icon_preview_texture(&problem));
+    g_icon_preview->w = 64;
+    g_icon_preview->h = 64;
+    g_icon_preview->bg = t->field;
+    g_icon_preview->radius = 8;
+    g_icon_preview->accept = "texture";
+    g_icon_preview->on_drop = icon_drop;
+    lx_strcpy(g_icon_preview->tooltip, sizeof g_icon_preview->tooltip, "Drop an image here");
+    UiNode *col = ui_box(ui, row, UI_COL);
+    col->grow = 1;
+    col->gap = 6;
+    UiNode *fr = ui_box(ui, col, UI_ROW);
+    fr->h = 26;
+    fr->gap = 6;
+    UiNode *tf = ui_textfield(ui, fr, ED.project.build.icon, sizeof ED.project.build.icon);
+    tf->grow = 1;
+    tf->icon = UI_ICON_TEXTURE;
+    tf->accept = "texture";
+    tf->on_drop = icon_drop;
+    tf->on_change = icon_changed;
+    lx_strcpy(tf->hint, sizeof tf->hint, "Default (game controller)");
+    UiNode *ch = ui_button(ui, fr, "Choose...", icon_choose);
+    ch->icon = UI_ICON_FOLDER_OPEN;
+    ch->w = 110;
+    UiNode *cl = ui_button(ui, fr, "Reset", icon_clear);
+    cl->w = 70;
+    cl->disabled = !ED.project.build.icon[0];
+    g_icon_hint = ui_label(ui, col, "");
+    g_icon_hint->font = UI_FONT_SMALL;
+    g_icon_hint->wrap = true;
+    icon_refresh();
+}
 static void bs_save(UiNode *n) { LX_UNUSED(n); lx_project_save(&ED.project); }
 
 static void build_settings_fill(void) {
     if (!g_build_body) return;
     UiCtx *ui = ED.ui;
     const UiTheme *t = ui_theme(ui);
+    g_icon_preview = g_icon_hint = NULL;
     ui_clear(ui, g_build_body);
     UiNode *cols = ui_box(ui, g_build_body, UI_ROW);
     cols->grow = 1;
@@ -813,6 +943,7 @@ static void build_settings_fill(void) {
     addc->icon = UI_ICON_PLUS;
     addc->h = 28;
     addc->w = 160;
+    icon_section(right);
     UiNode *opt = ui_label(ui, right, "Options");
     opt->font = UI_FONT_BOLD;
     UiNode *r = ed_prop_row(right, "Development Build");
@@ -862,7 +993,7 @@ static void build_settings_fill(void) {
 
 void ed_build_settings(void) {
     g_build_platform = (int)ED.project.build.target;
-    g_build_body = ui_modal(ED.ui, "Build Settings", 820, 560);
+    g_build_body = ui_modal(ED.ui, "Build Settings", 820, 650);
     build_settings_fill();
 }
 

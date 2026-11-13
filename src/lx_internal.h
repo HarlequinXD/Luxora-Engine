@@ -192,6 +192,10 @@ struct LxTexture {
 };
 uint8_t *lx_image_load(const char *path, int *w, int *h); /* RGBA8; PNG, TGA, BMP */
 uint8_t *lx_png_decode(const uint8_t *data, size_t size, int *w, int *h);
+uint8_t *lx_png_encode(const uint8_t *rgba, int w, int h, size_t *out_size);
+uint8_t *lx_image_resize(const uint8_t *rgba, int sw, int sh, int dw, int dh);   /* area-averaged */
+uint8_t *lx_image_square(const uint8_t *rgba, int w, int h, int size);           /* centre-crop + resize */
+bool lx_ico_write(const char *path, const uint8_t *rgba, int w, int h);            /* multi-size Windows icon */
 void lx_renderer_texture_release(LxTexture *t);
 
 struct LxSound {

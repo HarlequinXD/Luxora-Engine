@@ -6,6 +6,7 @@
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <application
         android:label="${appName}"
+        android:icon="@mipmap/ic_launcher"
         android:hasCode="false"
         android:appCategory="game"
         android:isGame="true"

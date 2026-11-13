@@ -104,11 +104,14 @@ jobs:
         run: cmake --build build --config Release --parallel
       - name: Unit tests
         run: build\Release\luxora_tests.exe
+        env:
+          LUXORA_KEEP_TEST_ICON: "1"
 
       - name: Build a game executable the way the editor does
         run: |
           cmake -S . -B build-game -A x64 -DLUXORA_BUILD_EDITOR=OFF -DLUXORA_BUILD_TESTS=OFF `
-                -DLUXORA_GAME_NAME="CI Game" -DLUXORA_GAME_COMPANY="Luxora CI" -DLUXORA_GAME_VERSION="1.2.3" -DLUXORA_GAME_EXE="CI Game"
+                -DLUXORA_GAME_NAME="CI Game" -DLUXORA_GAME_COMPANY="Luxora CI" -DLUXORA_GAME_VERSION="1.2.3" -DLUXORA_GAME_EXE="CI Game" `
+                -DLUXORA_GAME_ICON="$PWD/test_icon.ico"
           cmake --build build-game --config Release --target luxora_player --parallel
 
       - name: Check the executables carry version info, a manifest and their icons
@@ -117,7 +120,7 @@ jobs:
           Add-Type -AssemblyName System.Drawing
           $checks = @(
             @{ exe = "build\Release\LuxoraEditor.exe"; product = "Luxora Editor"; icon = "editor" },
-            @{ exe = "build-game\Release\CI Game.exe"; product = "CI Game"; icon = "game" }
+            @{ exe = "build-game\Release\CI Game.exe"; product = "CI Game"; icon = "custom" }
           )
           foreach ($c in $checks) {
             $v = (Get-Item $c.exe).VersionInfo

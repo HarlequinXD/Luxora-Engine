@@ -2,6 +2,7 @@
 //   luxoraProject  project folder (its Assets/Scripts/*.c are compiled in)
 //   luxoraAssets   folder containing the staged Data/ directory
 //   luxoraAppId, luxoraAppName, luxoraMinSdk, luxoraOrientation, luxoraBuildDir
+//   luxoraRes      optional res/ folder with the game's launcher icon (mipmap-*/ic_launcher.png)
 plugins { id 'com.android.application' }
 
 def prop = { String name, def fallback -> project.hasProperty(name) ? project.property(name) : fallback }
@@ -38,7 +39,10 @@ android {
         }
     }
     sourceSets {
-        main { assets.srcDirs = [prop('luxoraAssets', 'src/main/assets')] }
+        main {
+            assets.srcDirs = [prop('luxoraAssets', 'src/main/assets')]
+            if (project.hasProperty('luxoraRes')) res.srcDirs = [project.property('luxoraRes')]
+        }
     }
     buildTypes {
         debug { debuggable true; jniDebuggable false }

@@ -104,6 +104,27 @@ static void s_quit_cancel(void) {
     ED.dirty = false;
 }
 
+#include "app_icon.h"
+static void s_game_icon(void) {
+    /* a custom game icon: written as a PNG into the project and picked in Build Settings */
+    int w, h;
+    uint8_t *px = lx_png_decode(lx_app_icon_64_png, sizeof lx_app_icon_64_png, &w, &h);
+    uint8_t *big = lx_image_resize(px, w, h, 256, 256);
+    size_t n;
+    uint8_t *png = lx_png_encode(big, 256, 256, &n);
+    char dir[LX_PATH_MAX], path[LX_PATH_MAX];
+    lx_path_join(dir, sizeof dir, ED.project.assets, "Textures");
+    lx_mkdir_p(dir);
+    lx_path_join(path, sizeof path, dir, "GameIcon.png");
+    SMOKE_CHECK(lx_file_write(path, png, n), "write a game icon image");
+    lx_free(png); lx_free(big); lx_free(px);
+    lx_strcpy(ED.project.build.icon, sizeof ED.project.build.icon, "Textures/GameIcon.png");
+    lx_project_save(&ED.project);
+    ed_build_settings();
+    LxProject check;
+    SMOKE_CHECK(lx_project_load(&check, ED.project.root) && !strcmp(check.build.icon, "Textures/GameIcon.png"), "game icon saved in the project");
+}
+
 static UiNode *g_first_widget;
 static void s_mat_select(void) {
     char p[LX_PATH_MAX];
@@ -245,6 +266,8 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {190, s_new_scene, "new scene"},
     {196, s_reopen, "reopen startup scene"},
     {202, s_layout, "rebuild layout"},
+    {204, s_game_icon, "set a custom game icon"},
+    {205, s_close, "close build settings"},
     {206, s_game_edit, "game view in edit mode"},
     {209, s_game_back, "scene view"},
     {211, s_game_play, "play switches to game view"},

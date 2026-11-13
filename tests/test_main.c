@@ -1,4 +1,5 @@
 /* Luxora headless test suite: runs without a GPU or window. */
+#include <stdlib.h>
 #include "lx_internal.h"
 #include "png_fixtures.h"
 
@@ -113,6 +114,27 @@ static void test_reflection_probe(void) {
     lx_scene_destroy(c);
     LxGraphicsSettings g = lx_graphics_defaults(0), u = lx_graphics_defaults(3);
     CHECK(g.reflections_enabled && !g.ssr_enabled && u.ssr_enabled && u.reflection_resolution > g.reflection_resolution, "reflection presets");
+}
+
+static void test_icon_images(void) {
+    printf("icon images\n");
+    int w = 40, h = 24;
+    uint8_t *px = lx_alloc((size_t)w * h * 4);
+    for (int i = 0; i < w * h; i++) { px[i * 4] = (uint8_t)(i * 7); px[i * 4 + 1] = (uint8_t)(i >> 2); px[i * 4 + 2] = 200; px[i * 4 + 3] = (uint8_t)(i % 3 ? 255 : 128); }
+    size_t n;
+    uint8_t *png = lx_png_encode(px, w, h, &n);
+    int dw, dh;
+    uint8_t *back = lx_png_decode(png, n, &dw, &dh);
+    CHECK(back && dw == w && dh == h && !memcmp(back, px, (size_t)w * h * 4), "png encode/decode round trip");
+    uint8_t *sq = lx_image_square(px, w, h, 16);
+    CHECK(sq != NULL, "square resize");
+    const char *ico = "test_icon.ico";
+    CHECK(lx_ico_write(ico, px, w, h), "ico written");
+    size_t isz;
+    uint8_t *f = (uint8_t *)lx_file_read(ico, &isz);
+    CHECK(f && isz > 6 && f[2] == 1 && f[4] == 9, "ico header: %d images", f ? f[4] : -1);
+    lx_free(f); lx_free(sq); lx_free(back); lx_free(png); lx_free(px);
+    if (!getenv("LUXORA_KEEP_TEST_ICON")) remove(ico);   /* CI builds a game with it */
 }
 
 static void test_meshes(void) {
@@ -508,6 +530,7 @@ int main(void) {
     test_wav();
     test_input();
     test_reflection_probe();
+    test_icon_images();
     lx_assets_clear();
     lx_jobs_shutdown();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

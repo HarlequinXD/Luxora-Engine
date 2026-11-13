@@ -67,6 +67,38 @@ static bool contains_ci(const char *hay, const char *needle) {
     return false;
 }
 
+/* ---- project icons: the game's icon from Build Settings, or the Luxora app icon ---- */
+static struct { char root[LX_PATH_MAX]; char icon[LX_REF_MAX]; uint32_t tex; } g_icons[ED_MAX_RECENT];
+static int g_icon_count;
+
+static void icons_clear(void) {
+    for (int i = 0; i < g_icon_count; i++) lx_ui_texture_free(g_icons[i].tex);
+    g_icon_count = 0;
+}
+
+/* 0 = no custom icon (show the app icon) */
+static uint32_t project_icon(const LxProject *p) {
+    if (!p->build.icon[0]) return 0;
+    for (int i = 0; i < g_icon_count; i++)
+        if (!strcmp(g_icons[i].root, p->root) && !strcmp(g_icons[i].icon, p->build.icon)) return g_icons[i].tex;
+    if (g_icon_count >= ED_MAX_RECENT) return 0;
+    char path[LX_PATH_MAX];
+    lx_path_join(path, sizeof path, p->assets, p->build.icon);
+    int w, h;
+    uint8_t *px = lx_image_load(path, &w, &h);
+    uint32_t tex = 0;
+    if (px) {
+        uint8_t *sq = lx_image_square(px, w, h, 64);
+        tex = lx_ui_texture_from_rgba(sq, 64, 64);
+        lx_free(sq);
+        lx_free(px);
+    }
+    lx_strcpy(g_icons[g_icon_count].root, LX_PATH_MAX, p->root);
+    lx_strcpy(g_icons[g_icon_count].icon, LX_REF_MAX, p->build.icon);
+    g_icons[g_icon_count++].tex = tex;
+    return tex;
+}
+
 static void rebuild_list(void) {
     if (!PM.list) return;
     UiCtx *ui = ED.ui;
@@ -91,11 +123,19 @@ static void rebuild_list(void) {
         row->on_click = NULL;
         row->on_right_click = recent_menu;
         row->tooltip[0] = 0;
-        UiNode *icon = ui_label(ui, row, "");
-        icon->icon = ok ? UI_ICON_APP : UI_ICON_WARNING;   /* missing projects show a warning instead */
-        icon->icon_size = 30;
-        icon->icon_color = ok ? t->accent : t->text_disabled;
-        icon->w = 34;
+        uint32_t custom = ok ? project_icon(&p) : 0;
+        if (custom) {
+            UiNode *img = ui_image(ui, row, custom);
+            img->w = 34;
+            img->h = 34;
+            img->radius = 6;
+        } else {
+            UiNode *icon = ui_label(ui, row, "");
+            icon->icon = ok ? UI_ICON_APP : UI_ICON_WARNING;   /* missing projects show a warning instead */
+            icon->icon_size = 30;
+            icon->icon_color = ok ? t->accent : t->text_disabled;
+            icon->w = 34;
+        }
         UiNode *col = ui_box(ui, row, UI_COL);
         col->grow = 1;
         col->align = UI_ALIGN_CENTER;
@@ -358,6 +398,7 @@ static void nav_click(UiNode *n) {
 }
 
 void ed_project_manager_build(void) {
+    icons_clear();   /* icons may have changed while a project was open */
     UiCtx *ui = ED.ui;
     const UiTheme *t = ui_theme(ui);
     UiNode *root = ui_root(ui);

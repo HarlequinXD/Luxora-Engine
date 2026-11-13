@@ -292,3 +292,147 @@ uint8_t *lx_image_load(const char *path, int *w, int *h) {
     if (!img) LX_WARN("Unsupported or corrupt image: %s", path);
     return img;
 }
+
+/* ======================================================================
+ *  Encoding: PNG (uncompressed deflate - small icons only), resizing, .ico
+ * ====================================================================== */
+static uint32_t crc_table[256];
+static void crc_init(void) {
+    if (crc_table[1]) return;
+    for (uint32_t n = 0; n < 256; n++) {
+        uint32_t c = n;
+        for (int k = 0; k < 8; k++) c = (c & 1) ? 0xedb88320u ^ (c >> 1) : c >> 1;
+        crc_table[n] = c;
+    }
+}
+static uint32_t crc32_of(const uint8_t *p, size_t n) {
+    crc_init();
+    uint32_t c = 0xffffffffu;
+    for (size_t i = 0; i < n; i++) c = crc_table[(c ^ p[i]) & 0xff] ^ (c >> 8);
+    return c ^ 0xffffffffu;
+}
+static void put_be32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v; }
+
+uint8_t *lx_png_encode(const uint8_t *rgba, int w, int h, size_t *out_size) {
+    size_t row = (size_t)w * 4 + 1, raw_size = row * (size_t)h;
+    size_t blocks = (raw_size + 65534) / 65535;
+    size_t zsize = 2 + raw_size + blocks * 5 + 4;
+    size_t total = 8 + (12 + 13) + (12 + zsize) + 12;
+    uint8_t *out = lx_alloc(total), *o = out;
+    static const uint8_t sig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
+    memcpy(o, sig, 8); o += 8;
+    /* IHDR */
+    put_be32(o, 13); memcpy(o + 4, "IHDR", 4);
+    put_be32(o + 8, (uint32_t)w); put_be32(o + 12, (uint32_t)h);
+    o[16] = 8; o[17] = 6; o[18] = 0; o[19] = 0; o[20] = 0;
+    put_be32(o + 21, crc32_of(o + 4, 17));
+    o += 25;
+    /* IDAT: zlib stream of stored blocks */
+    put_be32(o, (uint32_t)zsize); memcpy(o + 4, "IDAT", 4);
+    uint8_t *z = o + 8, *zp = z;
+    *zp++ = 0x78; *zp++ = 0x01;
+    uint32_t a = 1, b = 0;
+    size_t done = 0;
+    uint8_t *raw = lx_alloc(raw_size);
+    for (int y = 0; y < h; y++) {
+        raw[(size_t)y * row] = 0;
+        memcpy(raw + (size_t)y * row + 1, rgba + (size_t)y * (size_t)w * 4, (size_t)w * 4);
+    }
+    while (done < raw_size) {
+        size_t n = raw_size - done > 65535 ? 65535 : raw_size - done;
+        *zp++ = done + n == raw_size ? 1 : 0;
+        *zp++ = (uint8_t)n; *zp++ = (uint8_t)(n >> 8);
+        *zp++ = (uint8_t)~n; *zp++ = (uint8_t)(~n >> 8);
+        memcpy(zp, raw + done, n);
+        for (size_t i = 0; i < n; i++) { a = (a + raw[done + i]) % 65521; b = (b + a) % 65521; }
+        zp += n;
+        done += n;
+    }
+    put_be32(zp, (b << 16) | a); zp += 4;
+    lx_free(raw);
+    put_be32(zp, crc32_of(o + 4, 4 + zsize));
+    o = zp + 4;
+    /* IEND */
+    put_be32(o, 0); memcpy(o + 4, "IEND", 4); put_be32(o + 8, crc32_of(o + 4, 4));
+    o += 12;
+    *out_size = (size_t)(o - out);
+    return out;
+}
+
+/* Area-averaging resize (exact box filter when shrinking, bilinear-ish when growing).
+ * Colour is averaged premultiplied by alpha so transparent edges don't darken. */
+uint8_t *lx_image_resize(const uint8_t *src, int sw, int sh, int dw, int dh) {
+    uint8_t *dst = lx_alloc((size_t)dw * (size_t)dh * 4);
+    float sx = (float)sw / (float)dw, sy = (float)sh / (float)dh;
+    for (int y = 0; y < dh; y++) {
+        float y0 = (float)y * sy, y1 = y0 + sy;
+        for (int x = 0; x < dw; x++) {
+            float x0 = (float)x * sx, x1 = x0 + sx;
+            float acc[4] = {0, 0, 0, 0}, wsum = 0;
+            int iy0 = (int)y0, iy1 = (int)ceilf(y1), ix0 = (int)x0, ix1 = (int)ceilf(x1);
+            if (iy1 <= iy0) iy1 = iy0 + 1;
+            if (ix1 <= ix0) ix1 = ix0 + 1;
+            for (int yy = iy0; yy < iy1 && yy < sh; yy++) {
+                float wy = lx_minf((float)yy + 1, y1) - lx_maxf((float)yy, y0);
+                if (sy < 1) wy = 1;
+                for (int xx = ix0; xx < ix1 && xx < sw; xx++) {
+                    float wx = lx_minf((float)xx + 1, x1) - lx_maxf((float)xx, x0);
+                    if (sx < 1) wx = 1;
+                    const uint8_t *p = src + ((size_t)yy * (size_t)sw + (size_t)xx) * 4;
+                    float wgt = wx * wy, al = (float)p[3] / 255.0f;
+                    acc[0] += (float)p[0] * al * wgt; acc[1] += (float)p[1] * al * wgt; acc[2] += (float)p[2] * al * wgt;
+                    acc[3] += al * wgt;
+                    wsum += wgt;
+                }
+            }
+            uint8_t *d = dst + ((size_t)y * (size_t)dw + (size_t)x) * 4;
+            float al = wsum > 0 ? acc[3] / wsum : 0;
+            for (int c = 0; c < 3; c++) d[c] = (uint8_t)lx_clampf(acc[3] > 0 ? acc[c] / acc[3] : 0, 0, 255);
+            d[3] = (uint8_t)lx_clampf(al * 255.0f + 0.5f, 0, 255);
+        }
+    }
+    return dst;
+}
+
+/* Square-crops (centred) and scales an image to size x size. */
+uint8_t *lx_image_square(const uint8_t *src, int w, int h, int size) {
+    int s = w < h ? w : h, ox = (w - s) / 2, oy = (h - s) / 2;
+    uint8_t *crop = lx_alloc((size_t)s * (size_t)s * 4);
+    for (int y = 0; y < s; y++) memcpy(crop + (size_t)y * (size_t)s * 4, src + ((size_t)(y + oy) * (size_t)w + (size_t)ox) * 4, (size_t)s * 4);
+    uint8_t *out = lx_image_resize(crop, s, s, size, size);
+    lx_free(crop);
+    return out;
+}
+
+/* Windows .ico with PNG-compressed entries (Vista+) at the standard sizes. */
+bool lx_ico_write(const char *path, const uint8_t *rgba, int w, int h) {
+    static const int sizes[] = {16, 20, 24, 32, 40, 48, 64, 128, 256};
+    enum { N = (int)(sizeof sizes / sizeof sizes[0]) };
+    uint8_t *png[N];
+    size_t png_size[N], total = 6 + 16 * N;
+    for (int i = 0; i < N; i++) {
+        uint8_t *px = lx_image_square(rgba, w, h, sizes[i]);
+        png[i] = lx_png_encode(px, sizes[i], sizes[i], &png_size[i]);
+        lx_free(px);
+        total += png_size[i];
+    }
+    uint8_t *f = lx_alloc(total);
+    memset(f, 0, 6 + 16 * N);
+    f[2] = 1; f[4] = (uint8_t)N;
+    size_t off = 6 + 16 * N;
+    for (int i = 0; i < N; i++) {
+        uint8_t *e = f + 6 + 16 * i;
+        e[0] = (uint8_t)(sizes[i] >= 256 ? 0 : sizes[i]);
+        e[1] = e[0];
+        e[4] = 1; e[6] = 32;
+        uint32_t sz = (uint32_t)png_size[i], of = (uint32_t)off;
+        memcpy(e + 8, &sz, 4);   /* little-endian on every platform Luxora targets */
+        memcpy(e + 12, &of, 4);
+        memcpy(f + off, png[i], png_size[i]);
+        off += png_size[i];
+        lx_free(png[i]);
+    }
+    bool ok = lx_file_write(path, f, total);
+    lx_free(f);
+    return ok;
+}

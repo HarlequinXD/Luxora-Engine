@@ -595,6 +595,7 @@ typedef struct LxBuildSettings {
     int android_min_sdk;
     int android_orientation;    /* 0 landscape, 1 portrait */
     char output_dir[LX_PATH_MAX];
+    char icon[LX_REF_MAX];      /* game icon image in Assets (PNG/TGA/BMP); empty = default game-controller icon */
 } LxBuildSettings;
 
 typedef struct LxProject {
