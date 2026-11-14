@@ -422,7 +422,7 @@ static void draw_limb(UiCtx *ui, float x0, float y0, float x1, float y1, float t
 static void avatar_draw(UiNode *n, UiCtx *ui) {
     const UiTheme *t = ui_theme(ui);
     float k = ui_scale(ui);
-    ui_draw_rect_gradient(ui, n->x, n->y, n->cw, n->ch, UI_HEX(0x1d1211), UI_HEX(0x0e0909), 8 * k, false);
+    ui_draw_rect_gradient(ui, n->x, n->y, n->cw, n->ch, UI_HEX(0x1f2023), UI_HEX(0x17181b), 8 * k, false);
     float X, Y, W, H;
     diagram_rect(n, &X, &Y, &W, &H);
     uint32_t skin = UI_RGBA(120, 64, 50, 150), skin_edge = UI_RGBA(200, 110, 80, 90);

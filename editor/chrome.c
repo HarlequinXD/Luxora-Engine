@@ -73,6 +73,7 @@ static UiNode *caption_button(UiNode *row, UiIcon icon, const char *tip, void (*
 /* a thin ember line along the bottom of the title bar, brightest in the middle */
 static void titlebar_glow(UiNode *n, UiCtx *ui) {
     const UiTheme *t = ui_theme(ui);
+    if (!t->glow) return;
     float h = lx_maxf(1.0f, ui_scale(ui)), y = n->y + n->ch - h, half = n->cw * 0.5f;
     ui_draw_rect_gradient(ui, n->x, y, half, h, ui_alpha(t->glow, 0), ui_alpha(t->glow, 0.85f), 0, true);
     ui_draw_rect_gradient(ui, n->x + half, y, half, h, ui_alpha(t->glow, 0.85f), ui_alpha(t->glow, 0), 0, true);

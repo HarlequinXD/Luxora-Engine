@@ -4,14 +4,14 @@
 #include "graph_editor.h"
 #include <math.h>
 
-#define COL_TEXT UI_HEX(0xf1e6e1)
-#define COL_DIM UI_HEX(0xa48f89)
-#define COL_FIELD UI_HEX(0x0b0808)
-#define COL_EDGE UI_HEX(0x2c1e1d)
+#define COL_TEXT UI_HEX(0xdfe1e6)
+#define COL_DIM UI_HEX(0x8d919a)
+#define COL_FIELD UI_HEX(0x17181b)
+#define COL_EDGE UI_HEX(0x34363c)
 #define COL_VAR_BG UI_HEX(0x2a1c33)
 #define COL_VAR_ON UI_HEX(0x4a2c5a)
 #define COL_VAR_TEXT UI_HEX(0xe2c8ff)
-#define COL_ACCENT UI_HEX(0xff5a1f)
+#define COL_ACCENT UI_HEX(0x3d7cf5)
 #define COL_OK UI_HEX(0x7cc24e)
 #define COL_RUN UI_HEX(0xffb03a)
 
@@ -555,7 +555,7 @@ static void param_row(UiNode *body, int si, int ai, int pi, const LxGraphAction 
         vb->user = b;
         bool known = gp->value[0] && (lx_graph_find_var(ge_graph(), gp->value) || lx_fsm_globals_find_var(gp->value));
         vb->bg = COL_VAR_BG;
-        vb->border = gp->value[0] && !known ? UI_HEX(0xff3d3d) : UI_HEX(0x4a2c5a);
+        vb->border = gp->value[0] && !known ? UI_HEX(0xe5534b) : UI_HEX(0x4a2c5a);
         vb->fg = gp->value[0] ? COL_VAR_TEXT : COL_DIM;
         if (gp->value[0] && !known) lx_strcpy(vb->tooltip, sizeof vb->tooltip, "This variable doesn't exist: pick another or add it in the Variables tab");
         if (GE.debug && run && gp->value[0]) {   /* live value */
@@ -581,7 +581,7 @@ static void param_row(UiNode *body, int si, int ai, int pi, const LxGraphAction 
         eq->h = 22;
         eq->font = UI_FONT_MONO;
         eq->radius = 3;
-        eq->bg = gp->is_var ? COL_VAR_ON : UI_HEX(0x1c1415);
+        eq->bg = gp->is_var ? COL_VAR_ON : UI_HEX(0x28292e);
         eq->fg = gp->is_var ? COL_VAR_TEXT : COL_DIM;
         eq->border = gp->is_var ? UI_HEX(0x7a4a8a) : COL_EDGE;
         eq->user = b;
@@ -699,7 +699,7 @@ static void action_block(UiNode *body, int si, int ai, const LxGraphAction *a, c
     UiNode *h = ui_box(ui, wrap, UI_ROW);
     h->h = 26;
     h->gap = 4;
-    h->bg = UI_HEX(0x261a19);
+    h->bg = UI_HEX(0x28292e);
     h->border = COL_EDGE;
     h->radius = 4;
     h->cross_align = UI_ALIGN_CENTER;
@@ -801,7 +801,7 @@ static void color_row(UiNode *body, int current) {
         b->w = 17;
         b->h = 17;
         b->radius = 3;
-        b->bg = i == 0 ? UI_HEX(0x3a2724) : ge_state_color(i);
+        b->bg = i == 0 ? UI_HEX(0x34363c) : ge_state_color(i);
         b->bg_hover = ui_lerp_color(b->bg, UI_HEX(0xffffff), 0.2f);
         b->border = i == current ? COL_ACCENT : COL_EDGE;
         b->tag = i;
@@ -1334,7 +1334,7 @@ static void build_vars_tab(UiNode *body) {
 static UiNode *tab_body(UiNode *tabs, const char *name) {
     UiNode *p = ui_box(ED.ui, tabs, UI_COL);
     lx_strcpy(p->text, sizeof p->text, name);
-    p->bg = UI_HEX(0x161011);
+    p->bg = UI_HEX(0x232428);
     UiNode *b = ui_box(ED.ui, p, UI_COL);
     b->grow = 1;
     b->scroll = true;
@@ -1464,8 +1464,8 @@ static void ab_item(UiNode *list, const LxFsmActionDesc *d, int indent) {
     ui_pad(it, (float)indent, 0, 4, 0);
     bool sel = !strcmp(GE.ab_sel, d->name);
     it->bg = sel ? UI_HEX(0x7a2412) : 0;
-    if (sel) { it->bg_hover = UI_HEX(0x9a3018); it->bg_active = UI_HEX(0x9a3018); }
-    it->fg = sel ? UI_HEX(0xfff6ef) : COL_TEXT;
+    if (sel) { it->bg_hover = UI_HEX(0x34589c); it->bg_active = UI_HEX(0x34589c); }
+    it->fg = sel ? UI_HEX(0xffffff) : COL_TEXT;
     it->drag_type = NULL;
     lx_strcpy(it->path, sizeof it->path, d->name);
     if (d->description) lx_strcpy(it->tooltip, sizeof it->tooltip, d->description);
@@ -1598,9 +1598,9 @@ static void ab_build_details(void) {
     UiNode *add = ui_button(ED.ui, row, "Add Action To State", ab_add_click);
     add->w = 170;
     add->h = 26;
-    add->bg = UI_HEX(0xd8391b);
-    add->bg_hover = UI_HEX(0xff7a2e);
-    add->fg = UI_HEX(0xfff6ef);
+    add->bg = UI_HEX(0x3d7cf5);
+    add->bg_hover = UI_HEX(0x5a92ff);
+    add->fg = UI_HEX(0xffffff);
     add->font = UI_FONT_BOLD;
     add->disabled = ge_sel_index() < 0 || GE.sel_count != 1;
     if (add->disabled) lx_strcpy(add->tooltip, sizeof add->tooltip, "Select one state in the graph first");
@@ -1689,7 +1689,7 @@ void ge_open_action_browser(void) {
     UiNode *det = ui_box(ui, body, UI_COL);
     det->h = 170;
     det->gap = 4;
-    det->bg = UI_HEX(0x120d0d);
+    det->bg = UI_HEX(0x1d1e22);
     det->radius = 4;
     ui_pad(det, 10, 8, 10, 8);
     GE.ab_details = det;
@@ -1950,9 +1950,9 @@ void ed_graph_asset_inspector(UiNode *body, const char *ref) {
     UiNode *b = ui_button(ui, wrap, "Open in State Graph Editor", open_asset_click);
     b->icon = UI_ICON_GRAPH;
     b->h = 30;
-    b->bg = UI_HEX(0xd8391b);
-    b->bg_hover = UI_HEX(0xff7a2e);
-    b->fg = UI_HEX(0xfff6ef);
+    b->bg = UI_HEX(0x3d7cf5);
+    b->bg_hover = UI_HEX(0x5a92ff);
+    b->fg = UI_HEX(0xffffff);
     lx_strcpy(b->path, sizeof b->path, ref);
     hint(wrap, "Give an object this behaviour: drag the asset onto a State Graph component in the Inspector. Each object can override the "
                "variables marked Inspector.");

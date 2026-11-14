@@ -550,7 +550,7 @@ static void draw_axis_triad(UiCtx *ui, UiNode *n) {
         float ex = cx + v.x * r, ey = cy - v.y * r;
         ui_draw_line(ui, cx, cy, ex, ey, 2 * ui_scale(ui), cols[a]);
         ui_draw_circle(ui, ex, ey, 7 * ui_scale(ui), cols[a], 14);
-        ui_draw_text(ui, UI_FONT_SMALL, ex - 3.5f * ui_scale(ui), ey - ui_line_height(ui, UI_FONT_SMALL) * 0.5f, labels[a], UI_HEX(0x120a09));
+        ui_draw_text(ui, UI_FONT_SMALL, ex - 3.5f * ui_scale(ui), ey - ui_line_height(ui, UI_FONT_SMALL) * 0.5f, labels[a], UI_HEX(0x101113));
     }
 }
 
@@ -581,15 +581,15 @@ static void viewport_draw(UiNode *n, UiCtx *ui) {
         float tw = ui_text_width(ui, UI_FONT_BOLD, msg) + 44 * k;
         float bx = n->x + (n->cw - tw) * 0.5f, by = n->y + 8 * k;
         ui_draw_rect(ui, bx, by, tw, 26 * k, cam ? UI_RGBA(22, 13, 12, 210) : ui_alpha(t->warning, 0.92f), 13 * k);
-        ui_draw_icon(ui, cam ? UI_ICON_CAMERA : UI_ICON_WARNING, bx + 12 * k, by + 5 * k, 16 * k, cam ? ed_color_for_icon(UI_ICON_CAMERA) : UI_HEX(0x120a09));
-        ui_draw_text(ui, UI_FONT_BOLD, bx + 34 * k, by + (26 * k - ui_line_height(ui, UI_FONT_BOLD)) * 0.5f, msg, cam ? t->text : UI_HEX(0x120a09));
+        ui_draw_icon(ui, cam ? UI_ICON_CAMERA : UI_ICON_WARNING, bx + 12 * k, by + 5 * k, 16 * k, cam ? ed_color_for_icon(UI_ICON_CAMERA) : UI_HEX(0x101113));
+        ui_draw_text(ui, UI_FONT_BOLD, bx + 34 * k, by + (26 * k - ui_line_height(ui, UI_FONT_BOLD)) * 0.5f, msg, cam ? t->text : UI_HEX(0x101113));
     }
     if (ED.play != ED_EDIT) {
         ui_draw_border(ui, n->x, n->y, n->cw, n->ch, ED.play == ED_PAUSED ? t->warning : t->success, 0, 2 * ui_scale(ui));
         const char *msg = ED.play == ED_PAUSED ? "PAUSED" : (game ? "PLAYING · Game view" : "PLAYING · Scene view");
         float tw = ui_text_width(ui, UI_FONT_BOLD, msg) + 20 * ui_scale(ui);
         ui_draw_rect(ui, n->x + (n->cw - tw) * 0.5f, n->y + 8 * ui_scale(ui), tw, 24 * ui_scale(ui), ui_alpha(ED.play == ED_PAUSED ? t->warning : t->success, 0.9f), 12 * ui_scale(ui));
-        ui_draw_text(ui, UI_FONT_BOLD, n->x + (n->cw - tw) * 0.5f + 10 * ui_scale(ui), n->y + 8 * ui_scale(ui) + (24 * ui_scale(ui) - ui_line_height(ui, UI_FONT_BOLD)) * 0.5f, msg, UI_HEX(0x120a09));
+        ui_draw_text(ui, UI_FONT_BOLD, n->x + (n->cw - tw) * 0.5f + 10 * ui_scale(ui), n->y + 8 * ui_scale(ui) + (24 * ui_scale(ui) - ui_line_height(ui, UI_FONT_BOLD)) * 0.5f, msg, UI_HEX(0x101113));
     }
     if (V.nav == 1) {
         char buf[64];

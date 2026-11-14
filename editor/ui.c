@@ -83,38 +83,38 @@ uint32_t ui_lerp_color(uint32_t a, uint32_t b, float t) {
     return r;
 }
 
-/* Hell theme: obsidian surfaces with a faint warmth, ember accents, and soft vertical gradients. */
+/* the editor theme: cool graphite surfaces, a blue accent and soft vertical gradients */
 static void default_theme(UiTheme *t) {
-    t->window = UI_HEX(0x0d0909);
-    t->window_top = UI_HEX(0x150d0c);
-    t->panel = UI_HEX(0x161011);
-    t->panel_alt = UI_HEX(0x1c1415);
-    t->panel_alt_top = UI_HEX(0x261a19);
-    t->header = UI_HEX(0x110c0c);
-    t->header_top = UI_HEX(0x1b1110);
-    t->field = UI_HEX(0x0b0808);
-    t->field_hover = UI_HEX(0x120d0d);
-    t->border = UI_HEX(0x2c1e1d);
-    t->border_light = UI_HEX(0x4a2c27);
-    t->text = UI_HEX(0xf1e6e1);
-    t->text_dim = UI_HEX(0xa48f89);
-    t->text_disabled = UI_HEX(0x64504c);
-    t->accent = UI_HEX(0xd8391b);
-    t->accent_top = UI_HEX(0xff7a2e);
-    t->accent_hover = UI_HEX(0xec4a20);
-    t->accent_hover_top = UI_HEX(0xff9a45);
-    t->accent_text = UI_HEX(0xfff6ef);
-    t->selection = UI_HEX(0x4e1610);
-    t->selection_top = UI_HEX(0x7a2412);
-    t->hover = UI_HEX(0x241717);
-    t->active = UI_HEX(0x301d1b);
-    t->danger = UI_HEX(0xff3d3d);
-    t->success = UI_HEX(0x7cc24e);
-    t->warning = UI_HEX(0xffb03a);
-    t->axis_x = UI_HEX(0xf0503c);
-    t->axis_y = UI_HEX(0x86c84a);
-    t->axis_z = UI_HEX(0x4f8cf0);
-    t->glow = UI_HEX(0xff5a1f);
+    t->window = UI_HEX(0x1b1c1f);
+    t->window_top = UI_HEX(0x24262b);
+    t->panel = UI_HEX(0x232428);
+    t->panel_alt = UI_HEX(0x28292e);
+    t->panel_alt_top = UI_HEX(0x33353b);
+    t->header = UI_HEX(0x1f2023);
+    t->header_top = UI_HEX(0x2a2c31);
+    t->field = UI_HEX(0x17181b);
+    t->field_hover = UI_HEX(0x1d1e22);
+    t->border = UI_HEX(0x34363c);
+    t->border_light = UI_HEX(0x45474e);
+    t->text = UI_HEX(0xdfe1e6);
+    t->text_dim = UI_HEX(0x8d919a);
+    t->text_disabled = UI_HEX(0x5c5f66);
+    t->accent = UI_HEX(0x2f6be0);
+    t->accent_top = UI_HEX(0x5c95ff);
+    t->accent_hover = UI_HEX(0x3d7cf5);
+    t->accent_hover_top = UI_HEX(0x7aa9ff);
+    t->accent_text = UI_HEX(0xffffff);
+    t->selection = UI_HEX(0x254179);
+    t->selection_top = UI_HEX(0x335a9f);
+    t->hover = UI_HEX(0x2f3137);
+    t->active = UI_HEX(0x393c43);
+    t->danger = UI_HEX(0xe5534b);
+    t->success = UI_HEX(0x3fb950);
+    t->warning = UI_HEX(0xe3b341);
+    t->axis_x = UI_HEX(0xe0524d);
+    t->axis_y = UI_HEX(0x6cc04a);
+    t->axis_z = UI_HEX(0x4a8cf0);
+    t->glow = UI_HEX(0x4a8cff);   /* the soft line under the title bar */
 }
 
 const UiTheme *ui_theme(UiCtx *ui) { return &ui->theme; }
@@ -2242,8 +2242,8 @@ static void draw_node(UiCtx *ui, UiNode *n) {
         draw_field_bg(ui, n);
         float v = n->i ? (float)*n->i : (n->f ? *n->f : 0);
         float tt = lx_clampf((v - n->minv) / lx_maxf(1e-6f, n->maxv - n->minv), 0, 1);
-        float fa = n->hover ? 0.78f : 0.62f;   /* ember fill: deep red rising to orange */
-        ui_draw_rect_gradient(ui, n->x + S(ui, 1), n->y + S(ui, 1), (n->cw - S(ui, 2)) * tt, n->ch - S(ui, 2), ui_alpha(UI_HEX(0x8a1f12), fa),
+        float fa = n->hover ? 0.78f : 0.62f;   
+        ui_draw_rect_gradient(ui, n->x + S(ui, 1), n->y + S(ui, 1), (n->cw - S(ui, 2)) * tt, n->ch - S(ui, 2), ui_alpha(UI_HEX(0x2b4a86), fa),
                               ui_alpha(t->accent_top, fa), S(ui, n->radius), true);
         char buf[64];
         value_to_text(n, buf, sizeof buf);

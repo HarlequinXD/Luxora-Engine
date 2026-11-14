@@ -10,18 +10,18 @@
 
 GraphEd GE = {.zoom = 1, .sel_trans = -1, .sel_comment = -1, .minimap = true, .hints = true, .link_state = -1};
 
-static const uint32_t STATE_COLORS[GE_COLORS] = {0x3a2724, 0x7a2412, 0x1d3a5f, 0x4a2350, 0x24502c, 0x1d4a4a, 0x5a4a14, 0x2a2424};
+static const uint32_t STATE_COLORS[GE_COLORS] = {0x34363c, 0x7a2412, 0x1d3a5f, 0x4a2350, 0x24502c, 0x1d4a4a, 0x5a4a14, 0x2a2b30};
 static const char *const COLOR_NAMES[GE_COLORS] = {"Default", "Red", "Blue", "Purple", "Green", "Teal", "Yellow", "Grey"};
 uint32_t ge_state_color(int c) { return UI_HEX(STATE_COLORS[c >= 0 && c < GE_COLORS ? c : 0]); }
 
-#define COL_LINK UI_HEX(0xc9b6b0)
-#define COL_HOT UI_HEX(0xff7a2e)
-#define COL_ACCENT UI_HEX(0xff5a1f)
+#define COL_LINK UI_HEX(0xb1b5bd)
+#define COL_HOT UI_HEX(0x5a92ff)
+#define COL_ACCENT UI_HEX(0x3d7cf5)
 #define COL_START UI_HEX(0x7cc24e)
-#define COL_TEXT UI_HEX(0xf1e6e1)
-#define COL_DIM UI_HEX(0xa48f89)
-#define COL_BOX UI_HEX(0x1c1415)
-#define COL_EDGE UI_HEX(0x3a2724)
+#define COL_TEXT UI_HEX(0xdfe1e6)
+#define COL_DIM UI_HEX(0x8d919a)
+#define COL_BOX UI_HEX(0x28292e)
+#define COL_EDGE UI_HEX(0x34363c)
 
 /* ======================================================================
  *  the edited graph
@@ -349,24 +349,24 @@ static void draw_state(UiCtx *ui, const LxGraph *g, int i, const LxFsmRun *run) 
     float r = 5 * s;
     /* shadow, glow */
     ui_draw_rect(ui, x + 2 * s, y + 3 * s, w, h, UI_RGBA(0, 0, 0, 110), r);
-    if (active) ui_draw_rect(ui, x - 5 * s, y - 5 * s, w + 10 * s, h + 10 * s, ui_alpha(err ? UI_HEX(0xff3d3d) : COL_ACCENT, 0.22f), r + 4 * s);
+    if (active) ui_draw_rect(ui, x - 5 * s, y - 5 * s, w + 10 * s, h + 10 * s, ui_alpha(err ? UI_HEX(0xe5534b) : COL_ACCENT, 0.22f), r + 4 * s);
     ui_draw_rect(ui, x, y, w, h, COL_BOX, r);
     /* title */
-    if (active) ui_draw_rect_gradient(ui, x, y, w, th, UI_HEX(0xff7a2e), UI_HEX(0xd8391b), r, false);
+    if (active) ui_draw_rect_gradient(ui, x, y, w, th, UI_HEX(0x5a92ff), UI_HEX(0x3d7cf5), r, false);
     else ui_draw_rect(ui, x, y, w, th, ge_state_color(st->color), r);
-    if (st->trans_count) ui_draw_rect(ui, x, y + th - r, w, r, active ? UI_HEX(0xd8391b) : ge_state_color(st->color), 0);
+    if (st->trans_count) ui_draw_rect(ui, x, y + th - r, w, r, active ? UI_HEX(0x3d7cf5) : ge_state_color(st->color), 0);
     ui_push_clip(ui, x, y, w, h);
     UiFont tf = GE.zoom >= 0.8f ? UI_FONT_BOLD : UI_FONT_SMALL;
     if (GE.zoom >= 0.4f) {
         float tw = ui_text_width(ui, tf, st->name);
-        ui_draw_text(ui, tf, x + (w - tw) * 0.5f, y + (th - ui_line_height(ui, tf)) * 0.5f, st->name, UI_HEX(0xfff6ef));
-        if (st->sequence) ui_draw_icon(ui, UI_ICON_LIST, x + w - 18 * s, y + (th - 12 * s) * 0.5f, 12 * s, ui_alpha(UI_HEX(0xfff6ef), 0.7f));
+        ui_draw_text(ui, tf, x + (w - tw) * 0.5f, y + (th - ui_line_height(ui, tf)) * 0.5f, st->name, UI_HEX(0xffffff));
+        if (st->sequence) ui_draw_icon(ui, UI_ICON_LIST, x + w - 18 * s, y + (th - 12 * s) * 0.5f, 12 * s, ui_alpha(UI_HEX(0xffffff), 0.7f));
     }
     /* event rows */
     UiFont ef = GE.zoom >= 0.8f ? UI_FONT_BODY : UI_FONT_SMALL;
     for (int t = 0; t < st->trans_count; t++) {
         float ry = y + th + rh * (float)t;
-        ui_draw_rect(ui, x, ry, w, 1, UI_HEX(0x2c1e1d), 0);
+        ui_draw_rect(ui, x, ry, w, 1, UI_HEX(0x34363c), 0);
         bool hot = sel && GE.sel_trans == t;
         bool fired = run && run->prev_state == i && run->state_time < 1.0f && !strcmp(run->last_event, st->trans[t].event);
         if (hot || fired) ui_draw_rect(ui, x + 1, ry + 1, w - 2, rh - 1, UI_HEX(0x2a1810), 0);
@@ -390,7 +390,7 @@ static void draw_state(UiCtx *ui, const LxGraph *g, int i, const LxFsmRun *run) 
     if (!strcmp(g->start, st->name) && GE.zoom >= 0.35f) {
         float tw = ui_text_width(ui, sf, "START") + 12 * ui_scale(ui);
         ui_draw_rect(ui, x, tab_y, tw, tab_h, COL_START, 3 * s);
-        ui_draw_text(ui, sf, x + (tw - ui_text_width(ui, sf, "START")) * 0.5f, tab_y + (tab_h - ui_line_height(ui, sf)) * 0.5f, "START", UI_HEX(0x0d0909));
+        ui_draw_text(ui, sf, x + (tw - ui_text_width(ui, sf, "START")) * 0.5f, tab_y + (tab_h - ui_line_height(ui, sf)) * 0.5f, "START", UI_HEX(0x1b1c1f));
         ui_draw_line(ui, x + tw * 0.5f, tab_y + tab_h, x + tw * 0.5f, y - 3 * s, 2 * ui_scale(ui), COL_START);
         ui_draw_triangle(ui, x + tw * 0.5f, y - 1 * s, x + tw * 0.5f - 4 * s, y - 6 * s, x + tw * 0.5f + 4 * s, y - 6 * s, COL_START);
     }
@@ -401,7 +401,7 @@ static void draw_state(UiCtx *ui, const LxGraph *g, int i, const LxFsmRun *run) 
         bool fired = run && run->state == i && run->state_time < 1.0f && !strcmp(run->last_event, ev);
         float tx = sx(xs[k]), tw = ws[k] * s;
         ui_draw_rect(ui, tx, tab_y, tw, tab_h, UI_HEX(0x050303), 3 * s);
-        ui_draw_border(ui, tx, tab_y, tw, tab_h, fired ? COL_HOT : UI_HEX(0x4a2c27), 3 * s, 1);
+        ui_draw_border(ui, tx, tab_y, tw, tab_h, fired ? COL_HOT : UI_HEX(0x45474e), 3 * s, 1);
         ui_draw_text(ui, sf, tx + 7 * ui_scale(ui), tab_y + (tab_h - ui_line_height(ui, sf)) * 0.5f, ev, fired ? UI_HEX(0xffb03a) : COL_TEXT);
         uint32_t lc = fired ? COL_HOT : COL_LINK;
         ui_draw_line(ui, tx + tw * 0.5f, tab_y + tab_h, tx + tw * 0.5f, y - 3 * s, 1.6f * ui_scale(ui), lc);
@@ -463,7 +463,7 @@ static void draw_minimap(UiCtx *ui, const LxGraph *g, const LxFsmRun *run) {
     float k = lx_minf((mw - 12) / lx_maxf(1, x1 - x0), (mh - 12) / lx_maxf(1, y1 - y0));
     float ox = mx + (mw - (x1 - x0) * k) * 0.5f, oy = my + (mh - (y1 - y0) * k) * 0.5f;
     ui_draw_rect(ui, mx, my, mw, mh, UI_RGBA(10, 7, 7, 220), 5);
-    ui_draw_border(ui, mx, my, mw, mh, UI_HEX(0x3a2724), 5, 1);
+    ui_draw_border(ui, mx, my, mw, mh, UI_HEX(0x34363c), 5, 1);
     for (int i = 0; i < g->comment_count; i++) {
         const LxGraphComment *c = &g->comments[i];
         ui_draw_rect(ui, ox + (c->x - x0) * k, oy + (c->y - y0) * k, c->w * k, c->h * k, UI_RGBA(90, 74, 32, 120), 1);
@@ -494,7 +494,7 @@ static void minimap_pan(float m_x, float m_y) {
 static void draw_center_message(UiCtx *ui, UiNode *n, const char *title, const char *sub) {
     float s = ui_scale(ui);
     float tw = ui_text_width(ui, UI_FONT_TITLE, title);
-    ui_draw_icon(ui, UI_ICON_GRAPH, n->x + (n->cw - 48 * s) * 0.5f, n->y + n->ch * 0.5f - 90 * s, 48 * s, UI_HEX(0x4a2c27));
+    ui_draw_icon(ui, UI_ICON_GRAPH, n->x + (n->cw - 48 * s) * 0.5f, n->y + n->ch * 0.5f - 90 * s, 48 * s, UI_HEX(0x45474e));
     ui_draw_text(ui, UI_FONT_TITLE, n->x + (n->cw - tw) * 0.5f, n->y + n->ch * 0.5f - 30 * s, title, COL_TEXT);
     if (sub) {
         float sw = ui_text_width(ui, UI_FONT_BODY, sub);
@@ -1420,11 +1420,11 @@ static UiNode *tbtn(UiNode *parent, const char *text, UiIcon icon, const char *t
     UiNode *b = ui_button(ED.ui, parent, text, cb);
     b->h = 24;
     b->icon = icon;
-    b->bg = UI_HEX(0x1c1415);
-    b->border = UI_HEX(0x2c1e1d);
+    b->bg = UI_HEX(0x28292e);
+    b->border = UI_HEX(0x34363c);
     b->radius = 4;
     b->font = UI_FONT_SMALL;
-    b->bg_active = UI_HEX(0x4e1610);
+    b->bg_active = UI_HEX(0x2b4a86);
     if (tip) lx_strcpy(b->tooltip, sizeof b->tooltip, tip);
     return b;
 }
@@ -1504,7 +1504,7 @@ UiNode *ed_graph_panel(UiNode *parent) {
     UiNode *p = ui_box(ui, parent, UI_COL);
     lx_strcpy(p->text, sizeof p->text, "State Graph");
     p->icon = UI_ICON_GRAPH;
-    p->bg = UI_HEX(0x110c0c);
+    p->bg = UI_HEX(0x1f2023);
     p->on_frame = panel_frame;
     GE.panel = p;
     ui_track(&GE.panel);
@@ -1514,7 +1514,7 @@ UiNode *ed_graph_panel(UiNode *parent) {
     tb->gap = 6;
     tb->cross_align = UI_ALIGN_CENTER;
     ui_pad(tb, 6, 0, 6, 0);
-    tb->bg = UI_HEX(0x161011);
+    tb->bg = UI_HEX(0x232428);
     GE.obj_btn = tbtn(tb, "No object", UI_ICON_ENTITY, "Objects with a State Graph", tb_object);
     GE.obj_btn->w = 170;
     GE.graph_btn = tbtn(tb, "No graph", UI_ICON_GRAPH, "This object's graphs", tb_graph);
@@ -1553,7 +1553,7 @@ UiNode *ed_graph_panel(UiNode *parent) {
     bb->gap = 6;
     bb->cross_align = UI_ALIGN_CENTER;
     ui_pad(bb, 6, 0, 6, 0);
-    bb->bg = UI_HEX(0x161011);
+    bb->bg = UI_HEX(0x232428);
     GE.debug_btn = tbtn(bb, "Debug", UI_ICON_PLAY, "While playing: show the time in the active state and live variable values", tb_debug);
     GE.debug_btn->w = 80;
     GE.debug_btn->selected = GE.debug;
@@ -1566,9 +1566,9 @@ UiNode *ed_graph_panel(UiNode *parent) {
     ui_spacer(ui, bb);
     UiNode *ab = tbtn(bb, "Action Browser", UI_ICON_LIST, "Find actions to add to the selected state (Space in the graph)", tb_ab);
     ab->w = 140;
-    ab->bg = UI_HEX(0xd8391b);
-    ab->bg_hover = UI_HEX(0xff7a2e);
-    ab->fg = UI_HEX(0xfff6ef);
+    ab->bg = UI_HEX(0x3d7cf5);
+    ab->bg_hover = UI_HEX(0x5a92ff);
+    ab->fg = UI_HEX(0xffffff);
     ab->font = UI_FONT_BOLD;
     GE.ab_btn = ab;
     ui_track(&GE.canvas);
