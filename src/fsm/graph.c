@@ -63,22 +63,33 @@ void lx_graph_touch(LxGraph *g) { g->version++; g->dirty = true; }
 
 /* ---------------- text format ---------------- */
 /* values are one line: newlines in text (comments, descriptions) are written as \n */
-static void put_escaped(LxStrBuf *sb, const char *key, const char *v) {
-    char buf[1100];
-    size_t n = 0;
-    for (const char *p = v; *p && n < sizeof buf - 3; p++) {
-        if (*p == '\n') { buf[n++] = '\\'; buf[n++] = 'n'; }
-        else if (*p == '\\') { buf[n++] = '\\'; buf[n++] = '\\'; }
-        else if ((unsigned char)*p >= 0x20) buf[n++] = *p;
+/* values are one line and the reader trims them, so: newlines are \n, spaces at either end \s, and '>'
+ * (the transition separator) \g - every text comes back exactly as it was */
+static const char *esc(const char *v, char *buf, size_t cap) {
+    size_t n = 0, len = strlen(v);
+    for (size_t i = 0; i < len && n < cap - 3; i++) {
+        char ch = v[i];
+        bool edge = i == 0 || i == len - 1;
+        if (ch == '\n') { buf[n++] = '\\'; buf[n++] = 'n'; }
+        else if (ch == '\\') { buf[n++] = '\\'; buf[n++] = '\\'; }
+        else if (ch == '>') { buf[n++] = '\\'; buf[n++] = 'g'; }
+        else if ((ch == ' ' || ch == '\t') && edge) { buf[n++] = '\\'; buf[n++] = 's'; }
+        else if ((unsigned char)ch >= 0x20) buf[n++] = ch;
     }
     buf[n] = 0;
-    lx_sb_printf(sb, "%s = %s\n", key, buf);
+    return buf;
+}
+static void put_escaped(LxStrBuf *sb, const char *key, const char *v) {
+    char buf[1100];
+    lx_sb_printf(sb, "%s = %s\n", key, esc(v, buf, sizeof buf));
 }
 static void unescape(char *s) {
     char *o = s;
     for (char *p = s; *p; p++) {
         if (*p == '\\' && p[1] == 'n') { *o++ = '\n'; p++; }
         else if (*p == '\\' && p[1] == '\\') { *o++ = '\\'; p++; }
+        else if (*p == '\\' && p[1] == 's') { *o++ = ' '; p++; }
+        else if (*p == '\\' && p[1] == 'g') { *o++ = '>'; p++; }
         else *o++ = *p;
     }
     *o = 0;
@@ -90,24 +101,41 @@ char *lx_graph_to_text(const LxGraph *g) {
     lx_sb_printf(&sb, "# Luxora state graph v1\n[graph]\n");
     put_escaped(&sb, "name", g->name);
     put_escaped(&sb, "description", g->description);
-    lx_sb_printf(&sb, "start = %s\n", g->start);
-    for (int i = 0; i < g->event_count; i++) lx_sb_printf(&sb, "\n[event]\nname = %s\nglobal = %d\n", g->events[i].name, g->events[i].global);
+    put_escaped(&sb, "start", g->start);
+    for (int i = 0; i < g->event_count; i++) {
+        lx_sb_printf(&sb, "\n[event]\n");
+        put_escaped(&sb, "name", g->events[i].name);
+        lx_sb_printf(&sb, "global = %d\n", g->events[i].global);
+    }
     for (int i = 0; i < g->var_count; i++) {
         const LxGraphVar *v = &g->vars[i];
-        lx_sb_printf(&sb, "\n[variable]\nname = %s\ntype = %s\n", v->name, lx_fsm_type_name(v->type));
+        lx_sb_printf(&sb, "\n[variable]\n");
+        put_escaped(&sb, "name", v->name);
+        lx_sb_printf(&sb, "type = %s\n", lx_fsm_type_name(v->type));
         put_escaped(&sb, "value", v->value);
         lx_sb_printf(&sb, "inspector = %d\n", v->inspector);
         if (v->tooltip[0]) put_escaped(&sb, "tooltip", v->tooltip);
     }
-    for (int i = 0; i < g->global_count; i++) lx_sb_printf(&sb, "\n[global]\nevent = %s\nto = %s\n", g->globals[i].event, g->globals[i].to);
+    for (int i = 0; i < g->global_count; i++) {
+        lx_sb_printf(&sb, "\n[global]\n");
+        put_escaped(&sb, "event", g->globals[i].event);
+        put_escaped(&sb, "to", g->globals[i].to);
+    }
     for (int i = 0; i < g->state_count; i++) {
         const LxGraphState *st = &g->states[i];
-        lx_sb_printf(&sb, "\n[state]\nname = %s\npos = %g %g\ncolor = %d\nsequence = %d\n", st->name, (double)st->x, (double)st->y, st->color, st->sequence);
+        lx_sb_printf(&sb, "\n[state]\n");
+        put_escaped(&sb, "name", st->name);
+        lx_sb_printf(&sb, "pos = %g %g\ncolor = %d\nsequence = %d\n", (double)st->x, (double)st->y, st->color, st->sequence);
         if (st->description[0]) put_escaped(&sb, "description", st->description);
-        for (int t = 0; t < st->trans_count; t++) lx_sb_printf(&sb, "transition = %s > %s\n", st->trans[t].event, st->trans[t].to);
+        for (int t = 0; t < st->trans_count; t++) {
+            char e1[160], e2[160];
+            lx_sb_printf(&sb, "transition = %s > %s\n", esc(st->trans[t].event, e1, sizeof e1), esc(st->trans[t].to, e2, sizeof e2));
+        }
         for (int a = 0; a < st->action_count; a++) {
             const LxGraphAction *ac = &st->actions[a];
-            lx_sb_printf(&sb, "[action]\ntype = %s\nenabled = %d\nfolded = %d\nupdate = %s\n", ac->type, ac->enabled, ac->folded, UPDATE_NAMES[ac->update & 3]);
+            lx_sb_printf(&sb, "[action]\n");
+            put_escaped(&sb, "type", ac->type);
+            lx_sb_printf(&sb, "enabled = %d\nfolded = %d\nupdate = %s\n", ac->enabled, ac->folded, UPDATE_NAMES[ac->update & 3]);
             const LxFsmActionDesc *d = lx_fsm_action_find(ac->type);
             for (int k = 0; k < LX_FSM_MAX_PARAMS; k++) {
                 const char *pname = d && d->params[k].name ? d->params[k].name : NULL;
@@ -166,7 +194,7 @@ LxGraph *lx_graph_from_text(const char *text) {
             else sec = NONE;
             continue;
         }
-        unescape(v);
+        if (strcmp(k, "transition")) unescape(v);   /* a transition is split at " > " first */
         switch (sec) {
         case GRAPH:
             if (!strcmp(k, "name")) lx_strcpy(g->name, sizeof g->name, v);
@@ -203,8 +231,9 @@ LxGraph *lx_graph_from_text(const char *text) {
             else if (!strcmp(k, "transition")) {
                 LxGraphTransition *t = PUSH(st->trans, st->trans_count, st->trans_cap, LxGraphTransition);
                 char *gt = strstr(v, " > ");
-                if (gt) { *gt = 0; lx_strcpy(t->to, sizeof t->to, gt + 3); }
-                else { size_t n = strlen(v); if (n >= 2 && v[n - 1] == '>') v[n - 2] = 0; }
+                if (gt) { *gt = 0; unescape(gt + 3); lx_strcpy(t->to, sizeof t->to, gt + 3); }
+                else { size_t n = strlen(v); if (n >= 2 && v[n - 1] == '>') v[n - 2] = 0; else if (n >= 1 && v[n - 1] == '>') v[n - 1] = 0; }
+                unescape(v);
                 lx_strcpy(t->event, sizeof t->event, v);
             }
             break;

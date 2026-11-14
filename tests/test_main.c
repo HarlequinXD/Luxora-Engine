@@ -1284,6 +1284,18 @@ static void test_state_graph(void) {
     CHECK(t2 && !strcmp(t1, t2), "graph text round-trips");
     lx_free(t1); lx_free(t2);
     lx_graph_free(g2);
+    /* awkward names and texts come back exactly */
+    lx_graph_rename_state(g, 0, " spaced  > out ");
+    lx_strcpy(g->description, sizeof g->description, "  line one\nline two \\ end ");
+    lx_strcpy(g->states[1].trans[0].event, sizeof g->states[1].trans[0].event, "A > B ");
+    lx_strcpy(g->states[1].trans[0].to, sizeof g->states[1].trans[0].to, " spaced  > out ");
+    t1 = lx_graph_to_text(g);
+    g2 = lx_graph_from_text(t1);
+    CHECK(g2 && !strcmp(g2->states[0].name, " spaced  > out ") && !strcmp(g2->description, "  line one\nline two \\ end ") &&
+              !strcmp(g2->states[1].trans[0].event, "A > B ") && !strcmp(g2->states[1].trans[0].to, " spaced  > out ") && !strcmp(g2->start, " spaced  > out "),
+          "names with spaces, > and newlines survive saving");
+    lx_free(t1);
+    lx_graph_free(g2);
     lx_graph_free(g);
 
     char dir[LX_PATH_MAX], path[LX_PATH_MAX];
@@ -1341,6 +1353,28 @@ static void test_state_graph(void) {
     CHECK(sg2 && sg2->count == 1 && !strcmp(sg2->slots[0].graph, "Door.lxgraph") && sg2->slots[0].override_count == 1 &&
               !strcmp(sg2->slots[0].overrides[0].value, "4 0 0"), "state graph saved with the scene");
     lx_scene_destroy(s2);
+
+    /* switches, countdowns and repeating events */
+    const char *flow = "[graph]\nstart = S\n[variable]\nname = n\ntype = int\nvalue = 2\n[variable]\nname = t\ntype = float\nvalue = 0.5\n"
+                       "[variable]\nname = laps\ntype = int\nvalue = 0\n"
+                       "[state]\nname = S\ntransition = TWO > C\ntransition = OTHER > Bad\n"
+                       "[action]\ntype = Int Switch\np0 = $n\np1 = 0\np2 = ZERO\np3 = 1\np4 = ONE\np5 = 2\np6 = TWO\np7 = 3\np8 = THREE\np9 = OTHER\n"
+                       "[state]\nname = C\ntransition = AT_ZERO > R\n[action]\ntype = Countdown\nupdate = every_frame\np0 = $t\np1 = AT_ZERO\n"
+                       "[state]\nname = R\ntransition = DONE > End\n[action]\ntype = Counter\np0 = $laps\np1 = 5\n"
+                       "[action]\ntype = Repeat Event\nupdate = every_frame\np0 = 0.1\np1 = TICK\np2 = 3\np3 = DONE\n"
+                       "[state]\nname = Bad\n[state]\nname = End\n";
+    lx_path_join(path, sizeof path, dir, "Flow.lxgraph");
+    lx_file_write(path, flow, strlen(flow));
+    LxEntity f = lx_entity_create(s, "Flow");
+    lx_add_state_graph(s, f, "Flow.lxgraph");
+    lx_scene_simulate(s, 0.05f);
+    CHECK(!strcmp(lx_fsm_current_state(s, f, 0), "C"), "Int Switch picks the matching case (%s)", lx_fsm_current_state(s, f, 0));
+    for (int i = 0; i < 11; i++) lx_scene_simulate(s, 0.05f);
+    CHECK(!strcmp(lx_fsm_current_state(s, f, 0), "R") && NEAR(lx_fsm_get_var_float(s, f, 0, "laps"), 1, 1e-4f), "Countdown reaches zero; Counter counts (%s)",
+          lx_fsm_current_state(s, f, 0));
+    for (int i = 0; i < 8; i++) lx_scene_simulate(s, 0.05f);
+    CHECK(!strcmp(lx_fsm_current_state(s, f, 0), "End"), "Repeat Event stops after 3 and sends DONE (%s)", lx_fsm_current_state(s, f, 0));
+    CHECK(lx_fsm_action_count() >= 150, "about 150 built-in actions (%d)", lx_fsm_action_count());
 
     /* a runaway loop is stopped, not hung */
     const char *loop = "[graph]\nstart = A\n[state]\nname = A\ntransition = FINISHED > B\n[state]\nname = B\ntransition = FINISHED > A\n";

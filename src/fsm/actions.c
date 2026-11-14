@@ -800,4 +800,6 @@ void lx_fsm_register_builtin_actions(void) {
         &A_UI_TEXT, &A_UI_BAR, &A_UI_BUTTON, &A_LOG,
     };
     for (size_t i = 0; i < sizeof all / sizeof all[0]; i++) lx_fsm_register_action(all[i]);
+    extern void lx_fsm_register_more_actions(void);
+    lx_fsm_register_more_actions();
 }

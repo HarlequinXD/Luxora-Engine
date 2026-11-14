@@ -1727,7 +1727,12 @@ bool ed_graph_check(char *err, size_t cap) {
     LxGraph *back = lx_graph_from_text(t);
     char *t2 = back ? lx_graph_to_text(back) : NULL;
     bool same = t2 && !strcmp(t, t2);
-    if (!same) snprintf(err, cap, "graph text doesn't survive a save/load");
+    if (!same) {
+        size_t i = 0;
+        while (t2 && t[i] && t[i] == t2[i]) i++;
+        size_t st = i > 50 ? i - 50 : 0;
+        snprintf(err, cap, "graph text doesn't survive a save/load near: [%.100s] vs [%.100s]", t + st, t2 ? t2 + st : "(unreadable)");
+    }
     lx_free(t);
     lx_free(t2);
     lx_graph_free(back);
