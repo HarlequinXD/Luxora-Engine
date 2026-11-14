@@ -386,9 +386,11 @@ static void move_towards(LxFsmCtx *c) {
     if (dist <= stop + 1e-4f) { ev(c, 5); return; }
     float step = lx_maxf(0, lx_fsm_float(c, 3)) * c->dt;
     if (step > dist - stop) step = dist - stop;
-    set_world_pos(c->scene, e, lx_add3(pos, lx_scale3(d, step / dist)));
+    LxVec3 delta = lx_scale3(d, step / dist);
+    if (lx_get_character(c->scene, e)) lx_character_move(c->scene, e, lx_v3(delta.x, delta.y - 9.81f * c->dt * 0.5f, delta.z));   /* walks: collides, stays on the ground */
+    else set_world_pos(c->scene, e, lx_add3(pos, delta));
 }
-static const LxFsmActionDesc A_MOVE_TOWARDS = {"Move Towards", "Transform", "Moves an object towards a target at a set speed; sends an event when it gets there.",
+static const LxFsmActionDesc A_MOVE_TOWARDS = {"Move Towards", "Transform", "Moves an object towards a target at a set speed; sends an event when it gets there. An object with a Character Controller walks there (it bumps into things and stays on the ground).",
     "Move {0} towards {1} at {3}, stop within {4} → {5}",
     {POBJ("Object"), POBJN("Target Object"), PT("Target Position", LX_FSM_VEC3, "0 0 0", "a point, or an offset from the target object"), P("Speed", LX_FSM_FLOAT, "3"),
      P("Finish Distance", LX_FSM_FLOAT, "0.2"), PEV("Finish Event"), P("Ignore Vertical", LX_FSM_BOOL, "true")},
@@ -562,8 +564,9 @@ static void raycast(LxFsmCtx *c) {
     if (e && lx_fsm_int(c, 3) == 0) dir = lx_quat_rotate(lx_entity_world_rotation(c->scene, e), dir);
     if (lx_len3sq(dir) < 1e-10f) return;
     LxRaycastHit hit;
-    bool got = lx_physics_raycast(c->scene, from, lx_norm3(dir), lx_fsm_float(c, 4), LX_ALL_LAYERS, &hit);
-    if (got && hit.entity == e) got = false;
+    LxEntity root = e;   /* never hits the object it's cast from, or what carries it (a camera's own player) */
+    for (int i = 0; root && lx_entity_parent(c->scene, root) && i < 64; i++) root = lx_entity_parent(c->scene, root);
+    bool got = lx_physics_raycast_ignore(c->scene, from, lx_norm3(dir), lx_fsm_float(c, 4), LX_ALL_LAYERS, root, &hit);
     lx_fsm_set_bool(c, 7, got);
     if (got) { lx_fsm_set_object(c, 8, hit.entity); lx_fsm_set_vec3(c, 9, hit.point); lx_fsm_set_float(c, 10, hit.distance); ev(c, 5); }
     else ev(c, 6);
@@ -673,6 +676,14 @@ static LxKey key_of(const char *name) {
     }
     return LX_KEY_UNKNOWN;
 }
+/* a press or release from the frame the state was entered in belongs to the state before (the press that
+ * opened a pause menu must not close it again): on entering, only Held counts */
+static void key_event(LxFsmCtx *c);
+static void action_event(LxFsmCtx *c);
+static void mouse_event(LxFsmCtx *c);
+static void key_event_enter(LxFsmCtx *c) { if (lx_fsm_int(c, 1) == 2) key_event(c); }
+static void action_event_enter(LxFsmCtx *c) { if (lx_fsm_int(c, 1) == 2) action_event(c); }
+static void mouse_event_enter(LxFsmCtx *c) { if (lx_fsm_int(c, 1) == 2) mouse_event(c); }
 static void key_event(LxFsmCtx *c) {
     LxKey k = key_of(lx_fsm_string(c, 0));
     if (!k) return;
@@ -683,7 +694,7 @@ static void key_event(LxFsmCtx *c) {
 }
 static const LxFsmActionDesc A_KEY_EVENT = {"Key Event", "Input", "Sends an event when a key is pressed, released or held.", "When {0} is {1}: {2}",
     {PT("Key", LX_FSM_STRING, "Space", "a key name: A..Z, 0..9, Space, Enter, Escape, Left, Right, Up, Down, Shift, F1..."), PENUM("When", "Pressed|Released|Held", "0"), PEV("Send Event"), POPT("Store Is Down", LX_FSM_BOOL)},
-    0, 0, LX_FSM_EVERY_FRAME, key_event, key_event, NULL};
+    0, 0, LX_FSM_EVERY_FRAME, key_event_enter, key_event, NULL};
 static void action_event(LxFsmCtx *c) {
     const char *a = lx_fsm_string(c, 0);
     int when = lx_fsm_int(c, 1);
@@ -692,7 +703,7 @@ static void action_event(LxFsmCtx *c) {
     if (hit) ev(c, 2);
 }
 static const LxFsmActionDesc A_INPUT_ACTION = {"Input Action Event", "Input", "Uses an action from the Input Manager (keyboard, gamepad and touch at once).", "When {0} is {1}: {2}",
-    {P("Action", LX_FSM_STRING, "Jump"), PENUM("When", "Pressed|Released|Held", "0"), PEV("Send Event"), POPT("Store Is Down", LX_FSM_BOOL)}, 0, 0, LX_FSM_EVERY_FRAME, action_event, action_event, NULL};
+    {P("Action", LX_FSM_STRING, "Jump"), PENUM("When", "Pressed|Released|Held", "0"), PEV("Send Event"), POPT("Store Is Down", LX_FSM_BOOL)}, 0, 0, LX_FSM_EVERY_FRAME, action_event_enter, action_event, NULL};
 static void get_axis(LxFsmCtx *c) {
     LxVec2 v = lx_axis2(lx_fsm_string(c, 0), lx_fsm_string(c, 1));
     float k = lx_fsm_float(c, 2);
@@ -701,7 +712,7 @@ static void get_axis(LxFsmCtx *c) {
     lx_fsm_set_float(c, 5, v.y);
 }
 static const LxFsmActionDesc A_GET_AXIS = {"Get Axis", "Input", "Reads two Input Manager axes as a movement vector on the ground (X, -Z).", "{3} = ({0}, {1}) × {2}",
-    {P("Horizontal Axis", LX_FSM_STRING, "Move X"), P("Vertical Axis", LX_FSM_STRING, "Move Y"), P("Multiplier", LX_FSM_FLOAT, "5"), POPT("Store Vector", LX_FSM_VEC3), POPT("Store X", LX_FSM_FLOAT), POPT("Store Y", LX_FSM_FLOAT)},
+    {P("Horizontal Axis", LX_FSM_STRING, "MoveX"), P("Vertical Axis", LX_FSM_STRING, "MoveY"), P("Multiplier", LX_FSM_FLOAT, "5"), POPT("Store Vector", LX_FSM_VEC3), POPT("Store X", LX_FSM_FLOAT), POPT("Store Y", LX_FSM_FLOAT)},
     0, 0, LX_FSM_EVERY_FRAME, get_axis, get_axis, NULL};
 static void mouse_event(LxFsmCtx *c) {
     LxMouseButton b = (LxMouseButton)lx_fsm_int(c, 0);
@@ -709,7 +720,7 @@ static void mouse_event(LxFsmCtx *c) {
     if (when == 0 ? lx_mouse_pressed(b) : when == 1 ? lx_mouse_released(b) : lx_mouse_down(b)) ev(c, 2);
 }
 static const LxFsmActionDesc A_MOUSE_EVENT = {"Mouse Button Event", "Input", "Sends an event on a mouse click (or tap).", "When {0} button is {1}: {2}",
-    {PENUM("Button", "Left|Right|Middle", "0"), PENUM("When", "Pressed|Released|Held", "0"), PEV("Send Event")}, 0, 0, LX_FSM_EVERY_FRAME, mouse_event, mouse_event, NULL};
+    {PENUM("Button", "Left|Right|Middle", "0"), PENUM("When", "Pressed|Released|Held", "0"), PEV("Send Event")}, 0, 0, LX_FSM_EVERY_FRAME, mouse_event_enter, mouse_event, NULL};
 
 /* ======================================================================
  *  Time, scenes, save data, UI, debug
@@ -820,4 +831,6 @@ void lx_fsm_register_builtin_actions(void) {
     for (size_t i = 0; i < sizeof all / sizeof all[0]; i++) lx_fsm_register_action(all[i]);
     extern void lx_fsm_register_more_actions(void);
     lx_fsm_register_more_actions();
+    extern void lx_fsm_register_controller_actions(void);
+    lx_fsm_register_controller_actions();
 }

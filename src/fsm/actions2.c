@@ -496,6 +496,28 @@ static void any_key(LxFsmCtx *c) {
     for (int k = 1; k < LX_KEY_COUNT; k++) if (lx_key_pressed((LxKey)k)) { ev(c, 0); return; }
     for (int b = 0; b < 3; b++) if (lx_mouse_pressed((LxMouseButton)b)) { ev(c, 0); return; }
 }
+static void set_mouse(LxFsmCtx *c) {
+    int lock = lx_fsm_int(c, 0), show = lx_fsm_int(c, 1);
+    if (lock == 1) lx_mouse_lock(true);
+    else if (lock == 2) lx_mouse_lock(false);
+    if (show == 1) lx_mouse_show(true);
+    else if (show == 2) lx_mouse_show(false);
+    if (lx_fsm_bool(c, 2)) {
+        LxVec3 hot = lx_fsm_vec3(c, 4);
+        char img[LX_REF_MAX];
+        lx_strcpy(img, sizeof img, lx_fsm_asset(c, 3));
+        lx_mouse_set_image(img, lx_clampf(hot.x, 0, 1), lx_clampf(hot.y, 0, 1), lx_fsm_float(c, 5));
+    }
+    lx_fsm_set_bool(c, 6, lx_mouse_lock_wanted());
+}
+static const LxFsmActionDesc A_SET_MOUSE = {"Set Mouse", "Input",
+    "Locks the mouse for mouse look (hidden and held in the game view), shows or hides the pointer, or swaps the pointer for your own picture. "
+    "In the editor, Escape gives the mouse back; click the game view to take it again.",
+    "Mouse: {0}, pointer {1}",
+    {PENUM("Lock", "Don't Change|Lock|Unlock", "1"), PENUM("Pointer", "Don't Change|Show|Hide", "0"), PT("Change Image", LX_FSM_BOOL, "false", "use the Image below (empty = the normal arrow)"),
+     PASSET("Image", "texture"), PT("Hotspot", LX_FSM_VEC3, "0 0 0", "where in the picture it points: 0 0 = top-left, 0.5 0.5 = centre"), PT("Size", LX_FSM_FLOAT, "32", "in game UI units (the screen is 1080 tall)"),
+     POPT("Store Locked", LX_FSM_BOOL)}, 0, 0, LX_FSM_ONCE, set_mouse, set_mouse, NULL};
+
 static const LxFsmActionDesc A_ANY_KEY = {"Any Key Event", "Input", "Sends an event when any key or mouse button is pressed (\"press any key\").", "Any key: {0}",
     {PEV("Send Event")}, 0, 0, LX_FSM_EVERY_FRAME, NULL, any_key, NULL};
 
@@ -610,7 +632,7 @@ void lx_fsm_register_more_actions(void) {
         &A_OVERLAP, &A_EXPLOSION, &A_TORQUE, &A_RB_SETTINGS, &A_GRAVITY, &A_GROUNDED,
         &A_CAMERA_FOV, &A_MAIN_CAMERA, &A_WORLD_TO_SCREEN,
         &A_AUDIO_SETTINGS, &A_RANDOM_SOUND, &A_RUMBLE, &A_FLICKER, &A_LIGHT_FADE, &A_ANIM_TIME,
-        &A_MOUSE_POS, &A_ANY_KEY,
+        &A_MOUSE_POS, &A_ANY_KEY, &A_SET_MOUSE,
         &A_REPEAT, &A_COUNTDOWN, &A_FINISH, &A_RESTART, &A_SCENE_NAME, &A_BROADCAST, &A_SEND_PARENT,
         &A_UI_RECT, &A_UI_IMAGE, &A_FADE, &A_UI_WORLD_TEXT,
     };

@@ -99,6 +99,18 @@ bool lx_mouse_pressed(LxMouseButton b);
 bool lx_mouse_released(LxMouseButton b);
 LxVec2 lx_mouse_pos(void);
 LxVec2 lx_mouse_delta(void);
+/* The mouse pointer (the State Graph's "Set Mouse" action uses these).
+   Lock: for mouse look - hidden and held in the game view; lx_mouse_delta keeps reporting movement.
+   Show/hide: the pointer moves freely but isn't drawn. Image: a picture drawn as the pointer (a texture asset,
+   "" for the normal arrow); the hotspot is where in the picture it points (0..1 from its top-left), size in game UI units.
+   In the editor's Play mode Escape gives the pointer back (click the game view to take it again). */
+void lx_mouse_lock(bool lock);
+bool lx_mouse_locked(void);       /* locked right now (the window has focus, nothing blocks it) */
+bool lx_mouse_lock_wanted(void);
+void lx_mouse_show(bool show);
+bool lx_mouse_shown(void);
+void lx_mouse_set_image(const char *texture_ref, float hotspot_x, float hotspot_y, float size);
+const char *lx_mouse_image(void);
 float lx_mouse_wheel(void);
 int lx_touch_count(void);
 LxVec2 lx_touch_pos(int index);
@@ -570,7 +582,7 @@ typedef enum LxFsmType {
     LX_FSM_TYPE_COUNT
 } LxFsmType;
 
-#define LX_FSM_MAX_PARAMS 12
+#define LX_FSM_MAX_PARAMS 16
 #define LX_FSM_GRAPHS_PER_OBJECT 4
 #define LX_FSM_P_OUT 1u        /* the parameter receives a result: it must be a variable */
 #define LX_FSM_P_OPTIONAL 2u   /* may be left as None */
@@ -1038,7 +1050,7 @@ typedef struct LxProject {
     LxBuildSettings build;
 } LxProject;
 
-typedef enum LxProjectTemplate { LX_TEMPLATE_EMPTY_3D, LX_TEMPLATE_SAMPLE_3D, LX_TEMPLATE_MOBILE_3D } LxProjectTemplate;
+typedef enum LxProjectTemplate { LX_TEMPLATE_EMPTY_3D, LX_TEMPLATE_SAMPLE_3D, LX_TEMPLATE_MOBILE_3D, LX_TEMPLATE_FPS, LX_TEMPLATE_THIRD_PERSON } LxProjectTemplate;
 
 bool lx_project_create(LxProject *p, const char *parent_dir, const char *name, LxProjectTemplate tpl);
 bool lx_project_load(LxProject *p, const char *root_dir);

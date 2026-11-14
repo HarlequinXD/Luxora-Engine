@@ -113,12 +113,20 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         g_lx_input.wheel += (float)GET_WHEEL_DELTA_WPARAM(wp) / (float)WHEEL_DELTA;
         return 0;
     case WM_MOUSEMOVE:
-        g_lx_input.mouse_pos = lx_v2((float)GET_X_LPARAM(lp), (float)GET_Y_LPARAM(lp));
+        if (g_lx_input.mouse_locked) {   /* movement away from the hold point; the pointer is put back after the messages */
+            int cx, cy;
+            lx_mouse_lock_point(&cx, &cy);
+            g_lx_input.mouse_delta_accum.x += (float)(GET_X_LPARAM(lp) - cx);
+            g_lx_input.mouse_delta_accum.y += (float)(GET_Y_LPARAM(lp) - cy);
+            g_lx_input.mouse_pos = lx_v2((float)cx, (float)cy);
+        } else g_lx_input.mouse_pos = lx_v2((float)GET_X_LPARAM(lp), (float)GET_Y_LPARAM(lp));
         return 0;
     case WM_SETCURSOR:
-        if (LOWORD(lp) == HTCLIENT) { SetCursor(W.cursors[W.cursor]); return TRUE; }
+        if (LOWORD(lp) == HTCLIENT) { SetCursor(g_lx_input.mouse_hidden ? NULL : W.cursors[W.cursor]); return TRUE; }
         break;
+    case WM_SETFOCUS: g_lx_input.focused = true; return 0;
     case WM_KILLFOCUS:
+        g_lx_input.focused = false;
         memset(g_lx_input.keys, 0, sizeof g_lx_input.keys);
         memset(g_lx_input.mouse, 0, sizeof g_lx_input.mouse);
         return 0;
@@ -218,7 +226,7 @@ void lx_platform_set_title(const char *title) {
 }
 
 void lx_platform_set_cursor(int c) {
-    if (c >= 0 && c < 7 && c != W.cursor) { W.cursor = c; SetCursor(W.cursors[c]); }
+    if (c >= 0 && c < 7 && c != W.cursor) { W.cursor = c; if (!g_lx_input.mouse_hidden) SetCursor(W.cursors[c]); }
 }
 
 void lx_platform_set_intercept_close(bool on) { W.intercept_close = on; }
@@ -420,6 +428,36 @@ bool lx_platform_pump(void) {
         if (msg.message == WM_QUIT) W.quit = true;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
+    }
+    /* the game's pointer: locked (hidden, held still) or hidden (a custom image is drawn instead) */
+    bool blocked = g_lx_input.mouse_lock_blocked || !g_lx_input.focused || GetForegroundWindow() != W.hwnd || g_lx_input.width <= 0;
+    bool lock = g_lx_input.mouse_lock_want && !blocked;
+    bool hide = !g_lx_input.mouse_lock_blocked && (lock || g_lx_input.mouse_hide_want || g_lx_input.mouse_image[0]);
+    if (hide != g_lx_input.mouse_hidden) {
+        g_lx_input.mouse_hidden = hide;
+        POINT p;
+        GetCursorPos(&p);
+        SetCursorPos(p.x, p.y);   /* makes Windows ask for the cursor again (WM_SETCURSOR) */
+    }
+    if (lock != g_lx_input.mouse_locked) {
+        g_lx_input.mouse_locked = lock;
+        if (lock) {
+            RECT r;
+            GetClientRect(W.hwnd, &r);
+            POINT a = {r.left, r.top}, b = {r.right, r.bottom};
+            ClientToScreen(W.hwnd, &a);
+            ClientToScreen(W.hwnd, &b);
+            RECT clip = {a.x, a.y, b.x, b.y};
+            ClipCursor(&clip);
+        } else ClipCursor(NULL);
+    }
+    int lcx, lcy;
+    if (g_lx_input.mouse_locked && lx_mouse_lock_point(&lcx, &lcy)) {
+        POINT c = {lcx, lcy};
+        ClientToScreen(W.hwnd, &c);
+        SetCursorPos(c.x, c.y);
+        g_lx_input.mouse_pos = lx_v2((float)lcx, (float)lcy);
+        g_lx_input.prev_mouse_pos = g_lx_input.mouse_pos;
     }
     return !W.quit;
 }

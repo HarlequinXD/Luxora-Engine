@@ -52,6 +52,7 @@ static struct {
     LxVec2 pointer;
     bool down, prev_down, pressed, released;
     bool over_button, over_button_prev;
+    bool cursor_drawn;
     uint64_t active_id;
     /* image textures */
     struct { char ref[LX_REF_MAX]; uint32_t tex; } tex[64];
@@ -389,6 +390,7 @@ void lx_game_ui_begin_frame(float vx, float vy, float vw, float vh, bool clear) 
     if (!G.atlas_known && !G.editor_atlas) load_glyphs(true);   /* games use the 2x atlas */
     if (!clear) return;   /* paused in the editor: keep showing the last frame */
     G.vc = G.ic = G.cc = 0;
+    G.cursor_drawn = false;
     G.anchor = LX_ANCHOR_TOP_LEFT;
     G.font = LX_FONT_REGULAR;
     G.over_button_prev = G.over_button;
@@ -407,6 +409,13 @@ void lx_game_ui_begin_frame(float vx, float vy, float vw, float vh, bool clear) 
 
 void lx_game_ui_geometry(LxGameUiGeometry *out) {
     memset(out, 0, sizeof *out);
+    /* a custom mouse pointer (Set Mouse): drawn last, over everything, once a frame */
+    if (!G.cursor_drawn && g_lx_input.mouse_image[0] && !g_lx_input.mouse_locked && !g_lx_input.mouse_lock_blocked && !g_lx_input.mouse_hide_want && ready()) {
+        G.cursor_drawn = true;
+        uint32_t tex = image_texture(g_lx_input.mouse_image);
+        float sz = g_lx_input.mouse_size, x = G.pointer.x - g_lx_input.mouse_hot_x * sz, y = G.pointer.y - g_lx_input.mouse_hot_y * sz;
+        if (tex) quad_uv(x, y, x + sz, y + sz, 0, 0, 1, 1, 0xffffffffu, tex);
+    }
     if (!G.ic) return;
     if (G.wvcap < G.vc) { G.wvcap = G.vc; G.wv = lx_realloc(G.wv, sizeof(LxUiVertex) * (size_t)G.wvcap); }
     for (int i = 0; i < G.vc; i++) {

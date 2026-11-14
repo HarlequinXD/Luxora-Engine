@@ -96,11 +96,21 @@ void lx_platform_open_folder(const char *path);
 bool lx_exe_set_icon(const char *exe_path, const char *ico_path);
 bool lx_exe_set_version(const char *exe_path, const char *product, const char *company, const char *version);
 
+void lx_mouse_lock_block(bool blocked);   /* the editor: only while the game view is being played */
+void lx_mouse_lock_center(float x, float y);   /* the editor: hold a locked pointer over the game view (window pixels; < 0 = centre) */
+void lx_mouse_reset(void);                /* play stops: normal pointer again */
+bool lx_mouse_lock_point(int *x, int *y);  /* platforms: where to hold a locked pointer */
 /* input state written by the platform layer */
 typedef struct LxInputState {
     bool keys[LX_KEY_COUNT], prev_keys[LX_KEY_COUNT];
     bool mouse[LX_MOUSE_COUNT], prev_mouse[LX_MOUSE_COUNT];
     LxVec2 mouse_pos, prev_mouse_pos, mouse_delta_accum;
+    bool mouse_lock_want, mouse_lock_blocked, mouse_locked;   /* lx_mouse_lock: the platform hides the cursor and keeps it centred */
+    bool mouse_hide_want, mouse_hidden;                       /* lx_mouse_show(false), or a custom pointer image is drawn */
+    float lock_cx, lock_cy;                                   /* where a locked pointer is held (< 0: window centre) */
+    char mouse_image[LX_REF_MAX];
+    float mouse_hot_x, mouse_hot_y, mouse_size;
+    bool focused;
     float wheel;
     uint32_t text[64];
     int text_count;
@@ -448,4 +458,6 @@ bool lx_take_quit_request(void);
 /* ---------- engine state ---------- */
 void lx_engine_set_project(const LxProject *p);
 
+bool lx_physics_raycast_ignore(LxScene *s, LxVec3 origin, LxVec3 dir, float max_dist, uint32_t mask, LxEntity ignore, LxRaycastHit *hit);
+bool lx_project_template_build(int tpl, const char *assets, LxScene *s);
 #endif

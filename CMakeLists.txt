@@ -38,8 +38,9 @@ set(LUXORA_SOURCES
   src/script/module.c src/script/script_api.c
   src/scene/scene.c src/scene/serialize.c src/scene/behaviours.c src/scene/gameplay.c
   src/model/fbx.c src/model/model.c src/model/avatar.c src/model/anim.c
-  src/fsm/graph.c src/fsm/fsm.c src/fsm/actions.c src/fsm/actions2.c
+  src/fsm/graph.c src/fsm/fsm.c src/fsm/actions.c src/fsm/actions2.c src/fsm/actions3.c
   src/project/project.c
+    src/project/templates.c
   src/input/input.c
   src/engine.c)
 

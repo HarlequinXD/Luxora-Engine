@@ -684,6 +684,64 @@ static void s_sg_stopped(void) {
     if (ED.view_tabs) ED.view_tabs->tab_index = 0;
 }
 
+/* the game templates: the New Project dialog, then each template made, played and pictured */
+static char g_tpl_dir[LX_PATH_MAX];
+static void s_tpl_close(void) {
+    char parent[LX_PATH_MAX];   /* the template projects go next to the smoke project */
+    lx_path_parent(parent, sizeof parent, ED.project.root);
+    lx_path_join(g_tpl_dir, sizeof g_tpl_dir, parent, "luxora_smoke_templates");
+    lx_path_remove(g_tpl_dir);
+    lx_mkdir_p(g_tpl_dir);
+    ED.dirty = false;
+    ED.in_frame = true;
+    ed_request_close_project();
+    ED.in_frame = false;
+}
+static void s_tpl_dialog(void) {
+    UiNode *b = find_node(ui_root(ED.ui), NULL, "New Project");
+    SMOKE_CHECK(ED.mode != ED_MODE_EDITOR && b && b->on_click, "the Project Manager has New Project");
+    if (b && b->on_click) b->on_click(b);
+    UiNode *fps = find_label(ui_root(ED.ui), "First Person Shooter"), *tps = find_label(ui_root(ED.ui), "Third Person Action");
+    SMOKE_CHECK(fps && tps, "the dialog offers the game templates");
+    UiNode *card = fps ? fps->parent->parent : NULL;   /* label > top row > card */
+    if (card && card->on_click) card->on_click(card);
+    SMOKE_CHECK(card && card->selected, "the FPS card is selected");
+}
+static void s_tpl_dialog_shot(void) { sg_shot("new_project.ppm"); }
+static void tpl_open(LxProjectTemplate tpl, const char *name) {
+    ui_close_modal(ED.ui);
+    LxProject p;
+    bool ok = lx_project_create(&p, g_tpl_dir, name, tpl);
+    SMOKE_CHECK(ok, "%s project created", name);
+    if (!ok) return;
+    ED.in_frame = true;
+    ed_open_project(p.root);
+    ED.in_frame = false;
+}
+static void s_tpl_fps(void) { tpl_open(LX_TEMPLATE_FPS, "Shooter"); }
+static void s_tpl_tps(void) { tpl_open(LX_TEMPLATE_THIRD_PERSON, "Adventure"); }
+static void s_tpl_play(void) {
+    SMOKE_CHECK(ED.has_project && ED.scene && lx_entity_find(ED.scene, "Player"), "the template scene opens");
+    ed_play();
+}
+static void tpl_playing(const char *shot, const char *first_state) {
+    LxEntity p = lx_entity_find(ED.scene, "Player"), gm = lx_entity_find(ED.scene, "Game Manager");
+    const char *ps = p ? lx_fsm_current_state(ED.scene, p, 0) : "", *gs = gm ? lx_fsm_current_state(ED.scene, gm, 0) : "";
+    SMOKE_CHECK(!strcmp(ps, first_state) && !strcmp(gs, "Playing"), "the template plays (%s, %s)", ps, gs);
+    SMOKE_CHECK(lx_mouse_lock_wanted(), "the game asks for the mouse");
+    sg_shot(shot);
+}
+static void s_tpl_fps_playing(void) { tpl_playing("fps_template.ppm", "Playing"); }
+static void s_tpl_tps_playing(void) { tpl_playing("tps_template.ppm", "Playing"); }
+static void s_tpl_stop(void) {
+    ED.in_frame = true;
+    ed_stop();
+    ED.in_frame = false;
+}
+static void s_tpl_stopped(void) {
+    SMOKE_CHECK(ED.play == ED_EDIT && !lx_mouse_locked() && lx_mouse_shown(), "stopping gives the mouse back");
+}
+
 static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {2, s_mat_select, "select a material asset"},
     {3, s_mat_capture, "find material widgets"},
@@ -786,6 +844,19 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {333, s_sg_loaded, "the new scene plays"},
     {335, s_sg_stop, "stop"},
     {337, s_sg_stopped, "back in edit mode"},
+    {340, s_tpl_close, "close the project"},
+    {344, s_tpl_dialog, "New Project: pick the First Person Shooter template"},
+    {348, s_tpl_dialog_shot, "screenshot of the New Project dialog"},
+    {350, s_tpl_fps, "create and open the FPS template"},
+    {356, s_tpl_play, "play the FPS template"},
+    {420, s_tpl_fps_playing, "the FPS template runs"},
+    {422, s_tpl_stop, "stop"},
+    {426, s_tpl_stopped, "edit mode, mouse free"},
+    {428, s_tpl_tps, "create and open the Third Person template"},
+    {434, s_tpl_play, "play the Third Person template"},
+    {500, s_tpl_tps_playing, "the Third Person template runs"},
+    {502, s_tpl_stop, "stop"},
+    {506, s_tpl_stopped, "edit mode, mouse free"},
 };
 
 bool ed_smoke_step(int frame) {
@@ -798,5 +869,5 @@ bool ed_smoke_step(int frame) {
             LX_INFO("[smoke] %s", STEPS[i].what);
             if (ED.mode == ED_MODE_EDITOR || frame >= 216) STEPS[i].fn(); /* the last steps run in the Project Manager */
         }
-    return frame < 340 || (g_big_last && !g_big_done);
+    return frame < 510 || (g_big_last && !g_big_done);
 }

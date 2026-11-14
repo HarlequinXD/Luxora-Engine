@@ -468,6 +468,7 @@ bool lx_project_create(LxProject *p, const char *parent, const char *name, LxPro
         lx_entity_set_position(s, probe, lx_v3(0, 1.5f, 0));
         lx_add_reflection_probe(s, probe)->size = lx_v3(16, 8, 16);
     }
+    if (tpl == LX_TEMPLATE_FPS || tpl == LX_TEMPLATE_THIRD_PERSON) lx_project_template_build(tpl, p->assets, s);
     char sp[LX_PATH_MAX];
     lx_path_join(sp, sizeof sp, p->assets, "Scenes/Main.lxscene");
     bool ok = lx_scene_save(s, sp);

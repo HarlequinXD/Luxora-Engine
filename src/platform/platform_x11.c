@@ -24,6 +24,7 @@ static struct {
     void *libvk;
     PFN_vkGetInstanceProcAddr gipa;
     Cursor cursors[7];
+    Cursor blank;
     bool intercept_close, close_requested;
     int current_cursor;
     char clipboard[8192];
@@ -241,7 +242,7 @@ void lx_platform_window_begin_resize(int edges) {
 void lx_platform_set_cursor(int c) {
     if (c < 0 || c > 6 || c == X.current_cursor) return;
     X.current_cursor = c;
-    XDefineCursor(X.dpy, X.win, X.cursors[c]);
+    if (!g_lx_input.mouse_hidden) XDefineCursor(X.dpy, X.win, X.cursors[c]);
 }
 
 const char *lx_platform_clipboard_get(void) { return X.clipboard; }
@@ -308,14 +309,50 @@ bool lx_platform_pump(void) {
             break;
         }
         case MotionNotify:
-            g_lx_input.mouse_pos = lx_v2((float)ev.xmotion.x, (float)ev.xmotion.y);
+            if (g_lx_input.mouse_locked) {   /* movement away from the hold point; the pointer is put back below */
+                int cx, cy;
+                lx_mouse_lock_point(&cx, &cy);
+                g_lx_input.mouse_delta_accum.x += (float)(ev.xmotion.x - cx);
+                g_lx_input.mouse_delta_accum.y += (float)(ev.xmotion.y - cy);
+                g_lx_input.mouse_pos = lx_v2((float)cx, (float)cy);
+            } else g_lx_input.mouse_pos = lx_v2((float)ev.xmotion.x, (float)ev.xmotion.y);
             break;
+        case FocusIn: g_lx_input.focused = true; break;
         case FocusOut:
+            g_lx_input.focused = false;
             memset(g_lx_input.keys, 0, sizeof g_lx_input.keys);
             memset(g_lx_input.mouse, 0, sizeof g_lx_input.mouse);
             break;
         default: break;
         }
+    }
+    /* the game's pointer: locked (hidden, held still) or hidden (a custom image is drawn instead) */
+    bool blocked = g_lx_input.mouse_lock_blocked || !g_lx_input.focused || g_lx_input.width <= 0;
+    bool lock = g_lx_input.mouse_lock_want && !blocked;
+    bool hide = !g_lx_input.mouse_lock_blocked && (lock || g_lx_input.mouse_hide_want || g_lx_input.mouse_image[0]);
+    if (hide && !X.blank) {
+        static char nothing[8];
+        Pixmap pm = XCreateBitmapFromData(X.dpy, X.win, nothing, 8, 8);
+        XColor black;
+        memset(&black, 0, sizeof black);
+        X.blank = XCreatePixmapCursor(X.dpy, pm, pm, &black, &black, 0, 0);
+        XFreePixmap(X.dpy, pm);
+    }
+    if (hide != g_lx_input.mouse_hidden) {
+        g_lx_input.mouse_hidden = hide;
+        XDefineCursor(X.dpy, X.win, hide ? X.blank : X.cursors[X.current_cursor]);
+    }
+    if (lock != g_lx_input.mouse_locked) {
+        g_lx_input.mouse_locked = lock;
+        if (lock) XGrabPointer(X.dpy, X.win, True, PointerMotionMask | ButtonPressMask | ButtonReleaseMask, GrabModeAsync, GrabModeAsync, X.win, None, CurrentTime);
+        else XUngrabPointer(X.dpy, CurrentTime);
+    }
+    int lcx, lcy;
+    if (g_lx_input.mouse_locked && lx_mouse_lock_point(&lcx, &lcy)) {
+        XWarpPointer(X.dpy, None, X.win, 0, 0, 0, 0, lcx, lcy);
+        g_lx_input.mouse_pos = lx_v2((float)lcx, (float)lcy);
+        g_lx_input.prev_mouse_pos = g_lx_input.mouse_pos;
+        XFlush(X.dpy);
     }
     return running;
 }

@@ -649,3 +649,168 @@ static void test_fsm_semantics(void) {
     }
     lx_assets_clear();
 }
+
+/* ---------------- the FPS and Third Person project templates ---------------- */
+static LxScene *tp_open(const char *name, LxProjectTemplate tpl, LxProject *proj) {
+    char dir[LX_PATH_MAX];
+    lx_path_join(dir, sizeof dir, tmpdir(), name);
+    lx_path_remove(dir);
+    CHECK(lx_project_create(proj, dir, "Game", tpl), "%s template creates", name);
+    lx_assets_set_root(proj->assets);
+    lx_fsm_globals_reload();
+    /* every graph loads with no problems */
+    char gdir[LX_PATH_MAX];
+    lx_path_join(gdir, sizeof gdir, proj->assets, "Graphs");
+    LxDirEntry *ents = 0;
+    int n = lx_dir_list(gdir, &ents), graphs = 0;
+    for (int i = 0; i < n; i++) {
+        char ref[LX_REF_MAX];
+        snprintf(ref, sizeof ref, "Graphs/%s", ents[i].name);
+        LxGraph *g = lx_asset_graph(ref);
+        char probs[8][160];
+        int np = g ? lx_graph_problems(g, probs, 8) : -1;
+        for (int k = 0; k < np && k < 8; k++) printf("    %s: %s\n", ents[i].name, probs[k]);
+        CHECK(np == 0, "%s: %s has no problems", name, ents[i].name);
+        graphs++;
+    }
+    lx_free(ents);
+    CHECK(graphs >= 6, "%s has its graphs (%d)", name, graphs);
+    char sp[LX_PATH_MAX];
+    lx_path_join(sp, sizeof sp, proj->assets, "Scenes/Main.lxscene");
+    LxScene *s = lx_scene_load(sp);
+    CHECK(s != 0, "%s scene loads", name);
+    return s;
+}
+static void tp_run(LxScene *s, float seconds) { for (int i = 0; i < (int)(seconds * 60); i++) lx_scene_simulate(s, 1.0f / 60); }
+static const char *tp_state(LxScene *s, const char *ent, int slot) { LxEntity e = lx_entity_find(s, ent); return e ? lx_fsm_current_state(s, e, slot) : "(gone)"; }
+static int tp_count_tag(LxScene *s, const char *tag) {
+    int n = 0;
+    for (int i = 0; i < lx_scene_entity_count(s); i++) { LxEntity e = lx_scene_entity_at(s, i); if (e && !strcmp(lx_entity_tag(s, e), tag)) n++; }
+    return n;
+}
+
+static void test_templates(void) {
+    printf("game templates\n");
+    lx_input_begin_frame();   /* no mouse movement left over from the input tests */
+    g_lx_input.prev_mouse_pos = g_lx_input.mouse_pos;
+    lx_input_update(1.0f / 60);
+    LxProject proj;
+    /* ---- first person ---- */
+    LxScene *s = tp_open("luxora_tpl_fps", LX_TEMPLATE_FPS, &proj);
+    if (s) {
+        LxEntity player = lx_entity_find(s, "Player"), cam = lx_entity_find(s, "Main Camera");
+        CHECK(player && cam && lx_entity_parent(s, cam) == player, "FPS: the camera rides on the player");
+        CHECK(tp_count_tag(s, "Enemy") == 6, "FPS: six enemies");
+        tp_run(s, 0.2f);
+        CHECK(!strcmp(tp_state(s, "Game Manager", 0), "Playing"), "FPS: game manager playing (%s)", tp_state(s, "Game Manager", 0));
+        CHECK(!strcmp(tp_state(s, "Player", 0), "Playing") && !strcmp(tp_state(s, "Player", 1), "Ready"), "FPS: controller and weapon ready (%s, %s)",
+              tp_state(s, "Player", 0), tp_state(s, "Player", 1));
+        CHECK(lx_mouse_lock_wanted(), "FPS: the mouse is locked for looking");
+        CHECK(!strcmp(tp_state(s, "Enemy 1", 0), "Idle") || !strcmp(tp_state(s, "Enemy 1", 0), "Wander"), "FPS: enemies idle (%s)", tp_state(s, "Enemy 1", 0));
+        /* shooting: put Enemy 1 straight in front of the camera and pull the trigger */
+        LxEntity e1 = lx_entity_find(s, "Enemy 1");
+        LxVec3 pp = lx_entity_world_position(s, player);
+        lx_entity_set_position(s, e1, lx_v3(pp.x, 0, pp.z - 4));
+        lx_fsm_send_event(s, player, "FIRE", 0, 0);
+        tp_run(s, 0.1f);
+        CHECK(NEAR(lx_fsm_global_float("Ammo"), 11, 0.01f), "FPS: a shot uses a bullet (%g)", lx_fsm_global_float("Ammo"));
+        CHECK(NEAR(lx_fsm_get_var_float(s, e1, 0, "Health"), 35, 0.01f), "FPS: the bullet hits the enemy (health %g, %s)",
+              lx_fsm_get_var_float(s, e1, 0, "Health"), tp_state(s, "Enemy 1", 0));
+        CHECK(tp_count_tag(s, "Untagged") >= 0 && lx_entity_find(s, "Impact"), "FPS: an impact spark spawns");
+        /* reload moves bullets from the reserve */
+        tp_run(s, 0.5f);
+        lx_fsm_send_event(s, player, "RELOAD", 0, 0);
+        tp_run(s, 1.5f);
+        CHECK(NEAR(lx_fsm_global_float("Ammo"), 12, 0.01f) && NEAR(lx_fsm_global_float("Reserve Ammo"), 35, 0.01f), "FPS: reload (%g / %g)",
+              lx_fsm_global_float("Ammo"), lx_fsm_global_float("Reserve Ammo"));
+        /* killing an enemy scores and removes it */
+        lx_fsm_send_event(s, e1, "HIT", 1000, 0);
+        tp_run(s, 1.0f);
+        CHECK(!lx_entity_find(s, "Enemy 1") && NEAR(lx_fsm_global_float("Score"), 100, 0.01f), "FPS: a dead enemy scores and goes (score %g)",
+              lx_fsm_global_float("Score"));
+        /* an enemy near the player chases and hurts them */
+        LxEntity e2 = lx_entity_find(s, "Enemy 2");
+        pp = lx_entity_world_position(s, player);
+        lx_entity_set_position(s, e2, lx_v3(pp.x + 5, 0, pp.z));
+        tp_run(s, 4);
+        CHECK(lx_fsm_global_float("Health") < 100, "FPS: the enemy chases and attacks (health %g, %s)", lx_fsm_global_float("Health"), tp_state(s, "Enemy 2", 0));
+        /* pause and resume */
+        lx_fsm_send_event(s, lx_entity_find(s, "Game Manager"), "OPEN_MENU", 0, 0);
+        tp_run(s, 0.1f);
+        CHECK(!strcmp(tp_state(s, "Game Manager", 0), "Paused") && !strcmp(tp_state(s, "Player", 0), "Paused") && !lx_mouse_lock_wanted(),
+              "FPS: pause menu frees the mouse (%s)", tp_state(s, "Player", 0));
+        CHECK(lx_time_scale() == 0, "FPS: pausing freezes time");
+        tp_run(s, 0.2f);
+        CHECK(!strcmp(tp_state(s, "Game Manager", 0), "Paused"), "FPS: stays paused");
+        /* Esc (the Pause action) closes the menu again */
+        lx_input_begin_frame();
+        g_lx_input.keys[LX_KEY_ESCAPE] = true;
+        lx_input_update(1.0f / 60);
+        lx_scene_simulate(s, 1.0f / 60);
+        lx_input_begin_frame();
+        g_lx_input.keys[LX_KEY_ESCAPE] = false;
+        lx_input_update(1.0f / 60);
+        tp_run(s, 0.1f);
+        CHECK(lx_time_scale() == 1, "FPS: Esc resumes (%s)", tp_state(s, "Game Manager", 0));
+        CHECK(!strcmp(tp_state(s, "Player", 0), "Playing") && !strcmp(tp_state(s, "Player", 1), "Ready") && lx_mouse_lock_wanted(), "FPS: resume");
+        /* winning: every enemy gone */
+        for (int i = 2; i <= 6; i++) {
+            char n[16];
+            snprintf(n, sizeof n, "Enemy %d", i);
+            LxEntity e = lx_entity_find(s, n);
+            if (e) lx_fsm_send_event(s, e, "HIT", 1000, 0);
+        }
+        tp_run(s, 1.0f);
+        CHECK(!strcmp(tp_state(s, "Game Manager", 0), "Victory") && NEAR(lx_fsm_global_float("Score"), 600, 0.01f), "FPS: clearing the area wins (%s, %g)",
+              tp_state(s, "Game Manager", 0), lx_fsm_global_float("Score"));
+        CHECK(!strcmp(tp_state(s, "Player", 0), "Stopped"), "FPS: controller stops on WIN");
+        lx_scene_stop_simulation(s);
+        lx_scene_destroy(s);
+    }
+    lx_assets_clear();
+
+    /* ---- third person ---- */
+    s = tp_open("luxora_tpl_tps", LX_TEMPLATE_THIRD_PERSON, &proj);
+    if (s) {
+        LxEntity player = lx_entity_find(s, "Player");
+        int coins = tp_count_tag(s, "Coin");
+        CHECK(coins == 12 && tp_count_tag(s, "Enemy") == 4, "TPS: coins and enemies (%d)", coins);
+        tp_run(s, 1.0f);
+        CHECK(!strcmp(tp_state(s, "Player", 0), "Playing") && !strcmp(tp_state(s, "Player", 1), "Ready"), "TPS: controller and attack ready (%s, %s)",
+              tp_state(s, "Player", 0), tp_state(s, "Player", 1));
+        /* the camera orbits behind the player */
+        LxVec3 cp = lx_entity_world_position(s, lx_entity_find(s, "Main Camera")), pp = lx_entity_world_position(s, player);
+        float d = lx_len3(lx_sub3(cp, pp));
+        CHECK(d > 2 && d < 8, "TPS: the camera follows (%.2f m)", d);
+        CHECK(pp.y > -0.1f && pp.y < 0.2f, "TPS: the player stands on the ground (y %.2f)", pp.y);
+        /* collect a coin */
+        LxEntity c1 = lx_entity_find(s, "Coin 1");
+        LxVec3 cpos = lx_entity_world_position(s, c1);
+        lx_entity_set_position(s, player, lx_v3(cpos.x, 0, cpos.z));
+        tp_run(s, 0.6f);
+        CHECK(!lx_entity_find(s, "Coin 1") && NEAR(lx_fsm_global_float("Score"), 50, 0.01f) && NEAR(lx_fsm_global_float("Coins"), 1, 0.01f),
+              "TPS: a coin is picked up (score %g, coins %g)", lx_fsm_global_float("Score"), lx_fsm_global_float("Coins"));
+        /* sword: an enemy within reach takes a HIT */
+        LxEntity e1 = lx_entity_find(s, "Enemy 1");
+        pp = lx_entity_world_position(s, player);
+        lx_entity_set_position(s, e1, lx_v3(pp.x + 1.5f, 0, pp.z));
+        tp_run(s, 0.05f);
+        float hp = lx_fsm_get_var_float(s, e1, 0, "Health");
+        lx_fsm_send_event(s, player, "ATTACK", 0, 0);
+        tp_run(s, 0.1f);
+        CHECK(lx_fsm_get_var_float(s, e1, 0, "Health") <= hp - 30 + 0.01f, "TPS: the sword hits (%g -> %g)", hp, lx_fsm_get_var_float(s, e1, 0, "Health"));
+        /* game over at 0 health */
+        lx_fsm_send_event(s, player, "DAMAGE", 1000, 0);
+        tp_run(s, 0.2f);
+        CHECK(!strcmp(tp_state(s, "Game Manager", 0), "Game Over") && !strcmp(tp_state(s, "Player", 0), "Stopped") && NEAR(lx_fsm_global_float("Health"), 0, 0.01f),
+              "TPS: dying ends the game (%s)", tp_state(s, "Game Manager", 0));
+        /* heal pickups don't bring the dead back */
+        lx_fsm_send_event(s, player, "HEAL", 25, 0);
+        tp_run(s, 0.1f);
+        CHECK(NEAR(lx_fsm_global_float("Health"), 0, 0.01f), "TPS: no healing after death");
+        lx_scene_stop_simulation(s);
+        lx_scene_destroy(s);
+    }
+    lx_assets_clear();
+    lx_mouse_reset();
+}

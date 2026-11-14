@@ -1469,6 +1469,7 @@ int main(void) {
     test_state_graph();
     test_fsm_fuzz();
     test_fsm_semantics();
+    test_templates();
 #if LUXORA_SCRIPT_COMPILER
     test_scripts();
 #endif

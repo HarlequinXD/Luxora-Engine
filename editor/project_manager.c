@@ -8,15 +8,19 @@ static struct {
     int new_template;
     char new_error[160];
     char browse_dir[LX_PATH_MAX];
-    UiNode *list, *browse_list, *template_cards[3], *error_label;
+    UiNode *list, *browse_list, *template_cards[5], *error_label;
     int nav;
 } PM;
 
-static const char *TEMPLATE_NAMES[3] = {"3D Empty", "3D Sample", "Mobile 3D"};
-static const char *TEMPLATE_DESC[3] = {"Main camera, light and a cube. A clean start.",
-                                       "Lit sample scene with materials, a point light and a 2,000 agent crowd.",
-                                       "Tuned for phones: medium quality, touch controls, Android target."};
-static const UiIcon TEMPLATE_ICONS[3] = {UI_ICON_CUBE, UI_ICON_SCENE, UI_ICON_PHONE};
+#define TEMPLATE_COUNT 5
+static const char *TEMPLATE_NAMES[TEMPLATE_COUNT] = {"3D Empty", "3D Sample", "Mobile 3D", "First Person Shooter", "Third Person Action"};
+static const char *TEMPLATE_DESC[TEMPLATE_COUNT] = {
+    "Main camera, light and a cube. A clean start.",
+    "Lit sample scene with materials, a point light and a 2,000 agent crowd.",
+    "Tuned for phones: medium quality, touch controls, Android target.",
+    "Mouse look, run and jump, a hitscan rifle with reload, enemy AI, pickups, HUD and pause menu.",
+    "Orbit camera, sword combat, enemy AI, coins on platforms to collect, HUD and pause menu."};
+static const UiIcon TEMPLATE_ICONS[TEMPLATE_COUNT] = {UI_ICON_CUBE, UI_ICON_SCENE, UI_ICON_PHONE, UI_ICON_CAMERA, UI_ICON_CHARACTER};
 
 static void rebuild_list(void);
 
@@ -192,7 +196,7 @@ static void search_changed(UiNode *n) { LX_UNUSED(n); rebuild_list(); }
 /* ---------------- new project dialog ---------------- */
 static void select_template(UiNode *n) {
     PM.new_template = (int)n->tag;
-    for (int i = 0; i < 3; i++) if (PM.template_cards[i]) PM.template_cards[i]->selected = i == PM.new_template;
+    for (int i = 0; i < TEMPLATE_COUNT; i++) if (PM.template_cards[i]) PM.template_cards[i]->selected = i == PM.new_template;
 }
 
 static void create_project(UiNode *n) {
@@ -229,37 +233,60 @@ static void new_project_dialog(UiNode *n) {
     lx_strcpy(PM.new_name, sizeof PM.new_name, "My Game");
     if (!PM.new_location[0]) lx_path_join(PM.new_location, sizeof PM.new_location, lx_home_dir(), "LuxoraProjects");
     PM.new_error[0] = 0;
-    UiNode *body = ui_modal(ui, "Create New Project", 640, 470);
-    UiNode *l = ui_label(ui, body, "Template");
-    l->fg = t->text_dim;
-    l->font = UI_FONT_SMALL;
-    UiNode *cards = ui_box(ui, body, UI_ROW);
-    cards->h = 150;
-    cards->gap = 10;
-    for (int i = 0; i < 3; i++) {
-        UiNode *c = ui_box(ui, cards, UI_COL);
-        c->grow = 1;
-        c->bg = t->panel_alt;
-        c->bg_hover = t->hover;
-        c->radius = 8;
-        c->border = t->border;
-        ui_pad(c, 12, 12, 12, 12);
-        c->gap = 6;
-        c->tag = i;
-        c->on_click = select_template;
-        c->selected = i == PM.new_template;
-        PM.template_cards[i] = c;
-        UiNode *ic = ui_label(ui, c, "");
-        ic->icon = TEMPLATE_ICONS[i];
-        ic->icon_size = 32;
-        ic->icon_color = t->accent;
-        ic->h = 40;
-        UiNode *nm = ui_label(ui, c, TEMPLATE_NAMES[i]);
-        nm->font = UI_FONT_BOLD;
-        UiNode *d = ui_label(ui, c, TEMPLATE_DESC[i]);
-        d->font = UI_FONT_SMALL;
-        d->fg = t->text_dim;
-        d->h = 40;
+    UiNode *body = ui_modal(ui, "Create New Project", 780, 590);
+    for (int group = 0; group < 2; group++) {
+        UiNode *hdr = ui_box(ui, body, UI_ROW);
+        hdr->h = 20;
+        hdr->gap = 8;
+        UiNode *l = ui_label(ui, hdr, group == 0 ? "Template" : "Game Templates");
+        l->fg = t->text_dim;
+        l->font = UI_FONT_SMALL;
+        if (group == 1) {
+            UiNode *pro = ui_label(ui, hdr, "PRO");
+            pro->font = UI_FONT_SMALL;
+            pro->bg = t->accent;
+            pro->fg = t->accent_text;
+            pro->radius = 4;
+            pro->w = 34;
+            pro->center_text = true;
+            UiNode *sub = ui_label(ui, hdr, "complete games made with State Graphs - open any graph to see how it works");
+            sub->font = UI_FONT_SMALL;
+            sub->fg = t->text_disabled;
+            sub->grow = 1;
+        }
+        UiNode *cards = ui_box(ui, body, UI_ROW);
+        cards->h = group == 0 ? 150 : 140;
+        cards->gap = 10;
+        for (int i = group == 0 ? 0 : 3; i < (group == 0 ? 3 : TEMPLATE_COUNT); i++) {
+            UiNode *c = ui_box(ui, cards, UI_COL);
+            c->grow = 1;
+            c->bg = t->panel_alt;
+            c->bg_hover = t->hover;
+            c->radius = 8;
+            c->border = t->border;
+            ui_pad(c, 12, 12, 12, 12);
+            c->gap = 6;
+            c->tag = i;
+            c->on_click = select_template;
+            c->selected = i == PM.new_template;
+            PM.template_cards[i] = c;
+            UiNode *top = ui_box(ui, c, group == 0 ? UI_COL : UI_ROW);
+            top->h = group == 0 ? 72 : 40;
+            top->gap = 10;
+            UiNode *ic = ui_label(ui, top, "");
+            ic->icon = TEMPLATE_ICONS[i];
+            ic->icon_size = 32;
+            ic->icon_color = t->accent;
+            ic->h = 40;
+            if (group == 1) ic->w = 40;
+            UiNode *nm = ui_label(ui, top, TEMPLATE_NAMES[i]);
+            nm->font = UI_FONT_BOLD;
+            if (group == 1) nm->grow = 1;
+            UiNode *d = ui_label(ui, c, TEMPLATE_DESC[i]);
+            d->font = UI_FONT_SMALL;
+            d->fg = t->text_dim;
+            d->h = 40;
+        }
     }
     UiNode *row = ed_prop_row(body, "Project name");
     UiNode *tf = ui_textfield(ui, row, PM.new_name, sizeof PM.new_name);

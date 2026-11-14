@@ -1202,7 +1202,18 @@ static bool ray_mesh(const MeshCache *m, LxVec3 o, LxVec3 d, float max_t, float 
     return hit;
 }
 
+static bool under(LxScene *s, LxEntity e, LxEntity root) {
+    for (int depth = 0; e && depth < 64; depth++, e = lx_entity_parent(s, e))
+        if (e == root) return true;
+    return false;
+}
+
 bool lx_physics_raycast(LxScene *s, LxVec3 origin, LxVec3 dir, float max_dist, uint32_t mask, LxRaycastHit *hit) {
+    return lx_physics_raycast_ignore(s, origin, dir, max_dist, mask, 0, hit);
+}
+
+/* ignore: colliders on this object and everything under it are skipped (a gun's ray never hits its own player) */
+bool lx_physics_raycast_ignore(LxScene *s, LxVec3 origin, LxVec3 dir, float max_dist, uint32_t mask, LxEntity ignore, LxRaycastHit *hit) {
     if (!s) return false;
     LxPhysicsWorld *w = query_world(s);
     float len = lx_len3(dir);
@@ -1215,6 +1226,7 @@ bool lx_physics_raycast(LxScene *s, LxVec3 origin, LxVec3 dir, float max_dist, u
     for (int i = 0; i < w->nb; i++) {
         const Body *b = &w->bodies[i];
         if (b->trigger || !((mask >> (b->layer & 31)) & 1u)) continue;
+        if (ignore && under(s, b->e, ignore)) continue;
         float t = 0;
         LxVec3 n = lx_v3(0, 1, 0);
         bool ok = false;

@@ -1171,6 +1171,18 @@ void ed_update(float dt) {
     if (ED.change_pending && !lx_mouse_down(LX_MOUSE_LEFT) && !ui_wants_keyboard(ED.ui)) ed_commit();
     if (ED.viewport) /* the game's HUD is laid out over the viewport */
         lx_game_ui_begin_frame(ED.viewport->x, ED.viewport->y, ED.viewport->cw, ED.viewport->ch, ED.play == ED_PLAYING);
+    {   /* the game's mouse pointer (Set Mouse) applies over the game view while playing; Escape gives it back */
+        static bool released;
+        UiNode *v = ED.viewport;
+        bool playing = ED.play != ED_EDIT && v && !(ED.view_tabs && ED.view_tabs->tab_index != 0);
+        LxVec2 m = lx_mouse_pos();
+        bool over = v && m.x >= v->x && m.y >= v->y + 32 && m.x < v->x + v->cw && m.y < v->y + v->ch;   /* below its toolbar */
+        if (!playing) { if (ED.play == ED_EDIT) lx_mouse_reset(); released = false; }
+        else if (lx_key_pressed(LX_KEY_ESCAPE) && (lx_mouse_locked() || lx_mouse_lock_wanted())) released = true;
+        else if (released && over && lx_mouse_pressed(LX_MOUSE_LEFT) && !ui_overlay_open(ED.ui)) released = false;
+        lx_mouse_lock_block(!playing || released || (!lx_mouse_locked() && (!over || ui_overlay_open(ED.ui))));
+        if (v) lx_mouse_lock_center(v->x + v->cw * 0.5f, v->y + 16 + v->ch * 0.5f);
+    }
     if (ED.play == ED_PLAYING) lx_scene_simulate(ED.scene, dt);
     else lx_scene_update_transforms(ED.scene);
     if (ED.play != ED_EDIT) {   /* the game asked to change scene or quit: in the editor, Quit stops playing */

@@ -413,7 +413,30 @@ void lx_sleep_ms(int ms) {
 }
 
 /* ---------------- input queries ---------------- */
-LxInputState g_lx_input = {.dpi_scale = 1.0f};
+LxInputState g_lx_input = {.dpi_scale = 1.0f, .focused = true, .lock_cx = -1, .lock_cy = -1, .mouse_size = 32};
+void lx_mouse_lock(bool lock) { g_lx_input.mouse_lock_want = lock; }
+bool lx_mouse_locked(void) { return g_lx_input.mouse_locked; }
+bool lx_mouse_lock_wanted(void) { return g_lx_input.mouse_lock_want; }
+void lx_mouse_show(bool show) { g_lx_input.mouse_hide_want = !show; }
+bool lx_mouse_shown(void) { return !g_lx_input.mouse_hide_want; }
+void lx_mouse_set_image(const char *ref, float hx, float hy, float size) {
+    lx_strcpy(g_lx_input.mouse_image, sizeof g_lx_input.mouse_image, ref ? ref : "");
+    g_lx_input.mouse_hot_x = isfinite(hx) ? hx : 0;
+    g_lx_input.mouse_hot_y = isfinite(hy) ? hy : 0;
+    g_lx_input.mouse_size = isfinite(size) && size > 1 ? lx_minf(size, 1024) : 32;
+}
+const char *lx_mouse_image(void) { return g_lx_input.mouse_image; }
+void lx_mouse_lock_block(bool blocked) { g_lx_input.mouse_lock_blocked = blocked; }
+void lx_mouse_lock_center(float x, float y) { g_lx_input.lock_cx = x; g_lx_input.lock_cy = y; }
+void lx_mouse_reset(void) {
+    g_lx_input.mouse_lock_want = g_lx_input.mouse_hide_want = false;
+    g_lx_input.mouse_image[0] = 0;
+}
+bool lx_mouse_lock_point(int *x, int *y) {
+    *x = g_lx_input.lock_cx >= 0 ? (int)g_lx_input.lock_cx : g_lx_input.width / 2;
+    *y = g_lx_input.lock_cy >= 0 ? (int)g_lx_input.lock_cy : g_lx_input.height / 2;
+    return g_lx_input.width > 0;
+}
 
 void lx_input_begin_frame(void) {
     memcpy(g_lx_input.prev_keys, g_lx_input.keys, sizeof g_lx_input.keys);
@@ -436,7 +459,7 @@ bool lx_mouse_released(LxMouseButton b) { return MOUSE_OK(b) && !g_lx_input.mous
 LxVec2 lx_mouse_pos(void) { return g_lx_input.mouse_pos; }
 LxVec2 lx_mouse_delta(void) {
     LxVec2 d = g_lx_input.mouse_delta_accum;
-    if (d.x == 0 && d.y == 0)
+    if (d.x == 0 && d.y == 0 && !g_lx_input.mouse_locked)   /* locked: the pointer is held still, only real movement counts */
         d = lx_v2(g_lx_input.mouse_pos.x - g_lx_input.prev_mouse_pos.x, g_lx_input.mouse_pos.y - g_lx_input.prev_mouse_pos.y);
     return d;
 }
