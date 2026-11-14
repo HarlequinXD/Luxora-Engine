@@ -325,6 +325,7 @@ static void s_model_stopped(void) {
 /* a folder of 4K textures: the editor keeps running while thumbnails are made, and they all arrive */
 static char g_big_dir[LX_PATH_MAX];
 static double g_big_last, g_big_worst;
+static bool g_big_skip;
 static bool g_big_done;
 static void s_big_make(void) {
     lx_path_join(g_big_dir, sizeof g_big_dir, ED.project.assets, "Textures/Big 4K Textures With Long Names");
@@ -362,7 +363,8 @@ static void s_big_check(void);
 static void big_watch(void) {
     if (g_big_done || !g_big_last) return;
     double now = lx_time();
-    if (now - g_big_last > g_big_worst) g_big_worst = now - g_big_last;
+    if (g_big_skip) g_big_skip = false;
+    else if (now - g_big_last > g_big_worst) g_big_worst = now - g_big_last;
     g_big_last = now;
     if (!g_big_start) g_big_start = now;
     /* done when every picture is in, or after 60 s */
@@ -572,7 +574,7 @@ static void sg_shot(const char *name) {
     lx_path_parent(dir, sizeof dir, shot);
     lx_path_join(path, sizeof path, dir[0] ? dir : ".", name);
     lx_renderer_screenshot(path);
-    if (g_big_last) g_big_last = lx_time();   /* a slow screenshot isn't a slow editor frame */
+    g_big_skip = true;   /* a slow screenshot (read back at the end of the frame) isn't a slow editor frame */
 }
 static UiNode *find_hint(UiNode *n, const char *hint) {
     if (!n) return NULL;
