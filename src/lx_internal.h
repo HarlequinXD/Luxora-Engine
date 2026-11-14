@@ -193,6 +193,7 @@ typedef struct LxVertex {
     float nx, ny, nz;
     float u, v;
     float tx, ty, tz, tw;
+    float u2, v2;   /* lightmap UVs (src/gfx/lightmap_uv.c) */
 } LxVertex;
 
 #define LX_MAX_LODS 4
@@ -221,6 +222,11 @@ struct LxMesh {
     int lod_count;
     LxAabb bounds;
     void *gpu;                  /* renderer-owned buffers */
+    /* lightmap UVs (u2, v2) */
+    bool has_uv2;               /* every triangle has its own place in u2, v2 */
+    bool uv2_generated;         /* made by the automatic unwrap (else the model's own) */
+    int lm_charts, lm_pack_res; /* unwrap: charts, and the square (texels) its padding was measured in */
+    float lm_world_size;        /* metres the 0..1 lightmap square spans at scale 1 (texel density) */
 };
 #define LX_MESH_VERTS(m) ((m)->lods[0].vertices)
 #define LX_MESH_IDX(m) ((m)->lods[0].indices)
@@ -233,6 +239,10 @@ LxMesh *lx_mesh_load_obj(const char *path);
 void lx_mesh_destroy(LxMesh *m);
 void lx_renderer_mesh_release(LxMesh *m);
 void lx_mesh_generate_lods(LxMesh *m);
+/* lightmap UVs: automatic unwrap (replaces lods[0] with chart-split vertices and rebuilds the LODs; false for
+ * skinned/dynamic meshes), and measuring UVs that came with the model */
+bool lx_mesh_unwrap_lightmap(LxMesh *m);
+void lx_mesh_lightmap_measure(LxMesh *m);
 
 struct LxTexture {
     char ref[LX_REF_MAX];

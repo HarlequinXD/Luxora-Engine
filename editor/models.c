@@ -61,6 +61,9 @@ static int g_rig_index;
 static const char *RIGS[] = {"None (static model)", "Generic", "Humanoid (avatar)"};
 
 static void imp_changed(UiNode *n) { LX_UNUSED(n); g_imp_dirty = true; }
+static int g_lmuv_index;
+static const char *LMUVS[] = {"Auto", "Generate", "Model's Own"};
+static void lmuv_changed(UiNode *n) { LX_UNUSED(n); g_imp.lightmap_uvs = (LxLightmapUvMode)g_lmuv_index; g_imp_dirty = true; }
 
 static void apply_import(void) {
     char path[LX_PATH_MAX];
@@ -132,6 +135,14 @@ void ed_model_inspector(UiNode *body, const char *ref) {
         sl->h = 22;
         sl->on_change = imp_changed;
     }
+    g_lmuv_index = (int)g_imp.lightmap_uvs;
+    UiNode *lr = ed_prop_row(sec, "Lightmap UVs");
+    UiNode *ld = ui_dropdown(ui, lr, &g_lmuv_index, LMUVS, 3);
+    ld->grow = 1;
+    ld->h = 22;
+    ld->on_change = lmuv_changed;
+    lx_strcpy(ld->tooltip, sizeof ld->tooltip, "Where baked lighting is stored. Auto: the model's own second UV set, "
+                                               "else an automatic unwrap. Generate: always unwrap.");
 
     sec = ed_section(body, UI_ICON_AVATAR, "Rig", &open_rig, NULL);
     g_rig_index = (int)g_imp.rig;

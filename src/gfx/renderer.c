@@ -455,7 +455,7 @@ static VkPipeline pipeline_create(const PipeDesc *d) {
     st[1].pName = "main";
 
     VkVertexInputBindingDescription bindings[2];
-    VkVertexInputAttributeDescription attrs[9];
+    VkVertexInputAttributeDescription attrs[10];
     uint32_t nb = 0, na = 0;
     if (d->vertex == VTX_MESH || d->vertex == VTX_MESH_POS_ONLY || d->vertex == VTX_MESH_POS_NORMAL) {
         bindings[nb++] = (VkVertexInputBindingDescription){0, sizeof(LxVertex), VK_VERTEX_INPUT_RATE_VERTEX};
@@ -468,7 +468,10 @@ static VkPipeline pipeline_create(const PipeDesc *d) {
             attrs[na++] = (VkVertexInputAttributeDescription){3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 32};
         }
         for (uint32_t c = 0; c < 4; c++) attrs[na++] = (VkVertexInputAttributeDescription){4 + c, 1, VK_FORMAT_R32G32B32A32_SFLOAT, c * 16};
-        if (d->vertex == VTX_MESH) attrs[na++] = (VkVertexInputAttributeDescription){8, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 64};
+        if (d->vertex == VTX_MESH) {
+            attrs[na++] = (VkVertexInputAttributeDescription){8, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 64};
+            attrs[na++] = (VkVertexInputAttributeDescription){9, 0, VK_FORMAT_R32G32_SFLOAT, (uint32_t)offsetof(LxVertex, u2)};   /* lightmap UVs */
+        }
     } else if (d->vertex == VTX_UI) {
         bindings[nb++] = (VkVertexInputBindingDescription){0, sizeof(LxUiVertex), VK_VERTEX_INPUT_RATE_VERTEX};
         attrs[na++] = (VkVertexInputAttributeDescription){0, 0, VK_FORMAT_R32G32_SFLOAT, 0};

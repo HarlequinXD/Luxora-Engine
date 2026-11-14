@@ -357,9 +357,15 @@ static void make_material(Ctx *c, Obj *mat, char *out_ref, size_t cap) {
  * ====================================================================== */
 typedef struct LayerRef { FbxProp *data, *index; int mapping; int comps; } LayerRef;   /* mapping: 0 per polygon-vertex, 1 per control point, 2 per polygon, 3 all same */
 
-static LayerRef layer(Ctx *c, FbxNode *geo, const char *elem, const char *data_name, const char *index_name, int comps) {
+/* the nth child called `name` (FBX keeps a second UV set as a second LayerElementUV) */
+static FbxNode *child_nth(FbxNode *n, const char *name, int nth) {
+    for (int i = 0; n && i < n->nkids; i++)
+        if (!strcmp(n->kids[i]->name, name) && nth-- == 0) return n->kids[i];
+    return NULL;
+}
+static LayerRef layer_nth(Ctx *c, FbxNode *geo, const char *elem, int nth, const char *data_name, const char *index_name, int comps) {
     LayerRef r = {0};
-    FbxNode *l = fbx_child(geo, elem);
+    FbxNode *l = child_nth(geo, elem, nth);
     if (!l) return r;
     r.data = array_of(l, data_name);
     r.index = array_of(l, index_name);
@@ -370,6 +376,9 @@ static LayerRef layer(Ctx *c, FbxNode *geo, const char *elem, const char *data_n
               : !strcmp(map, "ByPolygon") ? 2 : !strcmp(map, "AllSame") ? 3 : 0;
     if (strcmp(ref, "IndexToDirect") && strcmp(ref, "Index")) r.index = NULL;
     return r;
+}
+static LayerRef layer(Ctx *c, FbxNode *geo, const char *elem, const char *data_name, const char *index_name, int comps) {
+    return layer_nth(c, geo, elem, 0, data_name, index_name, comps);
 }
 static int layer_index(const LayerRef *l, int pv, int cp, int poly) {
     int i = l->mapping == 0 ? pv : l->mapping == 1 ? cp : l->mapping == 2 ? poly : 0;
@@ -384,6 +393,7 @@ static uint32_t vhash(const LxVertex *v, int cp) {
     uint32_t h = 2166136261u ^ (uint32_t)cp;
     const uint32_t *w = (const uint32_t *)v;
     for (int k = 0; k < 8; k++) { h ^= w[k]; h *= 16777619u; }
+    for (int k = 12; k < 14; k++) { h ^= w[k]; h *= 16777619u; }   /* u2, v2 */
     return h;
 }
 static uint32_t part_vertex(PartBuild *b, const LxVertex *v, int cp) {
@@ -403,7 +413,7 @@ static uint32_t part_vertex(PartBuild *b, const LxVertex *v, int cp) {
     uint32_t h = vhash(v, cp) & (uint32_t)(b->hcap - 1);
     while (b->hash[h] != 0xffffffffu) {
         uint32_t i = b->hash[h];
-        if (b->cp[i] == cp && !memcmp(&b->v[i], v, sizeof(float) * 8)) return i;
+        if (b->cp[i] == cp && !memcmp(&b->v[i], v, sizeof(float) * 8) && b->v[i].u2 == v->u2 && b->v[i].v2 == v->v2) return i;
         h = (h + 1) & (uint32_t)(b->hcap - 1);
     }
     LX_VEC_PUSH(b->v, b->vc, b->vcap, *v);
@@ -428,6 +438,7 @@ static void build_geometry(Ctx *c, Obj *model, Obj *geo, int node_index, Obj **m
     LayerRef ln = layer(c, g, "LayerElementNormal", "Normals", "NormalsIndex", 3);
     if (!ln.index) ln.index = array_of(fbx_child(g, "LayerElementNormal"), "NormalIndex");
     LayerRef luv = layer(c, g, "LayerElementUV", "UV", "UVIndex", 2);
+    LayerRef luv2 = layer_nth(c, g, "LayerElementUV", 1, "UV", "UVIndex", 2);   /* the model's own lightmap UVs */
     LayerRef lmat = layer(c, g, "LayerElementMaterial", "Materials", "", 1);
     if (c->m->imp.calculate_normals) ln.data = NULL;
     int parts = nmat > 0 ? nmat : 1;
@@ -469,6 +480,11 @@ static void build_geometry(Ctx *c, Obj *model, Obj *geo, int node_index, Obj **m
                 int ui = layer_index(&luv, pv, cp, poly);
                 v.u = (float)fbx_arr_d(luv.data, (uint32_t)ui * 2);
                 v.v = 1.0f - (float)fbx_arr_d(luv.data, (uint32_t)ui * 2 + 1);   /* FBX v points up */
+            }
+            if (luv2.data) {
+                int ui = layer_index(&luv2, pv, cp, poly);
+                v.u2 = (float)fbx_arr_d(luv2.data, (uint32_t)ui * 2);
+                v.v2 = 1.0f - (float)fbx_arr_d(luv2.data, (uint32_t)ui * 2 + 1);
             }
             corner[k] = ln.data ? part_vertex(b, &v, cp) : 0;
             if (!ln.data) {   /* flat for now: smoothed below */
@@ -588,7 +604,12 @@ static void build_geometry(Ctx *c, Obj *model, Obj *geo, int node_index, Obj **m
                 }
             }
             mesh->skin = sk;
-        } else lx_mesh_generate_lods(mesh);
+        } else {   /* lightmap UVs: the model's own second UV set, or the automatic unwrap */
+            LxLightmapUvMode lm = c->m->imp.lightmap_uvs;
+            if (luv2.data && lm != LX_LMUV_GENERATE) lx_mesh_lightmap_measure(mesh);
+            if (!mesh->has_uv2 && lm != LX_LMUV_OWN) lx_mesh_unwrap_lightmap(mesh);   /* also builds the LODs */
+            else lx_mesh_generate_lods(mesh);
+        }
         ModelPart part;
         memset(&part, 0, sizeof part);
         part.node = node_index;
@@ -974,6 +995,7 @@ bool lx_model_import_load(const char *model_path, LxModelImport *out) {
         else if (!strcmp(k, "import_animations")) out->import_animations = atoi(v) != 0;
         else if (!strcmp(k, "calculate_normals")) out->calculate_normals = atoi(v) != 0;
         else if (!strcmp(k, "smoothing_angle")) out->smoothing_angle = (float)atof(v);
+        else if (!strcmp(k, "lightmap_uvs")) out->lightmap_uvs = !strcmp(v, "generate") ? LX_LMUV_GENERATE : !strcmp(v, "own") ? LX_LMUV_OWN : LX_LMUV_AUTO;
         else if (!strcmp(k, "rig")) out->rig = !strcmp(v, "humanoid") ? LX_RIG_HUMANOID : !strcmp(v, "none") ? LX_RIG_NONE : LX_RIG_GENERIC;
         else if (!strncmp(k, "avatar.", 7)) {
             for (int b = 0; b < LX_HB_COUNT; b++)
@@ -996,10 +1018,11 @@ bool lx_model_import_save(const char *model_path, const LxModelImport *imp) {
     snprintf(path, sizeof path, "%s.lximport", model_path);
     LxStrBuf sb = {0};
     static const char *rigs[] = {"none", "generic", "humanoid"};
+    static const char *lmuv[] = {"auto", "generate", "own"};
     lx_sb_printf(&sb, "# Luxora model import settings\nscale = %g\nimport_materials = %d\nimport_animations = %d\ncalculate_normals = %d\n"
-                      "smoothing_angle = %g\nrig = %s\n",
+                      "smoothing_angle = %g\nlightmap_uvs = %s\nrig = %s\n",
                  imp->scale, imp->import_materials, imp->import_animations, imp->calculate_normals, imp->smoothing_angle,
-                 rigs[imp->rig < 0 || imp->rig > 2 ? 1 : imp->rig]);
+                 lmuv[imp->lightmap_uvs < 0 || imp->lightmap_uvs > 2 ? 0 : imp->lightmap_uvs], rigs[imp->rig < 0 || imp->rig > 2 ? 1 : imp->rig]);
     for (int b = 0; b < LX_HB_COUNT; b++)
         if (imp->avatar[b][0]) lx_sb_printf(&sb, "avatar.%s = %s\n", lx_human_bone_name((LxHumanBone)b), imp->avatar[b]);
     for (int i = 0; i < imp->clip_count && i < LX_MAX_CLIPS; i++)

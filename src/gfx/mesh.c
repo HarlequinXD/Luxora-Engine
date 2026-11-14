@@ -173,7 +173,7 @@ LxMesh *lx_mesh_build_primitive(LxPrimitive p) {
     default: build_cube(&b); break;
     }
     LxMesh *m = mb_finish(&b, ref);
-    lx_mesh_generate_lods(m);
+    lx_mesh_unwrap_lightmap(m);   /* also builds the LODs */
     return m;
 }
 
@@ -248,7 +248,7 @@ LxMesh *lx_mesh_load_obj(const char *path) {
     }
     lx_free(nrm);
     LxMesh *m = mb_finish(&b, path);
-    lx_mesh_generate_lods(m);
+    lx_mesh_unwrap_lightmap(m);   /* also builds the LODs */
     return m;
 }
 

@@ -7,6 +7,7 @@ layout(location = 2) in vec2 v_uv;
 layout(location = 3) in vec4 v_tangent;
 layout(location = 4) in vec4 v_tint;
 layout(location = 5) in float v_view_depth;
+layout(location = 6) in vec2 v_uv2;   // lightmap UVs
 layout(location = 0) out vec4 o_color;
 #if LX_MRT
 layout(location = 1) out vec4 o_normal;  // world normal * 0.5 + 0.5

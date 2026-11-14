@@ -711,12 +711,16 @@ typedef enum LxHumanBone {
 const char *lx_human_bone_name(LxHumanBone b);      /* "LeftUpperArm" ... */
 bool lx_human_bone_required(LxHumanBone b);         /* the 15 an avatar must have */
 
+/* Lightmap UVs of a model: Auto uses the model's own second UV set when it has one and generates one when it
+ * doesn't; Generate always unwraps; Model's Own never does (meshes without one can't take baked lighting). */
+typedef enum LxLightmapUvMode { LX_LMUV_AUTO, LX_LMUV_GENERATE, LX_LMUV_OWN } LxLightmapUvMode;
 #define LX_MAX_CLIPS 64
 typedef struct LxClipSettings { char name[64]; bool loop; } LxClipSettings;
 typedef struct LxModelImport {
     float scale;                     /* extra scale on top of the file's units (1 = as authored, in metres) */
     bool import_materials, import_animations, calculate_normals;
     float smoothing_angle;           /* degrees, when normals are calculated */
+    LxLightmapUvMode lightmap_uvs;   /* where the second UV set for baked lighting comes from */
     LxRigType rig;
     char avatar[LX_HB_COUNT][64];    /* humanoid: the rig's bone for each human bone ("" = none) */
     int clip_count;

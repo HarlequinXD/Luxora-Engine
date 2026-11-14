@@ -762,6 +762,191 @@ static void test_gi_reconstruction(void) {
 /* the user's scene: a flat ground, the sun and sky, a moving character. Before, the GI grid was sized from the
  * static geometry alone (a metre-tall slab over flat ground): the character's head was above it, unlit, and its
  * top edge cut across the face. Upper body, lower body, mid-jump and lifted high all get bounce light. */
+
+/* ---------- lightmap UVs ---------- */
+static int lm_find(int *p, int i) { while (p[i] != i) { p[i] = p[p[i]]; i = p[i]; } return i; }
+static float lm_edge(float ax, float ay, float bx, float by, float px, float py) { return (bx - ax) * (py - ay) - (by - ay) * (px - ax); }
+
+/* checks one unwrapped mesh: inside the square, no two triangles on the same texel, padding between charts,
+ * even texel density, geometry unchanged. Returns the number of problems. */
+static int check_lightmap_uvs(const char *name, const LxMesh *m, const LxVec3 *orig_tris, int orig_tri_count) {
+    int bad = 0;
+    const LxMeshLod *l = &m->lods[0];
+    int nt = l->index_count / 3, res = m->lm_pack_res;
+    CHECK(m->has_uv2 && m->uv2_generated && res >= 64, "%s: unwrapped (res %d)", name, res);
+    CHECK(nt == orig_tri_count, "%s: triangle count kept (%d vs %d)", name, nt, orig_tri_count);
+    float geo_err = 0;
+    for (int t = 0; t < nt && t < orig_tri_count; t++)
+        for (int k = 0; k < 3; k++) {
+            const LxVertex *v = &l->vertices[l->indices[t * 3 + k]];
+            geo_err = lx_maxf(geo_err, lx_len3(lx_sub3(lx_v3(v->px, v->py, v->pz), orig_tris[t * 3 + k])));
+        }
+    CHECK(geo_err < 1e-6f, "%s: geometry unchanged (err %g)", name, geo_err);
+    float lo = 1, hi = 0;
+    for (int i = 0; i < l->vertex_count; i++) {
+        lo = lx_minf(lo, lx_minf(l->vertices[i].u2, l->vertices[i].v2));
+        hi = lx_maxf(hi, lx_maxf(l->vertices[i].u2, l->vertices[i].v2));
+    }
+    CHECK(lo > 0 && hi < 1, "%s: UVs inside the square (%g..%g)", name, lo, hi);
+    /* charts = triangles joined by an identical lightmap UV (vertices are split on chart borders) */
+    int *par = lx_alloc(sizeof(int) * (size_t)nt);
+    for (int t = 0; t < nt; t++) par[t] = t;
+    int *first = lx_alloc(sizeof(int) * (size_t)l->vertex_count);
+    for (int i = 0; i < l->vertex_count; i++) first[i] = -1;
+    for (int t = 0; t < nt; t++)
+        for (int k = 0; k < 3; k++) {
+            uint32_t vi = l->indices[t * 3 + k];
+            if (first[vi] < 0) first[vi] = t;
+            else par[lm_find(par, t)] = lm_find(par, first[vi]);
+        }
+    lx_free(first);
+    /* same position in the same chart can be two vertices (normal seams): join on equal u2,v2 too */
+    for (int t = 0; t < nt; t++)
+        for (int k = 0; k < 3; k++)
+            for (int u = t + 1; u < nt && u < t + 64; u++)
+                for (int j = 0; j < 3; j++) {
+                    const LxVertex *a = &l->vertices[l->indices[t * 3 + k]], *b = &l->vertices[l->indices[u * 3 + j]];
+                    if (a->u2 == b->u2 && a->v2 == b->v2) par[lm_find(par, u)] = lm_find(par, t);
+                }
+    /* rasterise texel centres */
+    int *owner = lx_alloc(sizeof(int) * (size_t)res * (size_t)res), *chart = lx_alloc(sizeof(int) * (size_t)res * (size_t)res);
+    for (int i = 0; i < res * res; i++) owner[i] = chart[i] = -1;
+    int overlaps = 0;
+    double dens_sum = 0, wsum = 0;
+    float dmin = INFINITY, dmax = 0;
+    float *dens = lx_alloc(sizeof(float) * (size_t)nt);
+    for (int t = 0; t < nt; t++) {
+        const LxVertex *a = &l->vertices[l->indices[t * 3]], *b = &l->vertices[l->indices[t * 3 + 1]], *c = &l->vertices[l->indices[t * 3 + 2]];
+        float ax = a->u2 * res, ay = a->v2 * res, bx = b->u2 * res, by = b->v2 * res, cx = c->u2 * res, cy = c->v2 * res;
+        float area = lm_edge(ax, ay, bx, by, cx, cy);
+        float wa = lx_len3(lx_cross3(lx_v3(b->px - a->px, b->py - a->py, b->pz - a->pz), lx_v3(c->px - a->px, c->py - a->py, c->pz - a->pz)));
+        dens[t] = wa > 1e-10f ? fabsf(area) / wa : -1;
+        if (dens[t] > 0) { dens_sum += dens[t] * wa; wsum += wa; }
+        if (fabsf(area) < 1e-9f) continue;
+        float sg = area > 0 ? 1.0f : -1.0f;
+        int x0 = (int)floorf(lx_minf(ax, lx_minf(bx, cx))), x1 = (int)ceilf(lx_maxf(ax, lx_maxf(bx, cx)));
+        int y0 = (int)floorf(lx_minf(ay, lx_minf(by, cy))), y1 = (int)ceilf(lx_maxf(ay, lx_maxf(by, cy)));
+        for (int y = lx_maxf(y0, 0); y <= y1 && y < res; y++)
+            for (int x = lx_maxf(x0, 0); x <= x1 && x < res; x++) {
+                float px = x + 0.5f, py = y + 0.5f, e = 1e-3f * fabsf(area);
+                if (sg * lm_edge(ax, ay, bx, by, px, py) <= e || sg * lm_edge(bx, by, cx, cy, px, py) <= e || sg * lm_edge(cx, cy, ax, ay, px, py) <= e) continue;
+                int i = y * res + x;
+                if (owner[i] >= 0) overlaps++;
+                owner[i] = t;
+                chart[i] = lm_find(par, t);
+            }
+    }
+    float mean = wsum > 0 ? (float)(dens_sum / wsum) : 0;
+    double tiny = wsum / nt * 1e-4;   /* slivers (a sphere's pole) have no meaningful density */
+    for (int t = 0; t < nt; t++) {
+        const LxVertex *a = &l->vertices[l->indices[t * 3]], *b = &l->vertices[l->indices[t * 3 + 1]], *c = &l->vertices[l->indices[t * 3 + 2]];
+        if (lx_len3(lx_cross3(lx_v3(b->px - a->px, b->py - a->py, b->pz - a->pz), lx_v3(c->px - a->px, c->py - a->py, c->pz - a->pz))) < tiny) dens[t] = -1;
+    }
+    for (int t = 0; t < nt; t++)
+        if (dens[t] > 0) { dmin = lx_minf(dmin, dens[t] / mean); dmax = lx_maxf(dmax, dens[t] / mean); }
+    lx_free(dens);
+    int crowded = 0;
+    for (int y = 0; y < res; y++)
+        for (int x = 0; x < res; x++) {
+            int c = chart[y * res + x];
+            if (c < 0) continue;
+            for (int dy = -2; dy <= 2; dy++)
+                for (int dx = -2; dx <= 2; dx++) {
+                    int xx = x + dx, yy = y + dy;
+                    if (xx < 0 || yy < 0 || xx >= res || yy >= res) continue;
+                    int o = chart[yy * res + xx];
+                    if (o >= 0 && o != c) crowded++;
+                }
+        }
+    CHECK(overlaps == 0, "%s: %d texels covered twice", name, overlaps);
+    CHECK(crowded == 0, "%s: %d texels closer than the padding to another chart", name, crowded);
+    CHECK(dmin > 0.45f && dmax < 2.2f, "%s: even texel density (%.2f..%.2f of the mean)", name, dmin, dmax);
+    bad += overlaps + crowded;
+    printf("  %-9s %5d tris  %4d charts  %4d px square\n", name, nt, m->lm_charts, res);
+    lx_free(owner);
+    lx_free(chart);
+    lx_free(par);
+    return bad;
+}
+
+static LxVec3 *lm_soup(const LxMesh *m) {
+    const LxMeshLod *l = &m->lods[0];
+    LxVec3 *p = lx_alloc(sizeof(LxVec3) * (size_t)l->index_count);
+    for (int i = 0; i < l->index_count; i++) {
+        const LxVertex *v = &l->vertices[l->indices[i]];
+        p[i] = lx_v3(v->px, v->py, v->pz);
+    }
+    return p;
+}
+
+static void test_lightmap_uvs(void) {
+    printf("lightmap UVs\n");
+    /* primitives come unwrapped */
+    for (int p = 0; p < LX_PRIM_COUNT; p++) {
+        LxMesh *m = lx_mesh_build_primitive((LxPrimitive)p);
+        /* unwrap again from scratch on a copy to compare geometry */
+        LxMesh *c = lx_mesh_create(m->lods[0].vertices, m->lods[0].vertex_count, m->lods[0].indices, m->lods[0].index_count, "copy");
+        LxVec3 *soup = lm_soup(c);
+        int tris = c->lods[0].index_count / 3;
+        CHECK(lx_mesh_unwrap_lightmap(c), "%s unwraps", lx_primitive_name((LxPrimitive)p));
+        check_lightmap_uvs(lx_primitive_name((LxPrimitive)p), c, soup, tris);
+        CHECK(m->has_uv2 && m->lm_world_size > 0, "%s built with lightmap UVs", lx_primitive_name((LxPrimitive)p));
+        lx_free(soup);
+        lx_mesh_destroy(c);
+        lx_mesh_destroy(m);
+    }
+    /* a torus (saddles, curving both ways) and a lumpy rock (folds and slivers), smooth-shaded and shared vertices */
+    for (int kind = 0; kind < 3; kind++) {
+        LxVertex *v = NULL;
+        uint32_t *idx = NULL;
+        int vc = 0, vcap = 0, ic = 0, icap = 0;
+        const int U = 48, V = 24;
+        for (int j = 0; j <= V; j++)
+            for (int i = 0; i <= U; i++) {
+                float a = (float)i / U * 2 * LX_PI, b = (float)j / V * (kind == 0 ? 2 * LX_PI : LX_PI);
+                LxVec3 p;
+                if (kind == 0) p = lx_v3((1 + 0.35f * cosf(b)) * cosf(a), 0.35f * sinf(b), (1 + 0.35f * cosf(b)) * sinf(a));
+                else {
+                    LxVec3 d = lx_v3(sinf(b) * cosf(a), cosf(b), sinf(b) * sinf(a));
+                    float r = 1 + 0.25f * sinf(3 * a + 2 * b) * sinf(5 * b) + 0.1f * cosf(7 * a);
+                    if (kind == 2) r = 1 + 0.6f * sinf(4 * a) * sinf(3 * b);   /* deep folds */
+                    p = lx_scale3(d, r);
+                }
+                LxVertex x;
+                memset(&x, 0, sizeof x);
+                x.px = p.x; x.py = p.y; x.pz = p.z;
+                x.ny = 1;
+                LX_VEC_PUSH(v, vc, vcap, x);
+            }
+        for (int j = 0; j < V; j++)
+            for (int i = 0; i < U; i++) {
+                uint32_t a = (uint32_t)(j * (U + 1) + i), b = a + 1, c = a + (uint32_t)(U + 1), d = c + 1;
+                uint32_t q[6] = {a, c, b, b, c, d};
+                for (int k = 0; k < 6; k++) LX_VEC_PUSH(idx, ic, icap, q[k]);
+            }
+        LxMesh *m = lx_mesh_create(v, vc, idx, ic, "shape");
+        LxVec3 *soup = lm_soup(m);
+        CHECK(lx_mesh_unwrap_lightmap(m), "shape unwraps");
+        check_lightmap_uvs(kind == 0 ? "torus" : kind == 1 ? "rock" : "folds", m, soup, ic / 3);
+        lx_free(soup);
+        lx_mesh_destroy(m);
+        lx_free(v);
+        lx_free(idx);
+    }
+    /* deterministic: the same mesh gets the same UVs */
+    LxMesh *a = lx_mesh_build_primitive(LX_PRIM_SPHERE), *b = lx_mesh_build_primitive(LX_PRIM_SPHERE);
+    bool same = a->lods[0].vertex_count == b->lods[0].vertex_count;
+    for (int i = 0; same && i < a->lods[0].vertex_count; i++) same = !memcmp(&a->lods[0].vertices[i], &b->lods[0].vertices[i], sizeof(LxVertex));
+    CHECK(same, "unwrap is deterministic");
+    /* LODs carry lightmap UVs too */
+    bool lod_uv = a->lod_count > 1;
+    for (int l = 1; l < a->lod_count; l++)
+        for (int i = 0; i < a->lods[l].vertex_count; i++) lod_uv &= a->lods[l].vertices[i].u2 > 0 && a->lods[l].vertices[i].u2 < 1;
+    CHECK(lod_uv, "LODs have lightmap UVs (%d LODs)", a->lod_count);
+    lx_mesh_destroy(a);
+    lx_mesh_destroy(b);
+}
+
 static void test_gi_headroom(void) {
     printf("photon gi: room above the ground\n");
     LxScene *s = lx_scene_create("Flat");
@@ -1754,6 +1939,7 @@ int main(void) {
     test_moving_refit();
     test_gi_reconstruction();
     test_gi_headroom();
+    test_lightmap_uvs();
     test_gi_sky_calibration();
     test_acoustics();
     test_crowd();
