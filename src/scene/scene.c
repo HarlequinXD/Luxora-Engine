@@ -38,6 +38,7 @@ LxScene *lx_scene_create(const char *name) {
     s->count = 1; /* slot 0 = null entity */
     s->env = default_env();
     s->static_version = 1;
+    s->bake = lx_bake_settings_defaults();
     return s;
 }
 
@@ -117,6 +118,7 @@ LxEntity lx_entity_create(LxScene *s, const char *name) {
     d->rotation = lx_quat_identity();
     d->world = lx_mat4_identity();
     d->audio_voice = -1;
+    d->lm_index = -1;
     d->order = s->next_order++;
     LxEntity h = handle_of(s, d);
     s->order_dirty = true;
@@ -420,6 +422,8 @@ LxLight *lx_add_light(LxScene *s, LxEntity e, LxLightType type) {
     d->light.spot_angle_deg = 45.0f;
     d->light.cast_shadows = true;   /* every light: point and spot lights use the shadow atlas */
     d->light.contribute_gi = true;
+    d->light.mode = LX_LIGHT_MIXED;
+    d->light.shadow_radius = 0.15f;   /* point/spot: 15 cm sphere; directional: 0.15 degrees */
     s->static_version++;
     return &d->light;
 }

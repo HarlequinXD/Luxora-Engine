@@ -30,7 +30,7 @@ endif()
 set(LUXORA_SOURCES
   src/core/core.c src/core/math.c src/core/jobs.c src/core/kv.c
   src/gfx/mesh.c src/gfx/lightmap_uv.c src/gfx/image.c src/gfx/jpeg.c src/gfx/assets.c
-  src/gi/bvh.c src/gi/photon_gi.c
+  src/gi/bvh.c src/gi/photon_gi.c src/gi/lightmapper.c
   src/audio/audio.c
   src/crowd/crowd.c
   src/physics/physics.c

@@ -1205,6 +1205,7 @@ void ed_update(float dt) {
         }
     } else { char tmp[LX_REF_MAX]; lx_take_scene_request(tmp, sizeof tmp); lx_take_quit_request(); }
     lx_audio_update(ED.scene, dt);
+    ed_bake_update();
     static bool was_dirty;
     if (was_dirty != ED.dirty) { was_dirty = ED.dirty; ed_update_title(); }
 }

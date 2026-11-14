@@ -171,3 +171,8 @@ bool lx_camera_view(LxScene *s, LxEntity cam, int w, int h, LxRenderView *out) {
 }
 
 void lx_reflections_refresh(void) {}
+
+/* no GPU: the lightmapper traces on the CPU */
+bool lx_renderer_lightmap_begin(const LxLightmapBake *b) { LX_UNUSED(b); return false; }
+void lx_renderer_lightmap_trace(LxLightmapBake *b, int first, int count, uint32_t sample) { LX_UNUSED(b); LX_UNUSED(first); LX_UNUSED(count); LX_UNUSED(sample); }
+bool lx_renderer_lightmap_end(LxLightmapBake *b, bool read_back) { LX_UNUSED(b); LX_UNUSED(read_back); return false; }

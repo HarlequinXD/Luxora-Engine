@@ -1145,6 +1145,115 @@ static void s_static_check(void) {
     ED.selected = 0;
 }
 
+/* ---- baked lighting: the GPU baker agrees with the CPU one, and a bake shows up on screen ---- */
+static LxVec3 g_bake_sun;
+static void s_bake_setup(void) {
+    ED.dirty = false;
+    ed_new_scene("Bake Test");
+    LxScene *s = ED.scene;
+    for (int i = lx_scene_entity_count(s) - 1; i >= 0; i--) {   /* only the camera stays */
+        LxEntity e = lx_scene_entity_at(s, i);
+        if (e && !lx_get_camera(s, e)) lx_entity_destroy(s, e);
+    }
+    s->env.ambient_intensity = 0.3f;
+    LxEntity floor = lx_spawn_primitive(s, LX_PRIM_CUBE, "Floor", lx_v3(0, -0.5f, 0));
+    lx_entity_set_scale(s, floor, lx_v3(16, 1, 16));
+    LxEntity box = lx_spawn_primitive(s, LX_PRIM_CUBE, "Box", lx_v3(0, 1, 0));
+    lx_entity_set_scale(s, box, lx_v3(2, 2, 2));
+    LxEntity sun = lx_entity_create(s, "Sun");
+    LxLight *l = lx_add_light(s, sun, LX_LIGHT_DIRECTIONAL);
+    l->intensity = 3;
+    l->mode = LX_LIGHT_BAKED;
+    l->shadow_radius = 0.5f;
+    lx_entity_set_euler(s, sun, lx_v3(-40, 30, 0));
+    lx_scene_update_transforms(s);
+    g_bake_sun = lx_norm3(lx_mat4_dir(lx_entity_world_matrix(s, sun), lx_v3(0, 0, -1)));
+    LxBakeSettings *bk = lx_scene_bake_settings(s);
+    bk->texels_per_unit = 4;
+    bk->samples = 24;
+    bk->bounces = 1;
+    lx_graphics_settings()->gi_enabled = false;
+    ED.game_view = false;
+    ED.selected = 0;
+    ED.cam_pos = lx_v3(0, 18, 0.01f);
+    ED.cam_yaw = 0;
+    ED.cam_pitch = -89.5f;
+}
+static void s_bake_compare(void) {
+    LxScene *s = ED.scene;
+    LxLightmapBake *g = lx_lightmap_prepare(s);
+    SMOKE_CHECK(g != NULL, "a bake can be prepared");
+    if (!g) return;
+    if (!lx_renderer_lightmap_begin(g)) {
+        LX_INFO("[smoke] no GPU here - GPU bake comparison skipped");
+        lx_lightmap_bake_free(g);
+        return;
+    }
+    double t0 = lx_time();
+    for (int k = 0; k < g->set.samples; k++) lx_renderer_lightmap_trace(g, 0, g->texel_count, (uint32_t)k);
+    SMOKE_CHECK(lx_renderer_lightmap_end(g, true), "the GPU bake reads back");
+    double gpu_ms = (lx_time() - t0) * 1000.0;
+    LxLightmapBake *c = lx_lightmap_prepare(s);
+    t0 = lx_time();
+    for (int k = 0; k < c->set.samples; k++) lx_lightmap_trace_cpu(c, 0, c->texel_count, (uint32_t)k);
+    double cpu_ms = (lx_time() - t0) * 1000.0;
+    /* the same light in total, in the same places (4x4 texel blocks) */
+    int A = g->atlas_size, bw = (A + 3) / 4, nb = bw * bw * g->atlas_count;
+    double *gb = lx_calloc((size_t)nb, sizeof(double)), *cb = lx_calloc((size_t)nb, sizeof(double)), gt = 0, ct = 0, gs = 0, cs = 0;
+    for (int i = 0; i < g->texel_count; i++) {
+        int a = i / (A * A), y = (i / A) % A, x = i % A, blk = (a * bw + y / 4) * bw + x / 4;
+        double ge = g->accum[(size_t)i * 8 + 1], ce = c->accum[(size_t)i * 8 + 1];
+        gb[blk] += ge; cb[blk] += ce; gt += ge; ct += ce;
+        gs += g->accum[(size_t)i * 8 + 3]; cs += c->accum[(size_t)i * 8 + 3];
+    }
+    double sg = 0, sc = 0, sgg = 0, scc = 0, sgc = 0;
+    for (int b = 0; b < nb; b++) { sg += gb[b]; sc += cb[b]; sgg += gb[b] * gb[b]; scc += cb[b] * cb[b]; sgc += gb[b] * cb[b]; }
+    double cov = sgc - sg * sc / nb, vg = sgg - sg * sg / nb, vc = scc - sc * sc / nb;
+    double corr = (vg > 0 && vc > 0) ? cov / sqrt(vg * vc) : 0;
+    LX_INFO("[smoke] bake: %d texels x %d samples, GPU %.0f ms, CPU %.0f ms", g->texel_count, g->set.samples, gpu_ms, cpu_ms);
+    SMOKE_CHECK(gs == cs && gs > 0, "both traced every texel the same number of times (%.0f vs %.0f)", gs, cs);
+    SMOKE_CHECK(ct > 0 && fabs(gt - ct) < ct * 0.03, "the GPU bake carries the same light as the CPU's (%.5g vs %.5g)", gt, ct);
+    SMOKE_CHECK(corr > 0.97, "and puts it in the same places (correlation %.4f over %d blocks)", corr, nb);
+    lx_free(gb);
+    lx_free(cb);
+    lx_lightmap_bake_free(g);
+    lx_lightmap_bake_free(c);
+}
+static void s_bake_apply(void) {
+    LxScene *s = ED.scene;
+    SMOKE_CHECK(lx_lightmap_bake_now(s), "bake the scene (%s)", lx_lightmap_bake_status());
+    SMOKE_CHECK(lx_scene_lightmap_count(s) > 0, "it has lightmaps");
+    char path[LX_PATH_MAX], rel[LX_REF_MAX + 16];
+    snprintf(rel, sizeof rel, "%s/lm0.lxlm", s->lightmap_ref);
+    lx_asset_path(path, sizeof path, rel);
+    SMOKE_CHECK(lx_file_exists(path), "the lightmap file is saved (%s)", path);
+    LxEntityData *d = lx_entity_data(s, lx_entity_find(s, "Floor"));
+    SMOKE_CHECK(d && d->lm_index == 0, "the floor knows its lightmap tile");
+}
+static void s_bake_shot(void) { sg_shot("baked.ppm"); }
+static void s_bake_check(void) {
+    const char *shot = getenv("LUXORA_SMOKE_SHOT");
+    if (!shot || !shot[0]) { LX_INFO("[smoke] no screenshots on this build - baked lighting picture skipped"); return; }
+    int w, h;
+    unsigned char *px = ls_ppm("baked.ppm", &w, &h);
+    SMOKE_CHECK(px != NULL, "baked lighting picture taken");
+    if (!px) return;
+    int ww, wh;
+    lx_window_size(&ww, &wh);
+    float k = ww > 0 ? (float)w / (float)ww : 1.0f;
+    /* the sun is Baked: its light and the box's shadow on the floor come from the lightmap alone */
+    LxVec3 d = g_bake_sun;
+    float t = 1.5f / -d.y;
+    LxVec3 in_shadow = lx_v3(d.x * t, 0, d.z * t), open = lx_v3(-d.x * t, 0, -d.z * t);
+    LxVec2 a, b;
+    float lit = 0, dark = 0;
+    if (ed_viewport_to_screen(open, &a)) lit = ls_lum(px, w, h, a.x * k, a.y * k);
+    if (ed_viewport_to_screen(in_shadow, &b)) dark = ls_lum(px, w, h, b.x * k, b.y * k);
+    SMOKE_CHECK(lit > 30 && dark < lit * 0.6f, "the baked shadow shows on the floor (open %.0f, in the shadow %.0f)", lit, dark);
+    lx_free(px);
+    lx_graphics_settings()->gi_enabled = true;
+}
+
 static const struct { int frame; SmokeFn fn; const char *what; } TPL_STEPS[] = {
     {0, s_tpl_close, "close the project"},
     {4, s_tpl_dialog, "New Project"},
@@ -1173,6 +1282,11 @@ static const struct { int frame; SmokeFn fn; const char *what; } TPL_STEPS[] = {
     {292, s_leak_setup, "two rooms, a thin wall, a lamp in one"},
     {352, s_leak_shot, "picture of the two rooms"},
     {356, s_leak_check, "the dark room stays dark"},
+    {358, s_bake_setup, "a box on a floor under a Baked sun"},
+    {362, s_bake_compare, "the GPU lightmapper matches the CPU one"},
+    {364, s_bake_apply, "bake it"},
+    {376, s_bake_shot, "picture of the baked scene"},
+    {380, s_bake_check, "the baked shadow shows"},
 };
 static int g_tpl_base = -1;
 
@@ -1193,5 +1307,5 @@ bool ed_smoke_step(int frame) {
             LX_INFO("[smoke] %s", TPL_STEPS[i].what);
             TPL_STEPS[i].fn();
         }
-    return frame - g_tpl_base < 358;
+    return frame - g_tpl_base < 382;
 }

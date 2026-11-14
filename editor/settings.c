@@ -1109,7 +1109,7 @@ static void close_modal(UiNode *n) { LX_UNUSED(n); ui_close_modal(ED.ui); }
 void ed_about(void) {
     UiCtx *ui = ED.ui;
     const UiTheme *t = ui_theme(ui);
-    UiNode *body = ui_modal(ui, "About Luxora Editor", 520, 404);
+    UiNode *body = ui_modal(ui, "About Luxora Editor", 540, 432);
     UiNode *row = ui_box(ui, body, UI_ROW);
     row->h = 56;
     row->gap = 12;
@@ -1120,9 +1120,11 @@ void ed_about(void) {
     ui_label(ui, col, "Luxora Engine")->font = UI_FONT_TITLE;
     UiNode *v = ui_label(ui, col, "Version " LX_VERSION_STRING " · written in C11 · Vulkan 1.3");
     v->fg = t->text_dim;
-    static const char *lines[] = {"Physically based rendering with cascaded shadows",
+    static const char *lines[] = {"Physically based rendering, cascaded sun shadows, point and spot shadows",
                                   "Reflection probes (GGX pre-filtered) + screen-space reflections",
-                                  "Virtual photon global illumination (CPU, all cores)",
+                                  "GPU lightmapper: path-traced baked lighting, soft shadows, bounces (any GPU)",
+                                  "Automatic lightmap UVs, Mixed / Realtime / Baked lights",
+                                  "Virtual photon global illumination (GPU compute or CPU)",
                                   "Ray-traced acoustics: speed of sound, occlusion, reflections, reverb",
                                   "Data-oriented crowds, automatic LODs, instanced batching",
                                   "Input Manager: keyboard, mouse, gamepad and touch",

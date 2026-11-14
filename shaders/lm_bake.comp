@@ -1,0 +1,211 @@
+#version 450
+// Lightmap baking: one thread per lightmap texel adds one path-traced sample of the light arriving there.
+// The same algorithm as the CPU baker (src/gi/lightmapper.c, trace_texel): Baked lights straight onto the
+// texel, then a path through the static geometry collecting sky light, glow and the light of Mixed and Baked
+// lights at every bounce (shadow rays). Plain compute: no ray-tracing hardware needed.
+layout(local_size_x = 64) in;
+
+struct Node { vec4 a; vec4 b; };                      // a: min xyz, first/left (int bits); b: max xyz, count (int bits, 0 = inner)
+struct Tri { vec4 v0; vec4 e1; vec4 e2; vec4 n; };    // v0.w = material (int bits); leaf order
+struct Light { vec4 pos_type; vec4 color_mode; vec4 dir_range; vec4 cone; };   // cone: cos outer, radius, cos size, 0
+layout(std430, set = 0, binding = 0) readonly buffer Nodes { Node nodes[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Tris { Tri tris[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Mats { vec4 mats[]; };        // 2 per material: albedo, glow
+layout(std430, set = 0, binding = 3) readonly buffer Lights { Light lights[]; };
+layout(std430, set = 0, binding = 4) readonly buffer Texels { vec4 texels[]; };    // 3 per texel: position + valid, normal + size, face normal
+layout(std430, set = 0, binding = 5) buffer Accum { vec4 acc[]; };                 // 2 per texel: irradiance + samples, direction + back faces
+
+layout(push_constant) uniform PC {
+    vec4 zenith;     // w: sky brightness (ambient)
+    vec4 horizon;    // w: surface offset
+    vec4 ground;
+    ivec4 counts;    // first texel, texel count, light count, bounces
+    uvec4 sample_;   // x: sample index
+} pc;
+
+const float PI = 3.14159265;
+const int MIXED = 0, REALTIME = 1, BAKED = 2;
+const int DIRECTIONAL = 0, SPOT = 2;
+
+uint rng;
+uint hash(uint x) {
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+float rnd() {
+    rng = rng * 747796405u + 2891336453u;
+    uint w = ((rng >> ((rng >> 28u) + 4u)) ^ rng) * 277803737u;
+    return float(((w >> 22u) ^ w) >> 8) * (1.0 / 16777216.0);
+}
+void basis(vec3 n, out vec3 t, out vec3 b) {
+    vec3 a = abs(n.x) > 0.9 ? vec3(0, 1, 0) : vec3(1, 0, 0);
+    t = normalize(cross(a, n));
+    b = cross(n, t);
+}
+vec3 rnd_cosine(vec3 n) {
+    float u1 = rnd(), u2 = rnd();
+    float r = sqrt(u1), phi = 2.0 * PI * u2;
+    vec3 t, b;
+    basis(n, t, b);
+    return t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(max(0.0, 1.0 - u1));
+}
+float lum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+float ray_box(vec3 bmin, vec3 bmax, vec3 o, vec3 inv, float tmax) {
+    vec3 t1 = (bmin - o) * inv, t2 = (bmax - o) * inv;
+    vec3 lo = min(t1, t2), hi = max(t1, t2);
+    float tn = max(max(lo.x, lo.y), lo.z), tf = min(min(hi.x, hi.y), hi.z);
+    return (tf >= tn && tn < tmax && tf > 0.0) ? tn : 1e30;
+}
+
+// closest hit (any = true: stop at the first one, for shadow rays)
+int trace(vec3 o, vec3 d, float tmax, bool any, out float best) {
+    best = tmax;
+    int hit = -1;
+    vec3 inv = 1.0 / mix(d, vec3(1e-9), lessThan(abs(d), vec3(1e-9)));
+    if (ray_box(nodes[0].a.xyz, nodes[0].b.xyz, o, inv, best) >= 1e30) return -1;
+    int stack[48];
+    int sp = 0, node = 0;
+    for (int guard = 0; guard < 8192; guard++) {
+        Node n = nodes[node];
+        int count = floatBitsToInt(n.b.w), first = floatBitsToInt(n.a.w);
+        if (count > 0) {
+            for (int i = 0; i < count; i++) {
+                Tri t = tris[first + i];
+                vec3 p = cross(d, t.e2.xyz);
+                float det = dot(t.e1.xyz, p);
+                if (abs(det) < 1e-12) continue;
+                float id = 1.0 / det;
+                vec3 tv = o - t.v0.xyz;
+                float u = dot(tv, p) * id;
+                if (u < 0.0 || u > 1.0) continue;
+                vec3 q = cross(tv, t.e1.xyz);
+                float v = dot(d, q) * id;
+                if (v < 0.0 || u + v > 1.0) continue;
+                float dist = dot(t.e2.xyz, q) * id;
+                if (dist > 1e-4 && dist < best) {
+                    best = dist;
+                    hit = first + i;
+                    if (any) return hit;
+                }
+            }
+            if (sp == 0) break;
+            node = stack[--sp];
+            continue;
+        }
+        int c1 = first, c2 = first + 1;
+        float d1 = ray_box(nodes[c1].a.xyz, nodes[c1].b.xyz, o, inv, best);
+        float d2 = ray_box(nodes[c2].a.xyz, nodes[c2].b.xyz, o, inv, best);
+        if (d1 > d2) { float td = d1; d1 = d2; d2 = td; int ti = c1; c1 = c2; c2 = ti; }
+        if (d1 >= 1e30) {
+            if (sp == 0) break;
+            node = stack[--sp];
+        } else {
+            node = c1;
+            if (d2 < 1e30 && sp < 48) stack[sp++] = c2;
+        }
+    }
+    return hit;
+}
+
+vec3 sky(vec3 d) {
+    float t = clamp(d.y, -1.0, 1.0);
+    vec3 c = t >= 0.0 ? mix(pc.horizon.rgb, pc.zenith.rgb, pow(max(t, 0.0), 0.45))
+                      : mix(pc.horizon.rgb, pc.ground.rgb, clamp(-t * 4.0, 0.0, 1.0));
+    return c * pc.zenith.w;
+}
+
+// light from one light arriving at x, shadows included; dir_out = the way to it
+vec3 light_at(int i, vec3 x, vec3 n, vec3 ng) {
+    Light L = lights[i];
+    int type = int(L.pos_type.w + 0.5);
+    vec3 dir;
+    float dist, att;
+    if (type == DIRECTIONAL) {
+        vec3 c = -L.dir_range.xyz, t, b;
+        basis(c, t, b);
+        float ct = 1.0 - rnd() * (1.0 - L.cone.z), st = sqrt(max(0.0, 1.0 - ct * ct)), ph = 2.0 * PI * rnd();
+        dir = normalize(c * ct + t * (st * cos(ph)) + b * (st * sin(ph)));
+        dist = 1e30;
+        att = 1.0;
+    } else {
+        vec3 p = L.pos_type.xyz;
+        if (L.cone.y > 0.0) {
+            vec3 r;
+            for (int k = 0; k < 16; k++) {
+                r = vec3(rnd(), rnd(), rnd()) * 2.0 - 1.0;
+                if (dot(r, r) <= 1.0) break;
+            }
+            if (dot(r, r) > 1.0) r = vec3(0.0);
+            p += r * L.cone.y;
+        }
+        vec3 to = p - x;
+        float d2 = max(dot(to, to), 1e-4);
+        dist = sqrt(d2);
+        dir = to / dist;
+        float range = L.dir_range.w;
+        float w = clamp(1.0 - (d2 / (range * range)) * (d2 / (range * range)), 0.0, 1.0);
+        att = w * w / d2;
+        if (type == SPOT) {
+            float cd = dot(-dir, L.dir_range.xyz);
+            att *= smoothstep(L.cone.x, L.cone.x + (1.0 - L.cone.x) * 0.25, cd);
+        }
+    }
+    float cs = dot(n, dir);
+    if (att <= 0.0 || cs <= 0.0 || dot(ng, dir) <= 0.0) return vec3(0.0);
+    float tmax = dist < 1e29 ? dist - pc.horizon.w : 1e30, hd;
+    if (trace(x, dir, tmax, true, hd) >= 0) return vec3(0.0);
+    return L.color_mode.rgb * (att * cs);
+}
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.counts.y) return;
+    int texel = pc.counts.x + i;
+    vec4 t0 = texels[texel * 3], t1 = texels[texel * 3 + 1], t2 = texels[texel * 3 + 2];
+    if (t0.w <= 0.0) return;
+    vec3 n = t1.xyz, ng = t2.xyz;
+    vec3 x = t0.xyz + ng * pc.horizon.w;
+    rng = hash(uint(texel) * 9781u + hash(pc.sample_.x + 0x9e3779b9u));
+    vec3 E = vec3(0.0), D = vec3(0.0);
+    int nl = pc.counts.z, bounces = pc.counts.w;
+    for (int l = 0; l < nl; l++) {
+        if (int(lights[l].color_mode.w + 0.5) != BAKED) continue;
+        vec3 to_l = int(lights[l].pos_type.w + 0.5) == DIRECTIONAL ? -lights[l].dir_range.xyz : normalize(lights[l].pos_type.xyz - x);
+        vec3 e = light_at(l, x, n, ng);
+        E += e;
+        D += to_l * lum(e);
+    }
+    vec3 d = rnd_cosine(n);
+    float dn = dot(d, ng);
+    if (dn <= 0.0) d = normalize(d - ng * (2.0 * dn - 1e-3));
+    vec3 first_dir = d, T = vec3(PI), o = x, path = vec3(0.0);
+    float back = 0.0;
+    for (int k = 0; k < 16; k++) {
+        float h;
+        int hit = trace(o, d, 1e30, false, h);
+        if (hit < 0) { path += T * sky(d); break; }
+        Tri tr = tris[hit];
+        vec3 hn = tr.n.xyz;
+        if (dot(hn, d) > 0.0) { if (k == 0) back = 1.0; break; }
+        int m = floatBitsToInt(tr.v0.w);
+        path += T * mats[m * 2 + 1].rgb / PI;
+        if (k >= bounces) break;
+        vec3 p = o + d * h + hn * pc.horizon.w;
+        T *= mats[m * 2].rgb / PI;
+        vec3 eh = vec3(0.0);
+        for (int l = 0; l < nl; l++)
+            if (int(lights[l].color_mode.w + 0.5) != REALTIME) eh += light_at(l, p, hn, hn);
+        path += T * eh;
+        T *= PI;
+        if (lum(T) < 1e-5) break;
+        o = p;
+        d = rnd_cosine(hn);
+    }
+    E += path;
+    D += first_dir * lum(path);
+    acc[texel * 2] += vec4(E, 1.0);
+    acc[texel * 2 + 1] += vec4(D, back);
+}

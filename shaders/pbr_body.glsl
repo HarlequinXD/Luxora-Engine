@@ -8,6 +8,7 @@ layout(location = 3) in vec4 v_tangent;
 layout(location = 4) in vec4 v_tint;
 layout(location = 5) in float v_view_depth;
 layout(location = 6) in vec2 v_uv2;   // lightmap UVs
+layout(location = 7) in vec3 v_lm;    // lightmap texel (z = layer, -1 = not lightmapped)
 layout(location = 0) out vec4 o_color;
 #if LX_MRT
 layout(location = 1) out vec4 o_normal;  // world normal * 0.5 + 0.5
@@ -90,7 +91,7 @@ float local_shadow(int i, vec3 world, vec3 ng) {
     vec3 d = world - lp;
     float tile = s0.x;
     vec3 f, up;
-    if (u.lights[i].color_type.w > 1.5) {
+    if (mod(u.lights[i].color_type.w, 10.0) > 1.5) {
         f = normalize(u.lights[i].dir_cos.xyz);
         up = s1.xyz;
     } else {
@@ -335,17 +336,20 @@ void main() {
         if (nv < 0.05) n = normalize(n + v * (0.05 - nv));
     }
     vec3 color = vec3(0.0);
-    if (u.sun_color.w > 0.5)
+    bool lightmapped = v_lm.z >= -0.5;
+    // a Baked light's light is in the lightmap already: lightmapped surfaces skip it
+    if (u.sun_color.w > 0.5 && !(lightmapped && u.sun_color.w > 1.5))
         color += brdf(n, v, -u.sun_dir.xyz, albedo, metallic, rough) * u.sun_color.rgb * shadow_factor(v_world, ng) * self_shadow;
     for (int i = 0; i < u.counts.x; i++) {
         LxLightData L = u.lights[i];
+        if (lightmapped && L.color_type.w > 9.5) continue;
         vec3 to_l = L.pos_range.xyz - v_world;
         float d2 = max(dot(to_l, to_l), 1e-4);
         vec3 l = to_l * inversesqrt(d2);
         float range = L.pos_range.w;
         float window = clamp(1.0 - pow(d2 / (range * range), 2.0), 0.0, 1.0);
         float att = window * window / d2;
-        if (L.color_type.w > 1.5) {
+        if (mod(L.color_type.w, 10.0) > 1.5) {
             float cd = dot(-l, normalize(L.dir_cos.xyz));
             att *= smoothstep(L.dir_cos.w, mix(L.dir_cos.w, 1.0, 0.25), cd);
         }
@@ -363,7 +367,16 @@ void main() {
         vec3 edge = min(g, u.gi_res.xyz - g);
         gi_cover = clamp(min(min(edge.x, edge.y), edge.z) - 0.5, 0.0, 1.0);
     }
-    if (gi_cover > 0.0) { gi_sh = gi_gather(v_world, ng); irradiance = mix(sky_ambient, gi_eval(gi_sh, n), gi_cover); }
+    if (lightmapped) {
+        // baked: irradiance at the surface, turned towards the bumped normal with the stored light direction
+        // (the direction map's w is how much the unbumped normal faces it, so an unbumped surface gets exactly the bake)
+        vec4 lm = texture(u_lightmap, v_lm);
+        vec4 ld = texture(u_lightmap, vec3(v_lm.xy, v_lm.z + 1.0));
+        vec3 ldir = ld.xyz * 2.0 - 1.0;
+        float turn = clamp((dot(n, ldir) * 0.5 + 0.5) / max(ld.w, 0.05), 0.0, 3.0);
+        irradiance = lm.rgb * turn;
+        gi_cover = 0.0;
+    } else if (gi_cover > 0.0) { gi_sh = gi_gather(v_world, ng); irradiance = mix(sky_ambient, gi_eval(gi_sh, n), gi_cover); }
     else irradiance = sky_ambient;
     float ndv = max(dot(n, v), 1e-4);
     vec3 f0 = mix(vec3(0.04), albedo, metallic);
@@ -385,6 +398,11 @@ void main() {
         occl = mix(0.35, 1.0, sqrt(occl)); /* GI is low-frequency: never fully black out a reflection */
         occl = mix(occl, 1.0, local_w * 0.7);
         occl = mix(1.0, occl, gi_cover);
+    }
+    if (lightmapped) {   // baked: how much less light arrives than the open sky would give
+        float open_e = max(dot(sky_ambient, vec3(0.333)), 1e-3);
+        float ratio = clamp(dot(irradiance, vec3(0.333)) / open_e, 0.0, 1.0);
+        occl = mix(mix(0.35, 1.0, sqrt(ratio)), 1.0, local_w * 0.7);
     }
     // specular occlusion from the AO map (Lagarde & de Rousiers)
     float spec_ao = clamp(pow(ndv + ao, exp2(-16.0 * rough - 1.0)) - 1.0 + ao, 0.0, 1.0);

@@ -48,10 +48,14 @@ static void write_entity(LxStrBuf *sb, const LxScene *s, LxEntity e, int id_of_p
         lx_sb_printf(sb, "light.type = %s\nlight.color = %g %g %g\nlight.intensity = %g\nlight.range = %g\n",
                      light_type_name(l->type), l->color.x, l->color.y, l->color.z, l->intensity, l->range);
         lx_sb_printf(sb, "light.spot_angle = %g\nlight.shadows = %d\nlight.gi = %d\n", l->spot_angle_deg, l->cast_shadows, l->contribute_gi);
+        static const char *modes[] = {"mixed", "realtime", "baked"};
+        lx_sb_printf(sb, "light.mode = %s\nlight.shadow_radius = %g\n", modes[l->mode <= LX_LIGHT_BAKED ? l->mode : 0], l->shadow_radius);
     }
     if (d->comps & LX_COMP_MESH) {
         lx_sb_printf(sb, "mesh.mesh = %s\nmesh.material = %s\nmesh.shadows = %d\nmesh.static = %d\n", d->mesh.mesh,
                      d->mesh.material, d->mesh.cast_shadows, d->mesh.static_geometry);
+        if (d->lm_index >= 0 && !prefab_root)
+            lx_sb_printf(sb, "mesh.lightmap = %d %.9g %.9g %.9g\n", d->lm_index, d->lm_st[0], d->lm_st[1], d->lm_st[2]);
     }
     if (d->comps & LX_COMP_AUDIO_SOURCE) {
         const LxAudioSource *a = &d->audio;
@@ -121,6 +125,10 @@ char *lx_scene_serialize(const LxScene *s) {
                  e->ground_color.z);
     lx_sb_printf(&sb, "ambient = %g\nexposure = %g\nfog_color = %g %g %g\nfog_density = %g\n", e->ambient_intensity, e->exposure,
                  e->fog_color.x, e->fog_color.y, e->fog_color.z, e->fog_density);
+    const LxBakeSettings *bk = &s->bake;
+    lx_sb_printf(&sb, "bake.texels_per_unit = %g\nbake.max_atlas = %d\nbake.bounces = %d\nbake.samples = %d\nbake.directional = %d\nbake.denoise = %d\n",
+                 bk->texels_per_unit, bk->max_atlas_size, bk->bounces, bk->samples, bk->directional, bk->denoise);
+    if (s->lightmap_count > 0) lx_sb_printf(&sb, "lightmaps = %d %s\n", s->lightmap_count, s->lightmap_ref);
     int next_id = 1;
     for (LxEntity r = s->first_root; r; r = lx_entity_next_sibling(s, r)) write_entity(&sb, s, r, 0, &next_id, false);
     if (!sb.data) lx_sb_printf(&sb, "");
@@ -167,6 +175,17 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
             else if (!strcmp(k, "exposure")) e->exposure = (float)atof(v);
             else if (!strcmp(k, "fog_color")) e->fog_color = lx_parse_vec3(v);
             else if (!strcmp(k, "fog_density")) e->fog_density = (float)atof(v);
+            else if (!strcmp(k, "bake.texels_per_unit")) s->bake.texels_per_unit = (float)atof(v);
+            else if (!strcmp(k, "bake.max_atlas")) s->bake.max_atlas_size = atoi(v);
+            else if (!strcmp(k, "bake.bounces")) s->bake.bounces = atoi(v);
+            else if (!strcmp(k, "bake.samples")) s->bake.samples = atoi(v);
+            else if (!strcmp(k, "bake.directional")) s->bake.directional = lx_parse_bool(v);
+            else if (!strcmp(k, "bake.denoise")) s->bake.denoise = lx_parse_bool(v);
+            else if (!strcmp(k, "lightmaps")) {
+                char ref[LX_REF_MAX] = {0};
+                int n = 0;
+                if (sscanf(v, "%d %159[^\n]", &n, ref) == 2 && n > 0) { s->lightmap_count = n; lx_strcpy(s->lightmap_ref, sizeof s->lightmap_ref, ref); }
+            }
             continue;
         }
         if (!cur_e) continue;
@@ -213,6 +232,8 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
             else if (!strcmp(f, "spot_angle")) l->spot_angle_deg = (float)atof(v);
             else if (!strcmp(f, "shadows")) l->cast_shadows = lx_parse_bool(v);
             else if (!strcmp(f, "gi")) l->contribute_gi = lx_parse_bool(v);
+            else if (!strcmp(f, "mode")) l->mode = !strcmp(v, "baked") ? LX_LIGHT_BAKED : !strcmp(v, "realtime") ? LX_LIGHT_REALTIME : LX_LIGHT_MIXED;
+            else if (!strcmp(f, "shadow_radius")) l->shadow_radius = (float)atof(v);
         } else if (!strncmp(k, "mesh.", 5)) {
             const char *f = k + 5;
             LxMeshRenderer *m = (d->comps & LX_COMP_MESH) ? &d->mesh : lx_add_mesh(s, cur_e, NULL, NULL);
@@ -220,6 +241,14 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
             else if (!strcmp(f, "material")) lx_strcpy(m->material, sizeof m->material, v);
             else if (!strcmp(f, "shadows")) m->cast_shadows = lx_parse_bool(v);
             else if (!strcmp(f, "static")) m->static_geometry = lx_parse_bool(v);
+            else if (!strcmp(f, "lightmap")) {
+                int li = -1;
+                float st[3] = {0};
+                if (sscanf(v, "%d %f %f %f", &li, &st[0], &st[1], &st[2]) == 4 && li >= 0 && li < 4096) {
+                    d->lm_index = (int16_t)li;
+                    memcpy(d->lm_st, st, sizeof st);
+                }
+            }
         } else if (!strncmp(k, "audio.", 6)) {
             const char *f = k + 6;
             LxAudioSource *a = (d->comps & LX_COMP_AUDIO_SOURCE) ? &d->audio : lx_add_audio_source(s, cur_e, NULL);

@@ -316,6 +316,8 @@ typedef struct LxEntityData {
     char tag[LX_TAG_MAX];
     char prefab[LX_REF_MAX];  /* the prefab this object was made from ("" = none) */
     bool pending_destroy;     /* destroyed during the frame: removed when the frame ends */
+    int16_t lm_index;         /* baked lighting: lightmap atlas, -1 = none */
+    float lm_st[3];           /* its tile in the atlas: size, x, y (0..1) */
 } LxEntityData;
 
 struct LxScene {
@@ -336,6 +338,10 @@ struct LxScene {
     float last_dt;                   /* last simulate() delta */
     struct LxGameplay *gameplay;     /* timers, tweens, deferred destroys (src/scene/gameplay.c) */
     bool in_update;                  /* inside lx_scene_simulate: destroys are deferred */
+    LxBakeSettings bake;             /* baked lighting */
+    char lightmap_ref[LX_REF_MAX];   /* folder of the baked lightmaps (lm0.lxlm ...), "" = none */
+    int lightmap_count;
+    uint32_t lightmap_version;       /* runtime: changes when lightmaps are baked or cleared */
 };
 
 /* gameplay (src/scene/gameplay.c) */
@@ -432,6 +438,46 @@ bool lx_bvh_refit_moving(LxBvh *b, LxScene *s);   /* same objects, new poses: re
 void lx_bvh_free(LxBvh *bvh);
 bool lx_bvh_intersect(const LxBvh *bvh, LxRay ray, float tmax, LxHit *hit);
 bool lx_bvh_occluded(const LxBvh *bvh, LxRay ray, float tmax);
+
+/* ---------- lightmapper (src/gi/lightmapper.c) ---------- */
+typedef struct LxLmLight {
+    LxLightType type;
+    LxLightMode mode;
+    LxVec3 color, pos, dir;   /* colour * intensity; dir = where the light points */
+    float range, cos_outer;   /* spot cone */
+    float radius, cos_size;   /* soft shadows: point/spot sphere radius; directional cos(half its angle) */
+} LxLmLight;
+typedef struct LxLmTile { int entity, atlas, x, y, size; } LxLmTile;
+typedef struct LxLightmapBake {
+    LxBakeSettings set;
+    int bounces;
+    LxBvh bvh;
+    LxLmLight *lights;
+    int light_count, light_cap;
+    LxVec3 sky_zenith, sky_horizon, ground;
+    float ambient, eps;
+    int atlas_size, atlas_count;
+    LxLmTile *tiles;
+    int tile_count;
+    int texel_count;          /* atlas_count * atlas_size^2 */
+    float *texels;            /* 12 per texel: position, valid; normal, texel size (m); face normal, 0 */
+    int *owner;               /* tile of each texel, -1 = none */
+    float *accum;             /* 8 per texel: irradiance sum rgb, samples; direction sum xyz, back-face hits */
+    float *color, *dir;       /* resolved: RGBA per texel */
+} LxLightmapBake;
+LxLightmapBake *lx_lightmap_prepare(LxScene *s);
+void lx_lightmap_trace_cpu(LxLightmapBake *b, int first, int count, uint32_t sample);
+void lx_lightmap_resolve(LxLightmapBake *b);
+bool lx_lightmap_apply(LxLightmapBake *b, LxScene *s, const char *dir_ref);
+void lx_lightmap_bake_free(LxLightmapBake *b);
+bool lx_lightmap_write(const char *path, int size, const float *color, const float *dir);
+uint16_t *lx_lightmap_read(const char *path, int *size);   /* 2 layers of RGBA half floats */
+float lx_lightmap_half(uint16_t h);
+uint32_t lx_lightmap_epoch(void);   /* changes whenever lightmaps are written or cleared (the renderer reloads) */
+/* renderer: GPU tracing of a bake (false: no GPU, the CPU does it) */
+bool lx_renderer_lightmap_begin(const LxLightmapBake *b);
+void lx_renderer_lightmap_trace(LxLightmapBake *b, int first, int count, uint32_t sample);
+bool lx_renderer_lightmap_end(LxLightmapBake *b, bool read_back);
 
 /* ---------- GI ---------- */
 typedef struct LxGiVolume {

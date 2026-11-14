@@ -947,6 +947,166 @@ static void test_lightmap_uvs(void) {
     lx_mesh_destroy(b);
 }
 
+/* ---------- baked lighting ---------- */
+/* average baked irradiance (resolved colour) of an object's texels within r of p whose normal faces n */
+static LxVec3 lm_probe(const LxLightmapBake *b, LxScene *s, LxEntity e, LxVec3 p, float r, LxVec3 n, int *count) {
+    int tile = -1;
+    for (int k = 0; k < b->tile_count; k++)
+        if (b->tiles[k].entity == (int)(e & LX_INDEX_MASK)) tile = k;
+    LX_UNUSED(s);
+    LxVec3 sum = lx_v3(0, 0, 0);
+    int c = 0;
+    for (int i = 0; i < b->texel_count; i++) {
+        if (b->owner[i] != tile) continue;
+        const float *t = &b->texels[(size_t)i * 12];
+        if (t[3] <= 0 || lx_dot3(lx_v3(t[8], t[9], t[10]), n) < 0.9f) continue;
+        if (lx_len3(lx_sub3(lx_v3(t[0], t[1], t[2]), p)) > r) continue;
+        sum = lx_add3(sum, lx_v3(b->color[i * 4], b->color[i * 4 + 1], b->color[i * 4 + 2]));
+        c++;
+    }
+    if (count) *count = c;
+    return c ? lx_scale3(sum, 1.0f / c) : sum;
+}
+
+static LxLightmapBake *lm_bake_cpu(LxScene *s) {
+    LxLightmapBake *b = lx_lightmap_prepare(s);
+    if (!b) return NULL;
+    for (int k = 0; k < b->set.samples; k++) lx_lightmap_trace_cpu(b, 0, b->texel_count, (uint32_t)k);
+    lx_lightmap_resolve(b);
+    return b;
+}
+
+static void test_lightmapper(void) {
+    printf("baked lighting\n");
+    LxScene *s = lx_scene_create("Bake");
+    s->bake.texels_per_unit = 2;
+    s->bake.samples = 64;
+    s->bake.bounces = 0;
+    LxEntity floor = lx_spawn_primitive(s, LX_PRIM_CUBE, "Floor", lx_v3(0, -0.5f, 0));
+    lx_entity_set_scale(s, floor, lx_v3(20, 1, 20));
+    LxEntity box = lx_spawn_primitive(s, LX_PRIM_CUBE, "Box", lx_v3(0, 1, 0));
+    lx_entity_set_scale(s, box, lx_v3(2, 2, 2));
+    LxEntity sun = lx_entity_create(s, "Sun");
+    LxLight *L = lx_add_light(s, sun, LX_LIGHT_DIRECTIONAL);
+    L->intensity = 3;
+    L->color = lx_v3(1, 1, 1);
+    L->mode = LX_LIGHT_BAKED;
+    L->shadow_radius = 0;
+    lx_entity_set_euler(s, sun, lx_v3(-90, 0, 0));   /* pointing straight down */
+    s->env.ambient_intensity = 0;
+    LxVec3 up = lx_v3(0, 1, 0);
+
+    /* a Baked sun straight down: 3 everywhere in the open, nothing under the box */
+    LxLightmapBake *b = lm_bake_cpu(s);
+    CHECK(b && b->tile_count == 2, "two objects to bake (%d)", b ? b->tile_count : 0);
+    if (!b) { lx_scene_destroy(s); return; }
+    int n_open = 0, n_under = 0;
+    LxVec3 open = lm_probe(b, s, floor, lx_v3(6, 0, 6), 2.0f, up, &n_open);
+    LxVec3 under = lm_probe(b, s, floor, lx_v3(0, 0, 0), 0.6f, up, &n_under);
+    LxVec3 box_top = lm_probe(b, s, box, lx_v3(0, 2, 0), 0.8f, up, NULL);
+    printf("  baked sun: open floor %.3f (%d texels), box top %.3f\n", open.y, n_open, box_top.y);
+    LX_UNUSED(n_under);
+    CHECK(n_open > 4 && fabsf(open.y - 3.0f) < 0.05f, "open floor gets the sun's 3 (%.3f)", open.y);
+    /* under the box the texels look at the box's inside: thrown away (and filled from neighbours, never seen) */
+    int inside = 0, under_n = 0;
+    for (int i = 0; i < b->texel_count; i++) {
+        const float *t = &b->texels[(size_t)i * 12], *a = &b->accum[(size_t)i * 8];
+        if (t[3] <= 0 || t[9] < 0.9f || fabsf(t[1]) > 0.01f || fabsf(t[0]) > 0.8f || fabsf(t[2]) > 0.8f) continue;
+        under_n++;
+        inside += a[3] > 0 && a[7] / a[3] > 0.5f;
+    }
+    LX_UNUSED(under);
+    CHECK(under_n > 0 && inside == under_n, "texels under the box are found inside geometry (%d of %d)", inside, under_n);
+    CHECK(fabsf(box_top.y - 3.0f) < 0.05f, "the box's top gets it too (%.3f)", box_top.y);
+    /* direction map: straight up in the open */
+    int dir_ok = 0, dir_n = 0;
+    for (int i = 0; i < b->texel_count; i++) {
+        const float *t = &b->texels[(size_t)i * 12];
+        if (b->owner[i] < 0 || t[3] <= 0 || t[9] < 0.9f || lx_len3(lx_sub3(lx_v3(t[0], t[1], t[2]), lx_v3(6, 0, 6))) > 2) continue;
+        dir_n++;
+        dir_ok += fabsf(b->dir[i * 4 + 1] - 1.0f) < 0.02f && b->dir[i * 4 + 3] > 0.98f;
+    }
+    CHECK(dir_n > 0 && dir_ok == dir_n, "light direction points at the sun (%d of %d)", dir_ok, dir_n);
+    lx_lightmap_bake_free(b);
+
+    /* tilted 60 degrees: cos 60 = half */
+    lx_entity_set_euler(s, sun, lx_v3(-30, 0, 0));
+    b = lm_bake_cpu(s);
+    open = lm_probe(b, s, floor, lx_v3(6, 0, 6), 2.0f, up, NULL);
+    CHECK(fabsf(open.y - 1.5f) < 0.05f, "a sun 30 degrees above the horizon gives half (%.3f)", open.y);
+    lx_lightmap_bake_free(b);
+    lx_entity_set_euler(s, sun, lx_v3(-90, 0, 0));
+
+    /* Mixed and Realtime suns put no direct light in the lightmap */
+    L = lx_get_light(s, sun);
+    L->mode = LX_LIGHT_MIXED;
+    b = lm_bake_cpu(s);
+    open = lm_probe(b, s, floor, lx_v3(6, 0, 6), 2.0f, up, NULL);
+    CHECK(open.y < 1e-4f, "a Mixed sun's direct light isn't baked (%.4f)", open.y);
+    lx_lightmap_bake_free(b);
+    /* ...but its bounce is: the box's sides see the lit floor */
+    s->bake.bounces = 1;
+    b = lm_bake_cpu(s);
+    LxVec3 side = lm_probe(b, s, box, lx_v3(1, 0.5f, 0), 0.5f, lx_v3(1, 0, 0), NULL);
+    printf("  Mixed sun, one bounce: box side %.3f\n", side.y);
+    CHECK(side.y > 0.1f, "a Mixed sun's bounce is baked (%.3f)", side.y);
+    lx_lightmap_bake_free(b);
+    L->mode = LX_LIGHT_REALTIME;
+    b = lm_bake_cpu(s);
+    side = lm_probe(b, s, box, lx_v3(1, 0.5f, 0), 0.5f, lx_v3(1, 0, 0), NULL);
+    CHECK(side.y < 1e-4f, "a Realtime sun isn't baked at all (%.4f)", side.y);
+    lx_lightmap_bake_free(b);
+
+    /* sky: uniform radiance 0.5 over an open floor gives pi * 0.5 */
+    s->bake.bounces = 0;
+    s->bake.samples = 256;
+    s->env.sky_zenith = lx_v3(1, 1, 1);
+    s->env.sky_horizon = lx_v3(1, 1, 1);
+    s->env.ambient_intensity = 0.5f;
+    b = lm_bake_cpu(s);
+    open = lm_probe(b, s, floor, lx_v3(8, 0, 8), 1.5f, up, NULL);
+    LxVec3 near_box = lm_probe(b, s, floor, lx_v3(1.3f, 0, 0), 0.3f, up, NULL);
+    printf("  sky: open floor %.3f (expected about %.3f), beside the box %.3f\n", open.y, LX_PI * 0.5f, near_box.y);
+    CHECK(fabsf(open.y / (LX_PI * 0.5f) - 1.0f) < 0.06f, "sky irradiance in the open (%.3f)", open.y);
+    CHECK(near_box.y < open.y * 0.9f, "the box shades the floor beside it (%.3f vs %.3f)", near_box.y, open.y);
+    lx_lightmap_bake_free(b);
+
+    /* files: written and read back */
+    char path[LX_PATH_MAX];
+    snprintf(path, sizeof path, "%s/lm_test.lxlm", tmpdir());
+    float col[4 * 4], dir[4 * 4];
+    for (int i = 0; i < 16; i++) { col[i] = (float)i * 0.37f; dir[i] = (float)(i % 4) * 0.25f; }
+    CHECK(lx_lightmap_write(path, 2, col, dir), "lightmap written");
+    int sz = 0;
+    uint16_t *h = lx_lightmap_read(path, &sz);
+    bool same = h && sz == 2;
+    for (int i = 0; same && i < 16; i++) same = fabsf(lx_lightmap_half(h[i]) - col[i]) < 0.01f && fabsf(lx_lightmap_half(h[16 + i]) - dir[i]) < 0.001f;
+    CHECK(same, "lightmap read back");
+    lx_free(h);
+    lx_path_remove(path);
+
+    /* the scene keeps lightmap tiles, light modes and bake settings */
+    lx_entity_data(s, floor)->lm_index = 0;
+    lx_entity_data(s, floor)->lm_st[0] = 0.5f;
+    lx_entity_data(s, floor)->lm_st[2] = 0.25f;
+    lx_strcpy(s->lightmap_ref, sizeof s->lightmap_ref, "Lightmaps/Bake");
+    s->lightmap_count = 1;
+    L->mode = LX_LIGHT_BAKED;
+    L->shadow_radius = 0.4f;
+    char *text = lx_scene_serialize(s);
+    LxScene *c = lx_scene_deserialize(text);
+    lx_free(text);
+    LxEntity cf = lx_entity_find(c, "Floor"), cs = lx_entity_find(c, "Sun"), cb = lx_entity_find(c, "Box");
+    CHECK(lx_entity_data(c, cf)->lm_index == 0 && lx_entity_data(c, cf)->lm_st[0] == 0.5f && lx_entity_data(c, cf)->lm_st[2] == 0.25f,
+          "lightmap tile saved");
+    CHECK(lx_entity_data(c, cb)->lm_index == -1, "an object without one stays without");
+    CHECK(c->lightmap_count == 1 && !strcmp(c->lightmap_ref, "Lightmaps/Bake"), "lightmap folder saved");
+    CHECK(lx_get_light(c, cs)->mode == LX_LIGHT_BAKED && lx_get_light(c, cs)->shadow_radius == 0.4f, "light mode saved");
+    CHECK(c->bake.samples == 256 && c->bake.texels_per_unit == 2, "bake settings saved");
+    lx_scene_destroy(c);
+    lx_scene_destroy(s);
+}
+
 static void test_gi_headroom(void) {
     printf("photon gi: room above the ground\n");
     LxScene *s = lx_scene_create("Flat");
@@ -1940,6 +2100,7 @@ int main(void) {
     test_gi_reconstruction();
     test_gi_headroom();
     test_lightmap_uvs();
+    test_lightmapper();
     test_gi_sky_calibration();
     test_acoustics();
     test_crowd();

@@ -49,6 +49,7 @@ layout(set = 0, binding = 9) uniform sampler3D u_gc_g;
 layout(set = 0, binding = 10) uniform sampler3D u_gc_b;
 layout(set = 0, binding = 11) uniform sampler3D u_gc_vis_a;  // their cell walls
 layout(set = 0, binding = 12) uniform sampler3D u_gc_vis_b;
+layout(set = 0, binding = 13) uniform sampler2DArray u_lightmap;   // baked lighting: per atlas irradiance, then light direction
 
 // The engine builds OpenGL-style matrices; convert clip space for Vulkan (y down, z 0..1).
 vec4 lx_to_vulkan(vec4 p) {

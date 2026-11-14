@@ -321,6 +321,11 @@ typedef struct LxCamera {
 } LxCamera;
 
 typedef enum LxLightType { LX_LIGHT_DIRECTIONAL, LX_LIGHT_POINT, LX_LIGHT_SPOT } LxLightType;
+/* How a light takes part in baked lighting (like Unity/Bakery):
+ *   Mixed    - lights everything in real time (with real-time shadows); its bounced light is baked
+ *   Realtime - real time only; nothing of it is baked
+ *   Baked    - everything is baked: lightmapped surfaces get no real-time light from it at all */
+typedef enum LxLightMode { LX_LIGHT_MIXED, LX_LIGHT_REALTIME, LX_LIGHT_BAKED } LxLightMode;
 typedef struct LxLight {
     LxLightType type;
     LxVec3 color;
@@ -329,6 +334,8 @@ typedef struct LxLight {
     float spot_angle_deg;
     bool cast_shadows;
     bool contribute_gi;    /* emits virtual photons */
+    LxLightMode mode;      /* baked lighting */
+    float shadow_radius;   /* baked soft shadows: point/spot the light's radius (m), directional its size (degrees) */
 } LxLight;
 
 typedef struct LxMeshRenderer {
@@ -433,6 +440,29 @@ LxScene *lx_scene_create(const char *name);
 LxScene *lx_scene_create_default(const char *name);
 void lx_scene_destroy(LxScene *s);
 const char *lx_scene_name(const LxScene *s);
+
+/* ---- baked lighting (lightmaps) ----
+ * Static objects with lightmap UVs are path traced into lightmap atlases (GPU compute when there is a GPU,
+ * else all CPU cores). Bakes are progressive: begin, then call update every frame until it returns 0. */
+typedef struct LxBakeSettings {
+    float texels_per_unit;   /* lightmap texels per metre */
+    int max_atlas_size;      /* largest lightmap (texels across) */
+    int bounces;             /* times light bounces between surfaces (0 = direct and sky only) */
+    int samples;             /* paths per texel */
+    bool directional;        /* also store where light comes from, so normal maps respond to baked light */
+    bool denoise;
+} LxBakeSettings;
+LxBakeSettings lx_bake_settings_defaults(void);
+LxBakeSettings *lx_scene_bake_settings(LxScene *s);
+bool lx_lightmap_bake_begin(LxScene *s);
+int lx_lightmap_bake_update(LxScene *s, double budget_ms);   /* 1 running, 0 finished / idle, -1 failed */
+bool lx_lightmap_bake_now(LxScene *s);                       /* a whole bake at once */
+bool lx_lightmap_baking(void);
+float lx_lightmap_bake_progress(void);                       /* 0..1, or -1 when no bake runs */
+const char *lx_lightmap_bake_status(void);
+void lx_lightmap_bake_cancel(void);
+void lx_lightmap_clear(LxScene *s);
+int lx_scene_lightmap_count(const LxScene *s);
 void lx_scene_set_name(LxScene *s, const char *name);
 LxEnvironment *lx_scene_environment(LxScene *s);
 LxScene *lx_scene_clone(const LxScene *s);

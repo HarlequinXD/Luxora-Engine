@@ -5,6 +5,7 @@ A real-time 3D game engine written in **C11**, rendering with **Vulkan 1.3**, wi
 | | |
 |---|---|
 | **Rendering** | Physically based (GGX/Smith/Schlick), cascaded shadow maps with PCF, HDR + ACES tonemapping, procedural sky, fog |
+| **Baked lighting** | A GPU lightmapper in the spirit of Bakery for Unity: static objects are path traced into lightmap atlases (direct light with soft shadows, sky, multi-bounce) in plain Vulkan compute - no ray-tracing hardware - or on all CPU cores. Automatic lightmap UVs, Mixed / Realtime / Baked light modes, a direction map so normal maps respond to baked light, denoising and leak-free filling |
 | **Global illumination** | *Virtual photons* traced from every light and the sky through a SAH BVH on all CPU cores, accumulated into an L1 spherical-harmonics irradiance volume (colour bleeding, sky occlusion, progressive convergence) |
 | **Sound** | Ray-traced acoustics: real speed of sound (delay lines, natural Doppler), occlusion and transmission through materials, early reflections, RT60-driven reverb. WinMM / ALSA / AAudio |
 | **Scale** | Automatic LOD chains, frustum culling, instanced batching (one draw per mesh/LOD/material), data-oriented multithreaded crowds |
@@ -86,7 +87,7 @@ include/luxora/   public API (luxora.h) + math library
 src/core/         memory, files, logging, job system
 src/platform/     Win32, X11, Android windowing + Vulkan surfaces
 src/gfx/          Vulkan renderer, meshes/LODs, images (PNG/TGA/BMP), assets
-src/gi/           BVH + virtual photon GI
+src/gi/           BVH, virtual photon GI, lightmapper
 src/audio/        mixer, acoustics, device backends
 src/input/        Input Manager + gamepads + touch controls
 src/crowd/        crowd simulation

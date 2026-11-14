@@ -146,6 +146,7 @@ void ed_request_quit(void);   /* close button, Alt+F4, File > Exit: asks to save
 
 /* undo */
 void ed_mark_changed(void);      /* something changed; committed when the edit gesture ends */
+void ed_bake_update(void);       /* panels.c: runs a running lightmap bake a slice per frame */
 void ed_commit(void);
 void ed_undo(void);
 void ed_redo(void);

@@ -115,6 +115,11 @@ typedef struct ProbeSlot {
 } ProbeSlot;
 
 /* ------------------------------------------------------------------ state */
+/* per-instance data: model matrix, tint, lightmap tile (size, x, y, atlas or -1) */
+#define INST_FLOATS 24
+#define INST_BYTES (INST_FLOATS * 4)
+static const float NO_LIGHTMAP[4] = {0, 0, 0, -1};
+
 static struct {
     bool ready;
     VkInstance instance;
@@ -206,6 +211,17 @@ static struct {
     char screenshot_path[LX_PATH_MAX];
     int validation_errors;
     double start_time;
+    /* baked lighting: the lightmaps (2 layers per atlas: irradiance, direction) and the GPU baker */
+    GpuImage lightmap;
+    int lm_count;                        /* atlases in it (0: the 1-texel placeholder) */
+    char lm_ref[LX_REF_MAX];
+    uint32_t lm_epoch;
+    VkDescriptorSetLayout lm_comp_layout;
+    VkPipelineLayout lm_pl;
+    VkPipeline lm_pipe;
+    VkDescriptorSet lm_set;
+    GpuBuffer lm_buf[6];                 /* BVH nodes, triangles, materials, lights, texels, sums */
+    bool lm_baking;
 } R;
 
 /* ------------------------------------------------------------------ helpers */
@@ -455,11 +471,11 @@ static VkPipeline pipeline_create(const PipeDesc *d) {
     st[1].pName = "main";
 
     VkVertexInputBindingDescription bindings[2];
-    VkVertexInputAttributeDescription attrs[10];
+    VkVertexInputAttributeDescription attrs[11];
     uint32_t nb = 0, na = 0;
     if (d->vertex == VTX_MESH || d->vertex == VTX_MESH_POS_ONLY || d->vertex == VTX_MESH_POS_NORMAL) {
         bindings[nb++] = (VkVertexInputBindingDescription){0, sizeof(LxVertex), VK_VERTEX_INPUT_RATE_VERTEX};
-        bindings[nb++] = (VkVertexInputBindingDescription){1, 80, VK_VERTEX_INPUT_RATE_INSTANCE};
+        bindings[nb++] = (VkVertexInputBindingDescription){1, INST_BYTES, VK_VERTEX_INPUT_RATE_INSTANCE};
         attrs[na++] = (VkVertexInputAttributeDescription){0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0};
         if (d->vertex == VTX_MESH_POS_NORMAL) attrs[na++] = (VkVertexInputAttributeDescription){1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12};
         if (d->vertex == VTX_MESH) {
@@ -471,6 +487,7 @@ static VkPipeline pipeline_create(const PipeDesc *d) {
         if (d->vertex == VTX_MESH) {
             attrs[na++] = (VkVertexInputAttributeDescription){8, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 64};
             attrs[na++] = (VkVertexInputAttributeDescription){9, 0, VK_FORMAT_R32G32_SFLOAT, (uint32_t)offsetof(LxVertex, u2)};   /* lightmap UVs */
+            attrs[na++] = (VkVertexInputAttributeDescription){10, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 80};   /* lightmap tile: size, x, y, atlas (-1 none) */
         }
     } else if (d->vertex == VTX_UI) {
         bindings[nb++] = (VkVertexInputBindingDescription){0, sizeof(LxUiVertex), VK_VERTEX_INPUT_RATE_VERTEX};
@@ -992,6 +1009,7 @@ static void write_scene_sets(void) {
         for (int c = 0; c < 2; c++) write_image(s, (uint32_t)(6 + c), R.gi_vis[c].view, R.point_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         for (int c = 0; c < 3; c++) write_image(s, (uint32_t)(8 + c), R.gc[c].view, R.point_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         for (int c = 0; c < 2; c++) write_image(s, (uint32_t)(11 + c), R.gc_vis[c].view, R.point_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        write_image(s, 13, R.lightmap.view, R.linear_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
 }
 
@@ -1257,6 +1275,202 @@ static void gi_upload_scene(const LxBvh *bvh) {
     lx_free(nodes);
     lx_free(tris);
     lx_free(mats);
+}
+
+
+/* ------------------------------------------------------------------ baked lighting */
+/* Lightmaps live in one 2D array texture: layer 2a is atlas a's irradiance, 2a+1 its light direction.
+ * data: half floats, size*size*4 per layer; NULL makes the 1-texel placeholder. */
+static void lightmap_upload(const uint16_t *data, int size, int atlases) {
+    image_destroy(&R.lightmap);
+    int layers = atlases > 0 ? atlases * 2 : 2;
+    ImageDesc d = {(uint32_t)size, (uint32_t)size, 1, (uint32_t)layers, 1, VK_FORMAT_R16G16B16A16_SFLOAT,
+                   VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_2D_ARRAY, false, 0};
+    image_create(&R.lightmap, &d);
+    size_t layer_bytes = (size_t)size * (size_t)size * 8;
+    GpuBuffer st;
+    buffer_create(&st, layer_bytes * (size_t)layers, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true);
+    if (data) memcpy(st.mapped, data, layer_bytes * (size_t)layers);
+    else memset(st.mapped, 0, layer_bytes * (size_t)layers);
+    VkCommandBuffer cmd = one_shot_begin();
+    image_barrier(cmd, R.lightmap.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, 0, 1, (uint32_t)layers);
+    VkBufferImageCopy region = {0};
+    region.imageSubresource = (VkImageSubresourceLayers){VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, (uint32_t)layers};
+    region.imageExtent = (VkExtent3D){(uint32_t)size, (uint32_t)size, 1};
+    vkCmdCopyBufferToImage(cmd, st.buf, R.lightmap.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    image_barrier(cmd, R.lightmap.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                  VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, 0, 1,
+                  (uint32_t)layers);
+    one_shot_end(cmd);
+    buffer_destroy(&st);
+    R.lm_count = data ? atlases : 0;
+}
+
+/* loads the scene's lightmaps when they changed (a bake, a clear, another scene). Only before anything of this
+ * frame is drawn: the scene descriptor sets get rewritten. */
+static void lightmaps_sync(LxScene *s, FrameData *fr) {
+    uint32_t epoch = lx_lightmap_epoch();
+    if (!strcmp(R.lm_ref, s->lightmap_ref) && R.lm_epoch == epoch && (s->lightmap_count > 0) == (R.lm_count > 0)) return;
+    if (fr->ubo_used) return;   /* next frame */
+    vkDeviceWaitIdle(R.device);
+    lx_strcpy(R.lm_ref, sizeof R.lm_ref, s->lightmap_ref);
+    R.lm_epoch = epoch;
+    uint16_t *all = NULL;
+    int size = 0, n = s->lightmap_count;
+    for (int a = 0; a < n; a++) {
+        char rel[LX_REF_MAX + 32], path[LX_PATH_MAX];
+        snprintf(rel, sizeof rel, "%s/lm%d.lxlm", s->lightmap_ref, a);
+        lx_asset_path(path, sizeof path, rel);
+        int sz = 0;
+        uint16_t *one = lx_lightmap_read(path, &sz);
+        if (!one || (a && sz != size)) { LX_WARN("Lightmap missing or broken: %s (bake again)", path); lx_free(one); lx_free(all); all = NULL; n = 0; break; }
+        size = sz;
+        size_t layer = (size_t)sz * sz * 4;
+        if (!all) all = lx_alloc(layer * 2 * sizeof(uint16_t) * (size_t)n);
+        memcpy(all + layer * 2 * (size_t)a, one, layer * 2 * sizeof(uint16_t));
+        lx_free(one);
+    }
+    if (all) lightmap_upload(all, size, n);
+    else lightmap_upload(NULL, 1, 0);
+    lx_free(all);
+    write_scene_sets();
+}
+
+/* the lightmap tile an object draws with (or none) */
+static const float *entity_lightmap(const LxEntityData *d, const LxMesh *mesh, float out[4]) {
+    if (d->lm_index < 0 || d->lm_index >= R.lm_count || !mesh->has_uv2 || mesh->skin || mesh->dynamic) return NO_LIGHTMAP;
+    out[0] = d->lm_st[0]; out[1] = d->lm_st[1]; out[2] = d->lm_st[2]; out[3] = (float)d->lm_index;
+    return out;
+}
+
+static void lm_comp_free(void) {
+    for (int i = 0; i < 6; i++) buffer_destroy(&R.lm_buf[i]);
+    if (R.lm_pipe) vkDestroyPipeline(R.device, R.lm_pipe, NULL);
+    if (R.lm_pl) vkDestroyPipelineLayout(R.device, R.lm_pl, NULL);
+    if (R.lm_comp_layout) vkDestroyDescriptorSetLayout(R.device, R.lm_comp_layout, NULL);
+    R.lm_pipe = VK_NULL_HANDLE;
+    R.lm_pl = VK_NULL_HANDLE;
+    R.lm_comp_layout = VK_NULL_HANDLE;
+}
+
+static bool lm_comp_init(void) {
+    if (R.lm_pipe) return true;
+    VkDescriptorSetLayoutBinding b[6];
+    for (uint32_t i = 0; i < 6; i++) b[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL};
+    R.lm_comp_layout = set_layout(b, 6);
+    R.lm_pl = pipe_layout(&R.lm_comp_layout, 1, 80, VK_SHADER_STAGE_COMPUTE_BIT);
+    VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    ci.stage.module = shader_module(lx_spv_lm_bake_comp, sizeof lx_spv_lm_bake_comp);
+    ci.stage.pName = "main";
+    ci.layout = R.lm_pl;
+    VkResult r = vkCreateComputePipelines(R.device, VK_NULL_HANDLE, 1, &ci, NULL, &R.lm_pipe);
+    vkDestroyShaderModule(R.device, ci.stage.module, NULL);
+    if (r != VK_SUCCESS) { LX_WARN("Lightmap baking pipeline failed (%d): baking on the CPU", (int)r); R.lm_pipe = VK_NULL_HANDLE; return false; }
+    R.lm_set = alloc_set(R.lm_comp_layout);
+    return true;
+}
+
+bool lx_renderer_lightmap_begin(const LxLightmapBake *b) {
+    const char *force_cpu = getenv("LUXORA_BAKE_CPU");
+    if (!R.device || !R.queue_compute || (force_cpu && force_cpu[0] == '1') || !lm_comp_init()) return false;
+    vkDeviceWaitIdle(R.device);
+    const LxBvh *bvh = &b->bvh;
+    int nn = bvh->node_count ? bvh->node_count : 1, nt = bvh->tri_count ? bvh->tri_count : 1;
+    float *nodes = lx_calloc((size_t)nn * 8, sizeof(float));
+    for (int i = 0; i < bvh->node_count; i++) {
+        const LxBvhNode *n = &bvh->nodes[i];
+        float *o = nodes + i * 8;
+        o[0] = n->bounds.min.x; o[1] = n->bounds.min.y; o[2] = n->bounds.min.z; memcpy(&o[3], &n->left_or_first, 4);
+        o[4] = n->bounds.max.x; o[5] = n->bounds.max.y; o[6] = n->bounds.max.z; memcpy(&o[7], &n->count, 4);
+    }
+    if (!bvh->node_count) { nodes[0] = nodes[1] = nodes[2] = 1; nodes[4] = nodes[5] = nodes[6] = -1; }   /* nothing to hit: an empty box */
+    float *tris = lx_calloc((size_t)nt * 16, sizeof(float));
+    for (int k = 0; k < bvh->tri_count; k++) {
+        int t = bvh->tri_index[k], mat = bvh->mat_index[t];
+        float *o = tris + k * 16;
+        o[0] = bvh->v0[t].x; o[1] = bvh->v0[t].y; o[2] = bvh->v0[t].z; memcpy(&o[3], &mat, 4);
+        o[4] = bvh->e1[t].x; o[5] = bvh->e1[t].y; o[6] = bvh->e1[t].z;
+        o[8] = bvh->e2[t].x; o[9] = bvh->e2[t].y; o[10] = bvh->e2[t].z;
+        o[12] = bvh->normals[t].x; o[13] = bvh->normals[t].y; o[14] = bvh->normals[t].z;
+    }
+    int nm = bvh->material_count ? bvh->material_count : 1;
+    float *mats = lx_calloc((size_t)nm * 8, sizeof(float));
+    for (int i = 0; i < bvh->material_count; i++) {
+        LxVec3 a = bvh->materials[i].albedo, e = bvh->materials[i].emissive;
+        mats[i * 8] = a.x; mats[i * 8 + 1] = a.y; mats[i * 8 + 2] = a.z;
+        mats[i * 8 + 4] = e.x; mats[i * 8 + 5] = e.y; mats[i * 8 + 6] = e.z;
+    }
+    int nl = b->light_count ? b->light_count : 1;
+    float *lights = lx_calloc((size_t)nl * 16, sizeof(float));
+    for (int i = 0; i < b->light_count; i++) {
+        const LxLmLight *L = &b->lights[i];
+        float *o = lights + i * 16;
+        o[0] = L->pos.x; o[1] = L->pos.y; o[2] = L->pos.z; o[3] = (float)L->type;
+        o[4] = L->color.x; o[5] = L->color.y; o[6] = L->color.z; o[7] = (float)L->mode;
+        o[8] = L->dir.x; o[9] = L->dir.y; o[10] = L->dir.z; o[11] = L->range;
+        o[12] = L->cos_outer; o[13] = L->radius; o[14] = L->cos_size;
+    }
+    gi_upload(&R.lm_buf[0], nodes, (size_t)nn * 32);
+    gi_upload(&R.lm_buf[1], tris, (size_t)nt * 64);
+    gi_upload(&R.lm_buf[2], mats, (size_t)nm * 32);
+    gi_upload(&R.lm_buf[3], lights, (size_t)nl * 64);
+    gi_upload(&R.lm_buf[4], b->texels, (size_t)b->texel_count * 48);
+    gi_zero_buffer(&R.lm_buf[5], (size_t)b->texel_count * 32);
+    lx_free(nodes); lx_free(tris); lx_free(mats); lx_free(lights);
+    VkDescriptorBufferInfo bi[6];
+    VkWriteDescriptorSet w[6];
+    for (int i = 0; i < 6; i++) {
+        bi[i] = (VkDescriptorBufferInfo){R.lm_buf[i].buf, 0, VK_WHOLE_SIZE};
+        w[i] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w[i].dstSet = R.lm_set;
+        w[i].dstBinding = (uint32_t)i;
+        w[i].descriptorCount = 1;
+        w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[i].pBufferInfo = &bi[i];
+    }
+    vkUpdateDescriptorSets(R.device, 6, w, 0, NULL);
+    R.lm_baking = true;
+    return true;
+}
+
+void lx_renderer_lightmap_trace(LxLightmapBake *b, int first, int count, uint32_t sample) {
+    if (!R.lm_baking) return;
+    struct { float zenith[4], horizon[4], ground[4]; int32_t counts[4]; uint32_t sample[4]; } pc;
+    memset(&pc, 0, sizeof pc);
+    pc.zenith[0] = b->sky_zenith.x; pc.zenith[1] = b->sky_zenith.y; pc.zenith[2] = b->sky_zenith.z; pc.zenith[3] = b->ambient;
+    pc.horizon[0] = b->sky_horizon.x; pc.horizon[1] = b->sky_horizon.y; pc.horizon[2] = b->sky_horizon.z; pc.horizon[3] = b->eps;
+    pc.ground[0] = b->ground.x; pc.ground[1] = b->ground.y; pc.ground[2] = b->ground.z;
+    pc.counts[0] = first; pc.counts[1] = count; pc.counts[2] = b->light_count; pc.counts[3] = b->bounces;
+    pc.sample[0] = sample;
+    VkCommandBuffer cmd = one_shot_begin();
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, R.lm_pipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, R.lm_pl, 0, 1, &R.lm_set, 0, NULL);
+    vkCmdPushConstants(cmd, R.lm_pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
+    vkCmdDispatch(cmd, (uint32_t)(count + 63) / 64, 1, 1);
+    one_shot_end(cmd);
+}
+
+bool lx_renderer_lightmap_end(LxLightmapBake *b, bool read_back) {
+    if (!R.lm_baking) return false;
+    bool ok = true;
+    if (read_back) {
+        size_t bytes = (size_t)b->texel_count * 32;
+        GpuBuffer st;
+        buffer_create(&st, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+        VkCommandBuffer cmd = one_shot_begin();
+        VkBufferCopy rg = {0, 0, bytes};
+        vkCmdCopyBuffer(cmd, R.lm_buf[5].buf, st.buf, 1, &rg);
+        one_shot_end(cmd);
+        if (st.mapped) memcpy(b->accum, st.mapped, bytes);
+        else ok = false;
+        buffer_destroy(&st);
+    }
+    for (int i = 0; i < 6; i++) buffer_destroy(&R.lm_buf[i]);
+    R.lm_baking = false;
+    return ok;
 }
 
 /* deposits and blur scratch are shared: big enough for the largest grid */
@@ -1593,7 +1807,7 @@ static void create_static_resources(void) {
     VK_CHECK(vkCreateDescriptorPool(R.device, &pi, NULL, &R.desc_pool));
 
     VkShaderStageFlags vf = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    VkDescriptorSetLayoutBinding sb[13] = {
+    VkDescriptorSetLayoutBinding sb[14] = {
         {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, vf, NULL},
         {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
         {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
@@ -1606,8 +1820,9 @@ static void create_static_resources(void) {
         {9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
         {10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
         {11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
-        {12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL}};
-    R.scene_layout = set_layout(sb, 13);
+        {12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
+        {13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL}};
+    R.scene_layout = set_layout(sb, 14);
     VkDescriptorSetLayoutBinding mb[MAT_TEXTURES];
     for (uint32_t i = 0; i < MAT_TEXTURES; i++) mb[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
     R.material_layout = set_layout(mb, MAT_TEXTURES);
@@ -1742,6 +1957,7 @@ static void create_static_resources(void) {
     gi_comp_init();
     create_gi_images(2, 2, 2);
     gc_create(0);
+    lightmap_upload(NULL, 1, 0);
     write_scene_sets();
     create_dummy_cube();
     R.probe_set = alloc_set(R.probe_layout);
@@ -1809,6 +2025,8 @@ void lx_renderer_shutdown(void) {
     image_destroy(&R.shadow_map);
     image_destroy(&R.local_shadow);
     gi_comp_free();
+    lm_comp_free();
+    image_destroy(&R.lightmap);
     for (int c = 0; c < 3; c++) image_destroy(&R.gi[c]);
     for (int c = 0; c < 2; c++) image_destroy(&R.gi_vis[c]);
     image_destroy(&R.white);
@@ -2344,7 +2562,11 @@ bool lx_renderer_screenshot(const char *path) {
 /* ------------------------------------------------------------------ draw lists */
 static void dl_reset(DrawList *dl) { dl->nb = 0; dl->ni = 0; }
 
+static void dl_add_lm(DrawList *dl, LxMesh *mesh, int lod, const LxMaterial *mat, const float *model, LxVec4 tint, const float *lm);
 static void dl_add(DrawList *dl, LxMesh *mesh, int lod, const LxMaterial *mat, const float *model, LxVec4 tint) {
+    dl_add_lm(dl, mesh, lod, mat, model, tint, NO_LIGHTMAP);
+}
+static void dl_add_lm(DrawList *dl, LxMesh *mesh, int lod, const LxMaterial *mat, const float *model, LxVec4 tint, const float *lm) {
     int b = -1;
     for (int i = dl->nb - 1; i >= 0; i--)
         if (dl->batches[i].mesh == mesh && dl->batches[i].lod == lod && dl->batches[i].mat == mat) { b = i; break; }
@@ -2356,20 +2578,21 @@ static void dl_add(DrawList *dl, LxMesh *mesh, int lod, const LxMaterial *mat, c
     dl->batches[b].count++;
     if (dl->ni >= dl->ci) {
         dl->ci = dl->ci ? dl->ci * 2 : 1024;
-        dl->inst = lx_realloc(dl->inst, sizeof(float) * 20 * (size_t)dl->ci);
+        dl->inst = lx_realloc(dl->inst, INST_BYTES * (size_t)dl->ci);
         dl->item_batch = lx_realloc(dl->item_batch, sizeof(int) * (size_t)dl->ci);
     }
-    float *dst = dl->inst + (size_t)dl->ni * 20;
+    float *dst = dl->inst + (size_t)dl->ni * INST_FLOATS;
     memcpy(dst, model, 64);
     dst[16] = tint.x; dst[17] = tint.y; dst[18] = tint.z; dst[19] = tint.w;
+    memcpy(dst + 20, lm, 16);
     dl->item_batch[dl->ni++] = b;
 }
 
 /* Group instances by batch into the frame's instance stream. Returns false if it does not fit. */
 static bool dl_upload(DrawList *dl, FrameData *fr) {
-    VkDeviceSize need = (VkDeviceSize)dl->ni * 80;
+    VkDeviceSize need = (VkDeviceSize)dl->ni * INST_BYTES;
     if (fr->inst_used + need > fr->inst.size) { fr->inst_overflow = true; return false; }
-    uint32_t base = (uint32_t)(fr->inst_used / 80);
+    uint32_t base = (uint32_t)(fr->inst_used / INST_BYTES);
     uint32_t off = base;
     for (int b = 0; b < dl->nb; b++) {
         dl->batches[b].first = off;
@@ -2379,7 +2602,7 @@ static bool dl_upload(DrawList *dl, FrameData *fr) {
     float *stream = (float *)fr->inst.mapped;
     for (int i = 0; i < dl->ni; i++) {
         Batch *bt = &dl->batches[dl->item_batch[i]];
-        memcpy(stream + (size_t)(bt->first + bt->count) * 20, dl->inst + (size_t)i * 20, 80);
+        memcpy(stream + (size_t)(bt->first + bt->count) * INST_FLOATS, dl->inst + (size_t)i * INST_FLOATS, INST_BYTES);
         bt->count++;
     }
     fr->inst_used += need;
@@ -2689,7 +2912,9 @@ static bool probe_render_face(LxScene *s, ProbeSlot *p, int face, VkCommandBuffe
         LxVec3 c = lx_aabb_center(wb);
         float radius = lx_len3(lx_aabb_extent(wb));
         float dist = lx_maxf(lx_len3(lx_sub3(c, eye)), 1e-3f);
-        dl_add(&R.probe_list, mesh, pick_lod(mesh, radius * 0.5f / dist), lx_asset_material(d->mesh.material), d->world.m, white);
+        float lmb[4];
+        dl_add_lm(&R.probe_list, mesh, pick_lod(mesh, radius * 0.5f / dist), lx_asset_material(d->mesh.material), d->world.m, white,
+                  entity_lightmap(d, mesh, lmb));
     }
     if (!dl_upload(&R.probe_list, fr)) return false;
 
@@ -2845,6 +3070,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
         write_scene_sets();
     }
     lx_scene_update_transforms(s);
+    lightmaps_sync(s, fr);
 
     /* ---- GI ---- */
     if (R.gi_gpu) {
@@ -2881,13 +3107,15 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
                 best_sun = l->intensity;
                 sun_dir = dir;
                 sun_shadows = l->cast_shadows;
-                ubo.sun_color[0] = col.x; ubo.sun_color[1] = col.y; ubo.sun_color[2] = col.z; ubo.sun_color[3] = 1.0f;
+                /* w: 1 the sun, 2 a Baked sun (lightmapped surfaces already have its light) */
+                ubo.sun_color[0] = col.x; ubo.sun_color[1] = col.y; ubo.sun_color[2] = col.z; ubo.sun_color[3] = l->mode == LX_LIGHT_BAKED ? 2.0f : 1.0f;
             }
         } else if (nl < MAX_LIGHTS) {
             light_casts[nl] = l->cast_shadows;
             float *L = ubo.lights[nl++];
             L[0] = d->world.m[12]; L[1] = d->world.m[13]; L[2] = d->world.m[14]; L[3] = l->range > 0.01f ? l->range : 0.01f;
-            L[4] = col.x; L[5] = col.y; L[6] = col.z; L[7] = l->type == LX_LIGHT_SPOT ? 2.0f : 1.0f;
+            /* type 1 point, 2 spot; + 10 for a Baked light (lightmapped surfaces already have its light) */
+            L[4] = col.x; L[5] = col.y; L[6] = col.z; L[7] = (l->type == LX_LIGHT_SPOT ? 2.0f : 1.0f) + (l->mode == LX_LIGHT_BAKED ? 10.0f : 0.0f);
             L[8] = dir.x; L[9] = dir.y; L[10] = dir.z; L[11] = cosf(l->spot_angle_deg * 0.5f * LX_DEG2RAD);
         }
     }
@@ -2944,7 +3172,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
         for (int o = 0; o < no && local_n < LOCAL_SHADOW_LIGHTS; o++) {
             int i = order[o];
             const float *L = ubo.lights[i];
-            bool spot = L[7] > 1.5f;
+            bool spot = fmodf(L[7], 10.0f) > 1.5f;
             int faces = spot ? 1 : 6;
             if (tile + faces > ATLAS_TILES * ATLAS_TILES) break;
             LxVec3 lp = lx_v3(L[0], L[1], L[2]);
@@ -3014,7 +3242,8 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
             float radius = lx_len3(lx_aabb_extent(wb));
             if (lx_frustum_test_aabb(&frustum, wb)) {
                 float dist = lx_maxf(lx_len3(lx_sub3(c, view->eye)), 1e-3f);
-                dl_add(&R.main_list, mesh, pick_lod(mesh, radius * proj_scale / dist), mat, d->world.m, white);
+                float lmb[4];
+                dl_add_lm(&R.main_list, mesh, pick_lod(mesh, radius * proj_scale / dist), mat, d->world.m, white, entity_lightmap(d, mesh, lmb));
             } else R.stats.instances_culled++;
             if (d->mesh.cast_shadows) {
                 for (int k = 0; k < cascades; k++)
@@ -3283,13 +3512,14 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
         }
         if (view->highlight) {
             LxEntityData *d = lx_entity_data(s, view->highlight);
-            if (d && (d->comps & LX_COMP_MESH) && fr->inst_used + 80 <= fr->inst.size) {
+            if (d && (d->comps & LX_COMP_MESH) && fr->inst_used + INST_BYTES <= fr->inst.size) {
                 LxMesh *mesh = entity_mesh(d);
                 float *dst = (float *)((uint8_t *)fr->inst.mapped + fr->inst_used);
                 memcpy(dst, d->world.m, 64);
                 dst[16] = dst[17] = dst[18] = dst[19] = 1.0f;
-                uint32_t first = (uint32_t)(fr->inst_used / 80);
-                fr->inst_used += 80;
+                memcpy(dst + 20, NO_LIGHTMAP, 16);
+                uint32_t first = (uint32_t)(fr->inst_used / INST_BYTES);
+                fr->inst_used += INST_BYTES;
                 MeshGpu *g = mesh_gpu(mesh);
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.outline);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.outline_layout, 0, 1, &fr->scene_set, 1, &ubo_off);

@@ -431,6 +431,7 @@ static bool g_open_transform = true, g_open_camera = true, g_open_light = true, 
 static bool g_open_probe = true;
 static void probe_recapture(UiNode *n) { LX_UNUSED(n); lx_reflections_refresh(); ui_notify(ED.ui, "Reflection probes re-capturing"); }
 static const char *LIGHT_TYPES[] = {"Directional", "Point", "Spot"};
+static const char *LIGHT_MODES[] = {"Mixed", "Realtime", "Baked"};
 static const char *COLLIDER_SHAPES[] = {"Box", "Sphere", "Capsule", "Mesh (static)"};
 static bool g_open_collider = true, g_open_body = true, g_open_character = true;
 static const char *BUSES[] = {"SFX", "Music", "Voice", "Ambient"};
@@ -791,6 +792,19 @@ static void build_entity_inspector(UiNode *body) {
         if (d->light.type == LX_LIGHT_SPOT) slider_row(sec, "Spot Angle", &d->light.spot_angle_deg, 1, 179);
         bool_row(sec, "Cast Shadows", &d->light.cast_shadows);   /* point / spot: the nearest 8 in view get shadows */
         bool_row(sec, "Global Illumination", &d->light.contribute_gi);
+        row = ed_prop_row(sec, "Mode");
+        UiNode *md = ui_dropdown(ui, row, (int *)&d->light.mode, LIGHT_MODES, 3);
+        md->grow = 1;
+        md->on_change = structural_changed;
+        lx_strcpy(md->tooltip, sizeof md->tooltip, d->light.mode == LX_LIGHT_BAKED ? "Baked: all its light is baked into lightmaps (soft shadows). Bake again after moving it."
+                                                   : d->light.mode == LX_LIGHT_REALTIME ? "Realtime: lights in real time only; nothing of it is baked."
+                                                   : "Mixed: lights in real time, and its bounced light is baked into lightmaps.");
+        if (d->light.mode != LX_LIGHT_REALTIME) {
+            UiNode *sr = float_row(sec, d->light.type == LX_LIGHT_DIRECTIONAL ? "Baked Sun Size" : "Baked Shadow Radius", &d->light.shadow_radius,
+                                   0.01f, 0, d->light.type == LX_LIGHT_DIRECTIONAL ? 30.0f : 10.0f);
+            lx_strcpy(sr->tooltip, sizeof sr->tooltip, d->light.type == LX_LIGHT_DIRECTIONAL ? "How wide the sun is in degrees: wider makes softer baked shadows (the real sun is 0.5)."
+                                                                                             : "The light's size in metres: bigger makes softer baked shadows.");
+        }
     }
     if (d->comps & LX_COMP_MESH) {
         sec = comp_section(body, UI_ICON_MESH, "Mesh Renderer", &g_open_mesh, LX_COMP_MESH);
@@ -1415,11 +1429,57 @@ static void probe_res_changed(UiNode *n) {
     graphics_changed(n);
 }
 static void reset_gi(UiNode *n) { LX_UNUSED(n); lx_gi_reset(); ui_notify(ED.ui, "Global illumination restarted"); }
+
+/* ---- baked lighting ---- */
+static bool g_open_bake = true;
+static UiNode *g_bake_status, *g_bake_btn, *g_bake_cancel;
+static int g_bake_atlas_idx;
+static const char *ATLAS_SIZES[] = {"256", "512", "1024", "2048", "4096"};
+static void bake_settings_changed(UiNode *n) { LX_UNUSED(n); ed_mark_changed(); }
+static void bake_atlas_changed(UiNode *n) {
+    lx_scene_bake_settings(ED.scene)->max_atlas_size = 256 << g_bake_atlas_idx;
+    bake_settings_changed(n);
+}
+static void bake_click(UiNode *n) {
+    LX_UNUSED(n);
+    if (ED.play != ED_EDIT) { ui_notify(ED.ui, "Stop Play mode to bake"); return; }
+    if (!lx_lightmap_bake_begin(ED.scene)) ui_notify(ED.ui, lx_lightmap_bake_status());
+}
+static void bake_cancel_click(UiNode *n) { LX_UNUSED(n); lx_lightmap_bake_cancel(); ui_notify(ED.ui, "Bake stopped"); }
+static void bake_clear_click(UiNode *n) {
+    LX_UNUSED(n);
+    lx_lightmap_bake_cancel();
+    lx_lightmap_clear(ED.scene);
+    ed_mark_changed();
+    ui_notify(ED.ui, "Baked lighting cleared");
+}
+/* the status line and buttons follow the running bake */
+static void bake_ui_sync(void) {
+    bool baking = lx_lightmap_baking();
+    if (g_bake_status) {
+        if (baking) ui_set_text(g_bake_status, "Baking... %d%%", (int)(lx_lightmap_bake_progress() * 100.0f + 0.5f));
+        else if (lx_lightmap_bake_status()[0]) ui_set_text(g_bake_status, "%s", lx_lightmap_bake_status());
+        else ui_set_text(g_bake_status, "%s", ED.scene && lx_scene_lightmap_count(ED.scene) ? "Baked" : "Not baked");
+    }
+    if (g_bake_btn) {
+        g_bake_btn->disabled = baking;
+        lx_strcpy(g_bake_btn->tooltip, sizeof g_bake_btn->tooltip, baking ? "A bake is running" : "Path-traces light into lightmaps for every Static object");
+    }
+    if (g_bake_cancel) g_bake_cancel->disabled = !baking;
+}
+/* called every editor frame: runs the bake a slice at a time */
+void ed_bake_update(void) {
+    if (!lx_lightmap_baking() || !ED.scene) return;
+    int r = lx_lightmap_bake_update(ED.scene, 25.0);
+    if (r == 0) { ed_mark_changed(); ui_notify(ED.ui, lx_lightmap_bake_status()); }
+    else if (r < 0) ui_notify(ED.ui, lx_lightmap_bake_status());
+}
 static void env_changed(UiNode *n) { LX_UNUSED(n); ed_mark_changed(); }
 
 static void lighting_frame(UiNode *body) {
     g_lighting_body = body;
     ui_track(&g_lighting_body);
+    bake_ui_sync();
     if (g_lighting_gen == ED.scene_gen && g_lighting_scene == ED.scene && body->first) return;
     g_lighting_scene = ED.scene;
     g_lighting_gen = ED.scene_gen;
@@ -1440,6 +1500,51 @@ static void lighting_frame(UiNode *body) {
     UiNode *fog = float_row(sec, "Fog Density", &env->fog_density, 0.001f, 0, 1);
     fog->precision = 4;
     fog->on_change = env_changed;
+
+    sec = ed_section(body, UI_ICON_BULB, "Baked Lighting (scene)", &g_open_bake, NULL);
+    {
+        LxBakeSettings *bk = lx_scene_bake_settings(ED.scene);
+        UiNode *tp = float_row(sec, "Texels per Unit", &bk->texels_per_unit, 0.5f, 0.1f, 200);
+        tp->on_change = bake_settings_changed;
+        lx_strcpy(tp->tooltip, sizeof tp->tooltip, "Lightmap texels per metre: more gives sharper shadows and takes longer.");
+        g_bake_atlas_idx = bk->max_atlas_size >= 4096 ? 4 : bk->max_atlas_size >= 2048 ? 3 : bk->max_atlas_size >= 1024 ? 2 : bk->max_atlas_size >= 512 ? 1 : 0;
+        UiNode *ar = ed_prop_row(sec, "Max Lightmap Size");
+        UiNode *ad = ui_dropdown(ui, ar, &g_bake_atlas_idx, ATLAS_SIZES, 5);
+        ad->grow = 1;
+        ad->on_change = bake_atlas_changed;
+        UiNode *br = ed_prop_row(sec, "Bounces");
+        UiNode *bb = ui_int(ui, br, &bk->bounces, 0, 8);
+        bb->grow = 1;
+        bb->on_change = bake_settings_changed;
+        UiNode *smr = ed_prop_row(sec, "Samples");
+        UiNode *sm = ui_int(ui, smr, &bk->samples, 1, 16384);
+        sm->grow = 1;
+        sm->step = 16;
+        sm->on_change = bake_settings_changed;
+        lx_strcpy(sm->tooltip, sizeof sm->tooltip, "Light paths per texel: more is smoother and slower.");
+        bool_row(sec, "Directional", &bk->directional)->on_change = bake_settings_changed;
+        bool_row(sec, "Denoise", &bk->denoise)->on_change = bake_settings_changed;
+        UiNode *bar = ui_box(ui, sec, UI_ROW);
+        bar->gap = 6;
+        ui_pad(bar, 0, 4, 0, 2);
+        g_bake_btn = ui_button(ui, bar, "Bake", bake_click);
+        g_bake_btn->icon = UI_ICON_BULB;
+        g_bake_btn->h = 26;
+        g_bake_btn->grow = 1;
+        ui_track(&g_bake_btn);
+        g_bake_cancel = ui_button(ui, bar, "Stop", bake_cancel_click);
+        g_bake_cancel->icon = UI_ICON_STOP;
+        g_bake_cancel->h = 26;
+        lx_strcpy(g_bake_cancel->tooltip, sizeof g_bake_cancel->tooltip, "No bake is running");
+        ui_track(&g_bake_cancel);
+        UiNode *cl = ui_button(ui, bar, "Clear", bake_clear_click);
+        cl->icon = UI_ICON_TRASH;
+        cl->h = 26;
+        g_bake_status = ui_label(ui, sec, "");
+        g_bake_status->fg = ui_theme(ui)->text_dim;
+        ui_track(&g_bake_status);
+        bake_ui_sync();
+    }
 
     sec = ed_section(body, UI_ICON_SUN, "Global Illumination (project)", &g_open_gi, NULL);
     UiNode *row = ed_prop_row(sec, "Quality Preset");
