@@ -441,6 +441,8 @@ LxVec3 lx_parse_vec3(const char *s);
 LxVec4 lx_parse_vec4(const char *s);
 bool lx_parse_bool(const char *s);
 
+bool lx_take_scene_request(char *out, size_t cap);   /* editor Play mode: Load Scene / Quit from the game */
+bool lx_take_quit_request(void);
 #include "fsm/fsm.h"
 
 /* ---------- engine state ---------- */

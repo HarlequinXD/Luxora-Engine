@@ -47,7 +47,12 @@ const LxFsmActionDesc *lx_fsm_action_find(const char *name) {
  * ====================================================================== */
 static int enum_index(const char *options, const char *text) {
     if (!text || !text[0]) return 0;
-    if ((text[0] >= '0' && text[0] <= '9') || text[0] == '-') return atoi(text);
+    if ((text[0] >= '0' && text[0] <= '9') || text[0] == '-') {   /* a number: kept inside the options (actions index arrays with it) */
+        int n = 1;
+        for (const char *p = options; p && *p; p++) n += *p == '|';
+        long x = strtol(text, NULL, 10);
+        return x < 0 ? 0 : x >= n ? n - 1 : (int)x;
+    }
     int i = 0;
     for (const char *s = options; s && *s; i++) {
         size_t l = strcspn(s, "|");
@@ -64,16 +69,25 @@ bool lx_fsm_value_parse(LxFsmValue *v, LxFsmType t, const char *text, const char
     if (!text) text = "";
     switch (t) {
     case LX_FSM_FLOAT: v->f = (float)atof(text); if (!isfinite(v->f)) v->f = 0; v->i = (int)v->f; v->b = v->f != 0; break;
-    case LX_FSM_INT: v->i = atoi(text); v->f = (float)v->i; v->b = v->i != 0; break;
+    case LX_FSM_INT: {
+        long long x = strtoll(text, NULL, 10);   /* clamped, not overflowed */
+        v->i = x > 2147483647LL ? 2147483647 : x < -2147483647LL ? -2147483647 : (int)x;
+        v->f = (float)v->i; v->b = v->i != 0;
+        break;
+    }
     case LX_FSM_ENUM: v->i = enum_index(options, text); v->f = (float)v->i; break;
     case LX_FSM_BOOL: v->b = lx_parse_bool(text); v->f = v->b ? 1.0f : 0.0f; v->i = v->b; break;
-    case LX_FSM_VEC3: v->v = lx_parse_vec3(text); break;
+    case LX_FSM_VEC3:
+        v->v = lx_parse_vec3(text);
+        if (!isfinite(v->v.x) || !isfinite(v->v.y) || !isfinite(v->v.z)) v->v = lx_v3(0, 0, 0);   /* "nan", "inf": never into a transform */
+        break;
     case LX_FSM_COLOR: {
         LxVec4 c = lx_parse_vec4(text);
         int n = 0;
         for (const char *p = text; *p; p++) if (*p == ' ') n++;
         if (n < 3) c.w = 1;   /* "r g b" */
         if (!text[0]) c = lx_v4(1, 1, 1, 1);
+        if (!isfinite(c.x) || !isfinite(c.y) || !isfinite(c.z) || !isfinite(c.w)) c = lx_v4(1, 1, 1, 1);
         v->c = c;
         break;
     }
@@ -324,7 +338,8 @@ float lx_fsm_float(LxFsmCtx *c, int p) {
 }
 int lx_fsm_int(LxFsmCtx *c, int p) {
     LxFsmValue *v = param(c, p);
-    return v->type == LX_FSM_FLOAT ? (int)lroundf(v->f) : v->type == LX_FSM_BOOL ? v->b : v->i;
+    if (v->type == LX_FSM_FLOAT) return v->f >= 2147483647.0f ? 2147483647 : v->f <= -2147483647.0f ? -2147483647 : (int)lroundf(v->f);
+    return v->type == LX_FSM_BOOL ? v->b : v->i;
 }
 bool lx_fsm_bool(LxFsmCtx *c, int p) {
     LxFsmValue *v = param(c, p);
@@ -547,7 +562,9 @@ static bool start_action(LxScene *s, LxFsmRun *r, int st, int a) {
     b->entered = true;
     LxFsmCtx c = ctx_for(s, r, a, 0);
     r->in_action++;
+    bool cont = (b->desc->flags & LX_FSM_A_CONTINUOUS) != 0;
     if (b->desc->on_enter) b->desc->on_enter(&c);
+    else if (!cont && b->src->update == LX_FSM_ONCE && b->desc->on_update) b->desc->on_update(&c);   /* "Once" on an update-only action: one go */
     r->in_action--;
     if (r->state != st) return false;
     if (!(b->desc->flags & LX_FSM_A_CONTINUOUS) && b->src->update == LX_FSM_ONCE) b->finished = true;
@@ -712,7 +729,25 @@ static void update_run(LxScene *s, LxFsmRun *r, float dt, LxFsmUpdate phase) {
     check_finished(s, r);
 }
 
+/* graphs that create objects (Spawn Prefab, Duplicate) get a budget per frame: a graph that copies itself in a
+ * loop would otherwise double the scene every frame and lock up the game (and the editor's Stop button) */
+#define LX_FSM_SPAWNS_PER_FRAME 256
+static const LxScene *g_spawn_scene;
+static int g_spawns;
+static bool g_spawn_warned;
+bool lx_fsm_spawn_allowed(LxScene *s) {
+    if (g_spawn_scene != s) { g_spawn_scene = s; g_spawns = 0; }
+    if (g_spawns >= LX_FSM_SPAWNS_PER_FRAME) {
+        if (!g_spawn_warned) LX_WARN("State graphs created more than %d objects in one frame - the rest were skipped (a graph spawning copies of itself in a loop?)", LX_FSM_SPAWNS_PER_FRAME);
+        g_spawn_warned = true;
+        return false;
+    }
+    g_spawns++;
+    return true;
+}
+
 void lx_fsm_scene_update(LxScene *s, float dt, LxFsmUpdate phase) {
+    if (phase == LX_FSM_EVERY_FRAME) { g_spawn_scene = s; g_spawns = 0; }
     int n = s->count;
     for (int i = 1; i < n; i++) {
         LxEntityData *d = &s->entities[i];
@@ -759,16 +794,33 @@ static int send_to(LxScene *s, LxEntity target, const char *event, float value, 
     return n;
 }
 
+/* events sent from outside the frame (a script between frames, the editor) run actions right away: an action
+ * that destroys its own object must not free the graph under itself, so destroys wait until the call ends */
+static bool outside_begin(LxScene *s) {
+    if (s->in_update) return false;
+    s->in_update = true;
+    return true;
+}
+static void outside_end(LxScene *s, bool began) {
+    if (!began) return;
+    s->in_update = false;
+    lx_gameplay_end_frame(s);
+}
 int lx_fsm_send_event(LxScene *s, LxEntity target, const char *event, float value, LxEntity sender) {
-    return send_to(s, target, event, value, sender, 0);
+    bool b = outside_begin(s);
+    int n = send_to(s, target, event, value, sender, 0);
+    outside_end(s, b);
+    return n;
 }
 int lx_fsm_broadcast_event(LxScene *s, const char *event, float value, LxEntity sender) {
+    bool b = outside_begin(s);
     int n = 0, count = s->count;
     for (int i = 1; i < count; i++) {
         LxEntityData *d = &s->entities[i];
         if (!d->alive || !(d->comps & LX_COMP_STATE_GRAPH)) continue;
         n += send_to(s, lx_entity_make((uint32_t)i, d->generation & 0xfffu), event, value, sender, 0);
     }
+    outside_end(s, b);
     return n;
 }
 void lx_fsm_system_event(LxScene *s, LxEntity self, const char *event, LxEntity other, float value) {
@@ -780,8 +832,13 @@ void lx_fsm_system_event(LxScene *s, LxEntity self, const char *event, LxEntity 
             LxFsmRun *r = &d->fsm->runs[k];
             r->last_other = other;
             lx_strcpy(r->last_system_event, LX_FSM_NAME, event);
+            r->system_seq++;
+            lx_strcpy(r->system_ring[r->system_seq & 7].event, sizeof r->system_ring[0].event, event);
+            r->system_ring[r->system_seq & 7].other = other;
         }
+    bool b = outside_begin(s);
     send_to(s, self, event, value, other, other);
+    outside_end(s, b);
 }
 
 const char *lx_fsm_current_state(LxScene *s, LxEntity e, int slot) {

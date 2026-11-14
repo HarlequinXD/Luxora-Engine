@@ -190,6 +190,7 @@ LxGraph *lx_graph_from_text(const char *text) {
                 sec = ACTION;
                 ac = PUSH(st->actions, st->action_count, st->action_cap, LxGraphAction);
                 ac->enabled = true;
+                ac->update = (LxFsmUpdate)-1;   /* not written: the action's own default (below) */
             } else if (!strcmp(k, "comment")) { sec = COMMENT; PUSH(g->comments, g->comment_count, g->comment_cap, LxGraphComment); }
             else sec = NONE;
             continue;
@@ -263,6 +264,14 @@ LxGraph *lx_graph_from_text(const char *text) {
     }
     if (!g->state_count) { lx_graph_free(g); return NULL; }
     if (!lx_graph_find_state(g, g->start)) lx_strcpy(g->start, sizeof g->start, g->states[0].name);
+    for (int i = 0; i < g->state_count; i++)
+        for (int a = 0; a < g->states[i].action_count; a++) {
+            LxGraphAction *x = &g->states[i].actions[a];
+            if ((int)x->update < 0 || (int)x->update > 3) {
+                const LxFsmActionDesc *d = lx_fsm_action_find(x->type);
+                x->update = d ? d->default_update : LX_FSM_ONCE;
+            }
+        }
     return g;
 }
 

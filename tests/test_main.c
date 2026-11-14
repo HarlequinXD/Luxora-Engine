@@ -1422,6 +1422,8 @@ static void test_state_graph(void) {
     lx_assets_clear();
 }
 
+#include "test_fsm.c"
+
 int main(void) {
     lx_jobs_init(0);
     lx_register_builtin_behaviours();
@@ -1465,6 +1467,8 @@ int main(void) {
     test_jpeg();
     test_models();
     test_state_graph();
+    test_fsm_fuzz();
+    test_fsm_semantics();
 #if LUXORA_SCRIPT_COMPILER
     test_scripts();
 #endif

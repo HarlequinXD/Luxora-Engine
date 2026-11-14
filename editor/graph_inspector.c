@@ -726,7 +726,7 @@ static void action_block(UiNode *body, int si, int ai, const LxGraphAction *a, c
     char note[192] = "";
     if (!d) snprintf(note, sizeof note, "missing action");
     else if (a->folded) lx_graph_action_summary(a, d, note, sizeof note);
-    else if (d->on_update) snprintf(note, sizeof note, "%s", UPDATE_SHORT[a->update & 3]);
+    else if (d->on_update && !(d->flags & LX_FSM_A_CONTINUOUS)) snprintf(note, sizeof note, "%s", UPDATE_SHORT[a->update & 3]);
     UiNode *nl = label(h, note, UI_FONT_SMALL, COL_DIM);
     nl->grow = 1;
     nl->clip = true;
@@ -746,7 +746,7 @@ static void action_block(UiNode *body, int si, int ai, const LxGraphAction *a, c
     ui_pad(pb, 6, 2, 0, 6);
     if (d->description) { UiNode *dl = hint(pb, d->description); ui_pad(dl, 0, 0, 0, 4); }
     for (int k = 0; k < LX_FSM_MAX_PARAMS && d->params[k].name; k++) param_row(pb, si, ai, k, a, &d->params[k], run);
-    if (d->on_update) {
+    if (d->on_update && !(d->flags & LX_FSM_A_CONTINUOUS)) {   /* actions that run until they're done always update every frame */
         UiNode *row = prow(pb, "Update", "When the action runs: once when the state is entered, or every frame until the state is left");
         PB *ub = pb_new(PB_UPDATE);
         ub->st = si; ub->ac = ai; ub->i = a->update & 3;

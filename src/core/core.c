@@ -429,9 +429,10 @@ void lx_input_push_char(uint32_t cp) {
 bool lx_key_down(LxKey k) { return k > 0 && k < LX_KEY_COUNT && g_lx_input.keys[k]; }
 bool lx_key_pressed(LxKey k) { return k > 0 && k < LX_KEY_COUNT && g_lx_input.keys[k] && !g_lx_input.prev_keys[k]; }
 bool lx_key_released(LxKey k) { return k > 0 && k < LX_KEY_COUNT && !g_lx_input.keys[k] && g_lx_input.prev_keys[k]; }
-bool lx_mouse_down(LxMouseButton b) { return g_lx_input.mouse[b]; }
-bool lx_mouse_pressed(LxMouseButton b) { return g_lx_input.mouse[b] && !g_lx_input.prev_mouse[b]; }
-bool lx_mouse_released(LxMouseButton b) { return !g_lx_input.mouse[b] && g_lx_input.prev_mouse[b]; }
+#define MOUSE_OK(b) ((int)(b) >= 0 && (int)(b) < (int)LX_ARRAY_COUNT(g_lx_input.mouse))
+bool lx_mouse_down(LxMouseButton b) { return MOUSE_OK(b) && g_lx_input.mouse[b]; }
+bool lx_mouse_pressed(LxMouseButton b) { return MOUSE_OK(b) && g_lx_input.mouse[b] && !g_lx_input.prev_mouse[b]; }
+bool lx_mouse_released(LxMouseButton b) { return MOUSE_OK(b) && !g_lx_input.mouse[b] && g_lx_input.prev_mouse[b]; }
 LxVec2 lx_mouse_pos(void) { return g_lx_input.mouse_pos; }
 LxVec2 lx_mouse_delta(void) {
     LxVec2 d = g_lx_input.mouse_delta_accum;

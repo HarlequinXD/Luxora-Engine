@@ -21,6 +21,11 @@ static uint32_t rgba(LxVec4 c) {
     return ((uint32_t)(lx_clampf(c.x, 0, 1) * 255) << 0) | ((uint32_t)(lx_clampf(c.y, 0, 1) * 255) << 8) | ((uint32_t)(lx_clampf(c.z, 0, 1) * 255) << 16) |
            ((uint32_t)(lx_clampf(c.w, 0, 1) * 255) << 24);
 }
+/* how far to close a gap this frame for "speed" (1/s): always 0..1, whatever the speed */
+static float smooth_k(float speed, float dt) {
+    if (!(speed > 0) || !(dt > 0)) return speed > 0 ? 0 : 1;   /* 0 or negative speed: snap */
+    return lx_clampf(1 - expf(-speed * dt), 0, 1);
+}
 static int ci_contains(const char *hay, const char *needle) {
     if (!needle[0]) return 1;
     size_t n = strlen(needle);
@@ -79,7 +84,7 @@ static const LxFsmActionDesc A_CHANGED = {"Value Changed", "Logic", "Sends an ev
 
 typedef struct CountState { int n; } CountState;
 static void counter_enter(LxFsmCtx *c) {
-    int n = lx_fsm_int(c, 0) + 1;
+    int n = lx_fsm_int(c, 0) < 2147483647 ? lx_fsm_int(c, 0) + 1 : 2147483647;
     lx_fsm_set_int(c, 0, n);
     if (n >= lx_fsm_int(c, 1)) { if (lx_fsm_bool(c, 4)) lx_fsm_set_int(c, 0, 0); ev(c, 2); }
     else ev(c, 3);
@@ -111,7 +116,7 @@ static const LxFsmActionDesc A_OSCILLATE = {"Float Oscillate", "Math", "A number
     sizeof(OscState), 0, LX_FSM_EVERY_FRAME, NULL, oscillate, NULL};
 
 static void float_smooth(LxFsmCtx *c) {
-    float cur = lx_fsm_float(c, 0), to = lx_fsm_float(c, 1), k = 1 - expf(-lx_fsm_float(c, 2) * c->dt);
+    float cur = lx_fsm_float(c, 0), to = lx_fsm_float(c, 1), k = smooth_k(lx_fsm_float(c, 2), c->dt);
     lx_fsm_set_float(c, 0, cur + (to - cur) * k);
 }
 static const LxFsmActionDesc A_FLOAT_SMOOTH = {"Float Smooth Towards", "Math", "Eases a variable towards a target every frame (bigger Speed = snappier).", "{0} → {1}",
@@ -180,6 +185,7 @@ static const LxFsmActionDesc A_GET_DIRECTIONS = {"Get Directions", "Transform", 
 static LxQuat nlerp(LxQuat a, LxQuat b, float t) {
     if (a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w < 0) { b.x = -b.x; b.y = -b.y; b.z = -b.z; b.w = -b.w; }
     LxQuat r = {a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t};
+    if (r.x * r.x + r.y * r.y + r.z * r.z + r.w * r.w < 1e-12f) return b;
     return lx_quat_norm(r);
 }
 static void smooth_look(LxFsmCtx *c) {
@@ -192,7 +198,7 @@ static void smooth_look(LxFsmCtx *c) {
     if (lx_fsm_bool(c, 4)) d.y = 0;
     if (lx_len3sq(d) < 1e-8f) return;
     LxQuat want = lx_quat_look(lx_norm3(d), lx_v3(0, 1, 0)), cur = lx_entity_world_rotation(c->scene, e);
-    LxQuat q = nlerp(cur, want, 1 - expf(-lx_fsm_float(c, 3) * c->dt));
+    LxQuat q = nlerp(cur, want, smooth_k(lx_fsm_float(c, 3), c->dt));
     lx_entity_set_world_pose(c->scene, e, pos, q);
 }
 static const LxFsmActionDesc A_SMOOTH_LOOK = {"Smooth Look At", "Transform", "Turns an object towards a target gradually.", "Turn {0} towards {1} (speed {3})",
@@ -204,8 +210,7 @@ static void follow(LxFsmCtx *c) {
     if (!e || !t) return;
     LxVec3 goal = lx_add3(lx_entity_world_position(c->scene, t), lx_fsm_vec3(c, 2));
     LxVec3 pos = lx_entity_world_position(c->scene, e);
-    float k = 1 - expf(-lx_fsm_float(c, 3) * c->dt);
-    LxVec3 np = lx_lerp3(pos, goal, lx_fsm_float(c, 3) <= 0 ? 1 : k);
+    LxVec3 np = lx_lerp3(pos, goal, smooth_k(lx_fsm_float(c, 3), c->dt));
     lx_entity_set_world_pose(c->scene, e, np, lx_entity_world_rotation(c->scene, e));
 }
 static const LxFsmActionDesc A_FOLLOW = {"Follow Object", "Transform", "Keeps an object near another (cameras, pets, health bars). Speed 0 = stick exactly.",
@@ -323,7 +328,7 @@ static const LxFsmActionDesc A_CHILD_COUNT = {"Get Child Count", "Objects", "How
     {POBJ("Object"), POUT("Store Count", LX_FSM_INT)}, 0, 0, LX_FSM_ONCE, child_count, child_count, NULL};
 static void duplicate_obj(LxFsmCtx *c) {
     LxEntity e = obj(c, 0);
-    LxEntity d = e ? lx_entity_duplicate(c->scene, e) : 0;
+    LxEntity d = e && lx_fsm_spawn_allowed(c->scene) ? lx_entity_duplicate(c->scene, e) : 0;
     if (d) lx_entity_set_position(c->scene, d, lx_add3(lx_entity_position(c->scene, d), lx_fsm_vec3(c, 1)));
     lx_fsm_set_object(c, 2, d);
 }
@@ -503,12 +508,12 @@ static void repeat_update(LxFsmCtx *c) {
     float every = lx_fsm_float(c, 0);
     if (every <= 0) return;
     s->t += c->dt;
-    while (s->t >= every) {
-        s->t -= every;
+    if (s->t >= every) {   /* at most once a frame, however small Every is */
+        s->t = every > 0 ? fmodf(s->t, every) : 0;
         s->fired++;
-        ev(c, 1);
         int max = lx_fsm_int(c, 2);
-        if (max > 0 && s->fired >= max) { lx_fsm_finish(c); ev(c, 3); return; }
+        if (max > 0 && s->fired >= max) { lx_fsm_finish(c); ev(c, 1); ev(c, 3); return; }
+        ev(c, 1);
     }
 }
 static const LxFsmActionDesc A_REPEAT = {"Repeat Event", "Time", "Sends an event every few seconds (spawners, ticking clocks), optionally N times.", "Every {0} s: {1}",

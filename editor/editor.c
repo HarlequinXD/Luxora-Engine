@@ -1173,6 +1173,25 @@ void ed_update(float dt) {
         lx_game_ui_begin_frame(ED.viewport->x, ED.viewport->y, ED.viewport->cw, ED.viewport->ch, ED.play == ED_PLAYING);
     if (ED.play == ED_PLAYING) lx_scene_simulate(ED.scene, dt);
     else lx_scene_update_transforms(ED.scene);
+    if (ED.play != ED_EDIT) {   /* the game asked to change scene or quit: in the editor, Quit stops playing */
+        char next[LX_REF_MAX];
+        if (lx_take_quit_request()) { LX_INFO("The game quit: stopping Play mode"); ed_stop(); return; }
+        if (lx_take_scene_request(next, sizeof next)) {
+            char path[LX_PATH_MAX];
+            lx_asset_path(path, sizeof path, next);
+            LxScene *n = lx_file_exists(path) ? lx_scene_load(path) : NULL;
+            if (n) {
+                lx_audio_stop_all();
+                lx_scene_stop_simulation(ED.scene);
+                lx_scene_destroy(ED.scene);
+                ED.scene = n;
+                ED.selected = 0;
+                ed_scene_replaced();   /* Stop still brings back the scene you pressed Play in */
+                lx_gi_reset();
+                LX_INFO("Play mode: loaded %s", next);
+            } else LX_ERROR("Load Scene: %s not found", next);
+        }
+    } else { char tmp[LX_REF_MAX]; lx_take_scene_request(tmp, sizeof tmp); lx_take_quit_request(); }
     lx_audio_update(ED.scene, dt);
     static bool was_dirty;
     if (was_dirty != ED.dirty) { was_dirty = ED.dirty; ed_update_title(); }

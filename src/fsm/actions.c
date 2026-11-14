@@ -31,30 +31,39 @@ static LxEntity obj(LxFsmCtx *c, int p) { return lx_fsm_object(c, p); }
  * ====================================================================== */
 typedef struct { float t; } TimerState;
 
-static void send_event_enter(LxFsmCtx *c) {
-    const char *e = lx_fsm_event(c, 0);
-    int to = lx_fsm_int(c, 1);
-    float delay = lx_fsm_float(c, 4), value = lx_fsm_float(c, 5);
-    if (!e[0]) return;
-    if (delay > 0) {   /* delayed: the gameplay timer delivers it as a message (graphs receive those too) */
-        LxEntity t = to == 1 ? obj(c, 2) : c->self;
-        if (to <= 1 && t) lx_send_message_after(c->scene, t, e, value, delay);
-        return;
-    }
-    switch (to) {
+static void send_event_now(LxFsmCtx *c) {
+    char e[LX_FSM_NAME];
+    lx_strcpy(e, sizeof e, lx_fsm_event(c, 0));
+    if (!e[0] || !strcmp(e, "None")) return;
+    float value = lx_fsm_float(c, 5);
+    switch (lx_fsm_int(c, 1)) {
     case 0: lx_fsm_send(c, e); break;
     case 1: { LxEntity t = obj(c, 2); if (t) lx_send_message(c->scene, t, e, value, c->self); break; }
-    case 2: { LxEntity t = obj(c, 2); for (LxEntity k = t ? lx_entity_first_child(c->scene, t) : 0; k; k = lx_entity_next_sibling(c->scene, k)) lx_send_message(c->scene, k, e, value, c->self); break; }
-    case 3: lx_send_message_to_tag(c->scene, lx_fsm_string(c, 3), e, value, c->self); break;
+    case 2: {
+        LxEntity t = obj(c, 2), kids[256];
+        int n = 0;   /* collected first: a child's graph may change the hierarchy */
+        for (LxEntity k = t ? lx_entity_first_child(c->scene, t) : 0; k && n < 256; k = lx_entity_next_sibling(c->scene, k)) kids[n++] = k;
+        for (int i = 0; i < n; i++) if (lx_entity_valid(c->scene, kids[i])) lx_send_message(c->scene, kids[i], e, value, c->self);
+        break;
+    }
+    case 3: { char tag[LX_NAME_MAX]; lx_strcpy(tag, sizeof tag, lx_fsm_string(c, 3)); lx_send_message_to_tag(c->scene, tag, e, value, c->self); break; }
     default: lx_broadcast(c->scene, e, value, c->self); break;
     }
+}
+static void send_event_enter(LxFsmCtx *c) {
+    if (lx_fsm_float(c, 4) <= 0) { send_event_now(c); lx_fsm_finish(c); }
+}
+static void send_event_update(LxFsmCtx *c) {   /* delayed: sent from here, so leaving the state first cancels it */
+    TimerState *t = c->state;
+    t->t += c->dt;
+    if (t->t >= lx_fsm_float(c, 4)) { lx_fsm_finish(c); send_event_now(c); }
 }
 static const LxFsmActionDesc A_SEND_EVENT = {
     "Send Event", "Events", "Sends an event to this graph, another object, its children, everything with a tag, or everyone.",
     "Send {0} to {1}",
     {PEV("Event"), PENUM("Send To", "This Graph|Object|Children|Tag|Everyone", "0"), POBJ("Object"), P("Tag", LX_FSM_STRING, "Player"),
-     PT("Delay", LX_FSM_FLOAT, "0", "seconds; 0 = now"), PT("Value", LX_FSM_FLOAT, "0", "a number sent with the event (Get Event Info)")},
-    0, 0, LX_FSM_ONCE, send_event_enter, NULL, NULL};
+     PT("Delay", LX_FSM_FLOAT, "0", "seconds; 0 = now. Leaving the state before then cancels it"), PT("Value", LX_FSM_FLOAT, "0", "a number sent with the event (Get Event Info)")},
+    sizeof(TimerState), LX_FSM_A_CONTINUOUS, LX_FSM_ONCE, send_event_enter, send_event_update, NULL};
 
 static void next_frame_update(LxFsmCtx *c) { ev(c, 0); lx_fsm_finish(c); }
 static const LxFsmActionDesc A_NEXT_FRAME = {"Next Frame Event", "Events", "Sends an event on the next frame.", "Next frame: {0}",
@@ -181,7 +190,8 @@ static const LxFsmActionDesc A_FLOAT_ADD = {"Float Add", "Math", "Adds to a numb
     {POUT("Variable", LX_FSM_FLOAT), P("Add", LX_FSM_FLOAT, "1"), PT("Per Second", LX_FSM_BOOL, "false", "multiply by frame time: smooth changes every frame")},
     0, 0, LX_FSM_ONCE, float_add_enter, float_add, NULL};
 
-static void int_add(LxFsmCtx *c) { lx_fsm_set_int(c, 0, lx_fsm_int(c, 0) + lx_fsm_int(c, 1)); }
+static int clamp_i64(long long x) { return x > 2147483647LL ? 2147483647 : x < -2147483647LL ? -2147483647 : (int)x; }
+static void int_add(LxFsmCtx *c) { lx_fsm_set_int(c, 0, clamp_i64((long long)lx_fsm_int(c, 0) + lx_fsm_int(c, 1))); }
 static const LxFsmActionDesc A_INT_ADD = {"Int Add", "Math", "Adds to a whole-number variable (negative to subtract).", "{0} += {1}",
     {POUT("Variable", LX_FSM_INT), P("Add", LX_FSM_INT, "1")}, 0, 0, LX_FSM_ONCE, int_add, int_add, NULL};
 
@@ -198,10 +208,10 @@ static const LxFsmActionDesc A_FLOAT_OP = {"Float Operator", "Math", "Does maths
     0, 0, LX_FSM_ONCE, float_op, float_op, NULL};
 
 static void int_op(LxFsmCtx *c) {
-    int a = lx_fsm_int(c, 0), b = lx_fsm_int(c, 1), o = lx_fsm_int(c, 2), r = 0;
-    switch (o) { case 0: r = a + b; break; case 1: r = a - b; break; case 2: r = a * b; break; case 3: r = b ? a / b : 0; break;
-                 case 4: r = a < b ? a : b; break; case 5: r = a > b ? a : b; break; default: r = b ? a % b : 0; }
-    lx_fsm_set_int(c, 3, r);
+    long long a = lx_fsm_int(c, 0), b = lx_fsm_int(c, 1), r = 0;
+    switch (lx_fsm_int(c, 2)) { case 0: r = a + b; break; case 1: r = a - b; break; case 2: r = a * b; break; case 3: r = b ? a / b : 0; break;
+                                case 4: r = a < b ? a : b; break; case 5: r = a > b ? a : b; break; default: r = b ? a % b : 0; }
+    lx_fsm_set_int(c, 3, clamp_i64(r));
 }
 static const LxFsmActionDesc A_INT_OP = {"Int Operator", "Math", "Does maths on two whole numbers.", "{3} = {0} {2} {1}",
     {P("Int 1", LX_FSM_INT, "0"), P("Int 2", LX_FSM_INT, "0"), PENUM("Operation", "Add|Subtract|Multiply|Divide|Min|Max|Remainder", "0"), POUT("Store Result", LX_FSM_INT)},
@@ -233,7 +243,7 @@ static const LxFsmActionDesc A_RANDOM_BOOL = {"Random Chance", "Math", "true wit
 
 static void convert(LxFsmCtx *c) {
     switch (lx_fsm_int(c, 0)) {
-    case 0: lx_fsm_set_int(c, 3, (int)lroundf(lx_fsm_float(c, 1))); break;
+    case 0: { float f = lx_fsm_float(c, 1); lx_fsm_set_int(c, 3, f >= 2147483647.0f ? 2147483647 : f <= -2147483647.0f ? -2147483647 : (int)lroundf(f)); break; }
     case 1: lx_fsm_set_float(c, 3, (float)lx_fsm_int(c, 2)); break;
     case 2: { char b[64]; snprintf(b, sizeof b, "%g", (double)lx_fsm_float(c, 1)); lx_fsm_set_string(c, 3, b); break; }
     default: { char b[64]; snprintf(b, sizeof b, "%d", lx_fsm_int(c, 2)); lx_fsm_set_string(c, 3, b); break; }
@@ -372,9 +382,9 @@ static void move_towards(LxFsmCtx *c) {
     LxVec3 pos = lx_entity_world_position(c->scene, e), goal = target_point(c, 1, 2);
     if (lx_fsm_bool(c, 6)) goal.y = pos.y;
     LxVec3 d = lx_sub3(goal, pos);
-    float dist = lx_len3(d), stop = lx_fsm_float(c, 4);
+    float dist = lx_len3(d), stop = lx_maxf(0, lx_fsm_float(c, 4));
     if (dist <= stop + 1e-4f) { ev(c, 5); return; }
-    float step = lx_fsm_float(c, 3) * c->dt;
+    float step = lx_maxf(0, lx_fsm_float(c, 3)) * c->dt;
     if (step > dist - stop) step = dist - stop;
     set_world_pos(c->scene, e, lx_add3(pos, lx_scale3(d, step / dist)));
 }
@@ -451,6 +461,7 @@ static const LxFsmActionDesc A_SET_PARENT = {"Set Parent", "Transform", "Attache
 static void spawn(LxFsmCtx *c) {
     const char *ref = lx_fsm_asset(c, 0);
     if (!ref[0]) return;
+    if (!lx_fsm_spawn_allowed(c->scene)) return;
     LxVec3 pos = target_point(c, 1, 2);
     LxEntity e = lx_prefab_instantiate(c->scene, ref, pos, obj(c, 3));
     if (e) lx_entity_set_euler(c->scene, e, lx_fsm_vec3(c, 4));
@@ -563,23 +574,30 @@ static const LxFsmActionDesc A_RAYCAST = {"Raycast", "Physics", "Casts a ray and
     0, 0, LX_FSM_ONCE, raycast, raycast, NULL};
 
 /* collision/trigger filters: the system events come with "other"; these filter by tag and send your own event */
-typedef struct { char last[LX_FSM_NAME]; } SysState;
+typedef struct { uint32_t seen; } SysState;
 static void sys_filter_update(LxFsmCtx *c, const char *enter_ev, const char *exit_ev) {
     LxFsmRun *r = c->run;
-    if (!r || !r->last_system_event[0]) return;
-    bool enter = !strcmp(r->last_system_event, enter_ev), exit_ = !strcmp(r->last_system_event, exit_ev);
+    SysState *s = c->state;
+    if (!r || r->system_seq == s->seen) return;   /* nothing new */
+    uint32_t from = r->system_seq - s->seen > 8 ? r->system_seq - 7 : s->seen + 1, to = r->system_seq;
+    s->seen = to;
+    char tag[LX_NAME_MAX];
+    lx_strcpy(tag, sizeof tag, lx_fsm_string(c, 1));
     int want = lx_fsm_int(c, 0);
-    if (!(want == 0 ? enter : want == 1 ? exit_ : (enter || exit_))) return;
-    LxEntity o = r->last_other;
-    const char *tag = lx_fsm_string(c, 1);
-    if (tag[0] && (!o || !lx_entity_has_tag(c->scene, o, tag))) { r->last_system_event[0] = 0; return; }
-    r->last_system_event[0] = 0;
-    lx_fsm_set_object(c, 3, o);
-    ev(c, 2);
+    for (uint32_t q = from; q - from <= to - from; q++) {
+        const char *evn = r->system_ring[q & 7].event;
+        LxEntity o = r->system_ring[q & 7].other;
+        bool enter = !strcmp(evn, enter_ev), exit_ = !strcmp(evn, exit_ev);
+        if (!(want == 0 ? enter : want == 1 ? exit_ : (enter || exit_))) continue;
+        if (tag[0] && (!o || !lx_entity_valid(c->scene, o) || !lx_entity_has_tag(c->scene, o, tag))) continue;
+        lx_fsm_set_object(c, 3, o);
+        ev(c, 2);
+        return;   /* one event per frame: the graph moves on */
+    }
 }
 static void coll_ev(LxFsmCtx *c) { sys_filter_update(c, "COLLISION_ENTER", "COLLISION_EXIT"); }
 static void trig_ev(LxFsmCtx *c) { sys_filter_update(c, "TRIGGER_ENTER", "TRIGGER_EXIT"); }
-static void sys_enter(LxFsmCtx *c) { if (c->run) c->run->last_system_event[0] = 0; }
+static void sys_enter(LxFsmCtx *c) { SysState *s = c->state; if (c->run) s->seen = c->run->system_seq; }   /* only what happens from now on */
 static const LxFsmActionDesc A_COLLISION_EVENT = {"Collision Event", "Physics", "When this object bumps into something (optionally with a tag), sends an event.", "On {0} with {1} → {2}",
     {PENUM("When", "Enter|Exit|Either", "0"), PT("Tag", LX_FSM_STRING, "", "empty = anything"), PEV("Send Event"), POPT("Store Other", LX_FSM_OBJECT)},
     sizeof(SysState), 0, LX_FSM_EVERY_FRAME, sys_enter, coll_ev, NULL};

@@ -16,6 +16,18 @@ bool lx_load_scene(const char *ref) {
     lx_strcpy(E.pending_scene, sizeof E.pending_scene, ref);
     return true;
 }
+/* the editor's Play mode takes these itself (the game loop below is the player's) */
+bool lx_take_scene_request(char *out, size_t cap) {
+    if (!E.pending_scene[0]) return false;
+    lx_strcpy(out, cap, E.pending_scene);
+    E.pending_scene[0] = 0;
+    return true;
+}
+bool lx_take_quit_request(void) {
+    bool q = E.quit;
+    E.quit = false;
+    return q;
+}
 
 /* where a game keeps its save data: the user's app-data folder, per game */
 static void default_save_file(const LxProject *p) {

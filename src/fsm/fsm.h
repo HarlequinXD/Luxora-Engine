@@ -184,6 +184,8 @@ typedef struct LxFsmRun {
     LxEntity event_sender, event_other;
     LxEntity last_other;       /* the other object of the latest collision / trigger */
     char last_system_event[LX_FSM_NAME];
+    uint32_t system_seq;       /* +1 per collision/trigger event: each Collision/Trigger Event action sees each one once */
+    struct { char event[24]; LxEntity other; } system_ring[8];   /* the last few, several can arrive in one frame */
     /* debugging */
     double enter_time;
     int history_count;
@@ -198,6 +200,7 @@ typedef struct LxFsmInstance {   /* per object: one run per slot */
 void lx_fsm_scene_update(LxScene *s, float dt, LxFsmUpdate phase);   /* EVERY_FRAME / FIXED / LATE */
 void lx_fsm_entity_free(LxEntityData *d);           /* the object goes away / loses the component */
 void lx_fsm_scene_stop(LxScene *s);
+bool lx_fsm_spawn_allowed(LxScene *s);   /* Spawn/Duplicate actions: per-frame budget */
 void lx_fsm_system_event(LxScene *s, LxEntity self, const char *event, LxEntity other, float value);
 LxFsmRun *lx_fsm_run_of(LxScene *s, LxEntity e, int slot);
 bool lx_fsm_value_parse(LxFsmValue *v, LxFsmType t, const char *text, const char *options);

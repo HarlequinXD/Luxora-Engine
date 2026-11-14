@@ -352,8 +352,8 @@ float lx_random(void) { return lx_rng_f(&g_rng); }
 float lx_random_range(float a, float b) { return a + (b - a) * lx_rng_f(&g_rng); }
 int lx_random_int(int a, int b) {
     if (b < a) { int t = a; a = b; b = t; }
-    uint32_t span = (uint32_t)((int64_t)b - a + 1);
-    return span ? a + (int)(lx_rng_u32(&g_rng) % span) : a + (int)lx_rng_u32(&g_rng);
+    int64_t span = (int64_t)b - a + 1;   /* up to 2^32: computed wide, so no overflow */
+    return (int)((int64_t)a + (int64_t)(lx_rng_u32(&g_rng) % (uint64_t)span));
 }
 LxVec3 lx_random_in_sphere(float r) { return lx_scale3(lx_rng_sphere(&g_rng), r * cbrtf(lx_rng_f(&g_rng))); }
 bool lx_random_chance(float p) { return lx_rng_f(&g_rng) < p; }

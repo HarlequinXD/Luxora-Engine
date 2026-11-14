@@ -672,6 +672,11 @@ static void s_sg_playing(void) {
     SMOKE_CHECK(ge_run() != NULL, "the editor shows the running graph");
     sg_shot("state_graph_play.ppm");
 }
+static uint32_t g_sg_gen;
+static void s_sg_load(void) { g_sg_gen = ED.scene_gen; lx_load_scene("Scenes/Main.lxscene"); }   /* what the Load Scene action does */
+static void s_sg_loaded(void) {
+    SMOKE_CHECK(ED.play != ED_EDIT && ED.scene_gen != g_sg_gen && lx_entity_find(ED.scene, "Patroller"), "Load Scene works in Play mode");
+}
 static void s_sg_stop(void) { ed_stop(); }
 static void s_sg_stopped(void) {
     char err[200] = "";
@@ -777,8 +782,10 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {313, s_sg_saved, "saved; undo; close the browser"},
     {314, s_sg_play, "play"},
     {330, s_sg_playing, "the State Graph runs"},
-    {332, s_sg_stop, "stop"},
-    {335, s_sg_stopped, "back in edit mode"},
+    {331, s_sg_load, "the game loads a scene"},
+    {333, s_sg_loaded, "the new scene plays"},
+    {335, s_sg_stop, "stop"},
+    {337, s_sg_stopped, "back in edit mode"},
 };
 
 bool ed_smoke_step(int frame) {
