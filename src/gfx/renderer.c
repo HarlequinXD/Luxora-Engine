@@ -1157,7 +1157,7 @@ static void gi_comp_init(void) {
      * 11 walls, 12 per-cell counts, 13-14 wall textures, 15 moving objects' boxes */
     VkDescriptorSetLayoutBinding b[16];
     for (uint32_t i = 0; i < 16; i++) {
-        bool img = (i >= 8 && i <= 10) || i >= 13;
+        bool img = (i >= 8 && i <= 10) || i == 13 || i == 14;
         b[i] = (VkDescriptorSetLayoutBinding){i, img ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL};
     }
     R.gi_comp_layout = set_layout(b, 16);
