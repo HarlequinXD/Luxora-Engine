@@ -642,7 +642,23 @@ static void s_sg_picked(void) {
     UiNode *w[8];
     int n = ui_window_nodes(ED.ui, w, 8);
     UiNode *it = n ? find_node(w[0], NULL, "Translate") : NULL;
-    SMOKE_CHECK(it && it->bg == UI_HEX(0x7a2412) && it->bg_hover != 0, "the clicked action is highlighted, also under the mouse");
+    SMOKE_CHECK(it && it->bg == UI_HEX(0x2b4a86) && it->bg_hover != 0, "the clicked action is highlighted, also under the mouse");
+}
+/* a long description (Character Walk) mustn't push the Add button out of the details panel */
+static void s_sg_long(void) {
+    UiNode *w[8];
+    int n = ui_window_nodes(ED.ui, w, 8);
+    UiNode *it = n ? find_node(w[0], NULL, "Character Walk") : NULL;
+    if (it) ui_test_click(ED.ui, it, false);
+}
+static void s_sg_long_check(void) {
+    UiNode *w[8];
+    int n = ui_window_nodes(ED.ui, w, 8);
+    UiNode *b = n ? find_node(w[0], NULL, "Add Action To State") : NULL, *win = n ? w[0] : NULL;
+    SMOKE_CHECK(!strcmp(GE.ab_sel, "Character Walk") && b && win && b->h > 0 && b->y + b->h <= win->y + win->h - 2,
+                "the Add button stays in view under a long description (button bottom %.0f, window bottom %.0f)", b ? b->y + b->h : -1, win ? win->y + win->h : -1);
+    UiNode *it = n ? find_node(w[0], NULL, "Translate") : NULL;   /* back to Translate for the next steps */
+    if (it) ui_test_click(ED.ui, it, false);
 }
 static void s_sg_add(void) {
     UiNode *w[8];
@@ -839,9 +855,11 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {309, s_sg_shot, "screenshot of the State Graph editor"},
     {310, s_sg_pick, "click an action in the list"},
     {311, s_sg_picked, "it's highlighted"},
-    {311, s_sg_add, "add the action to the selected state"},
-    {313, s_sg_saved, "saved; undo; close the browser"},
-    {314, s_sg_play, "play"},
+    {311, s_sg_long, "pick an action with a long description"},
+    {312, s_sg_long_check, "the Add button is still in view"},
+    {313, s_sg_add, "add the action to the selected state"},
+    {314, s_sg_saved, "saved; undo; close the browser"},
+    {315, s_sg_play, "play"},
     {330, s_sg_playing, "the State Graph runs"},
     {331, s_sg_load, "the game loads a scene"},
     {333, s_sg_loaded, "the new scene plays"},

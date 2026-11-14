@@ -900,7 +900,7 @@ static void build_state_tab(UiNode *body) {
         tr->gap = 6;
         tr->cross_align = UI_ALIGN_CENTER;
         tr->radius = 3;
-        tr->bg = GE.sel_trans == t ? UI_HEX(0x2a1810) : 0;
+        tr->bg = GE.sel_trans == t ? UI_HEX(0x1f3050) : 0;
         tr->on_click = trans_select;
         tr->tag = t;
         UiNode *e = label(tr, st->trans[t].event, UI_FONT_BODY, COL_TEXT);
@@ -1233,7 +1233,7 @@ static void var_block(UiNode *body, int i, const LxGraphVar *v, bool global) {
     UiCtx *ui = ED.ui;
     UiNode *wrap = ui_box(ui, body, UI_COL);
     wrap->gap = 2;
-    wrap->bg = UI_HEX(0x1a1213);
+    wrap->bg = UI_HEX(0x1d1e22);
     wrap->radius = 4;
     ui_pad(wrap, 6, 4, 4, 4);
     UiNode *row = ui_box(ui, wrap, UI_ROW);
@@ -1463,7 +1463,7 @@ static void ab_item(UiNode *list, const LxFsmActionDesc *d, int indent) {
     it->radius = 3;
     ui_pad(it, (float)indent, 0, 4, 0);
     bool sel = !strcmp(GE.ab_sel, d->name);
-    it->bg = sel ? UI_HEX(0x7a2412) : 0;
+    it->bg = sel ? UI_HEX(0x2b4a86) : 0;
     if (sel) { it->bg_hover = UI_HEX(0x34589c); it->bg_active = UI_HEX(0x34589c); }
     it->fg = sel ? UI_HEX(0xffffff) : COL_TEXT;
     it->drag_type = NULL;
@@ -1480,7 +1480,7 @@ static UiNode *ab_cat(UiNode *list, const char *name, int count, bool open, bool
     h->center_text = false;
     h->icon = open ? UI_ICON_CHEVRON_DOWN : UI_ICON_CHEVRON_RIGHT;
     h->icon_size = 11;
-    h->bg = UI_HEX(0x221716);
+    h->bg = UI_HEX(0x2a2c31);
     h->border = COL_EDGE;
     h->radius = 4;
     h->font = UI_FONT_BOLD;
@@ -1553,20 +1553,25 @@ static void ab_build_details(void) {
     ui_clear(ED.ui, det);
     const LxFsmActionDesc *d = lx_fsm_action_find(GE.ab_sel);
     if (!d) { hint(det, "Pick an action to see what it does. Double-click adds it to the selected state."); return; }
-    UiNode *row = ui_box(ED.ui, det, UI_ROW);
+    /* the text scrolls in its own area; the buttons stay pinned underneath, however long it is */
+    UiNode *info = ui_box(ED.ui, det, UI_COL);
+    info->grow = 1;
+    info->scroll = true;
+    info->gap = 4;
+    UiNode *row = ui_box(ED.ui, info, UI_ROW);
     row->h = 24;
     row->gap = 6;
     row->cross_align = UI_ALIGN_CENTER;
     label(row, d->name, UI_FONT_BOLD, COL_TEXT)->grow = 1;
     label(row, d->category ? d->category : "", UI_FONT_SMALL, COL_DIM);
-    if (d->description) hint(det, d->description);
+    if (d->description) hint(info, d->description);
     /* parameters, briefly */
     char ps[400] = "";
     for (int k = 0; k < LX_FSM_MAX_PARAMS && d->params[k].name; k++) {
         size_t l = strlen(ps);
         snprintf(ps + l, sizeof ps - l, "%s%s", k ? ", " : "Parameters: ", d->params[k].name);
     }
-    if (ps[0]) hint(det, ps);
+    if (ps[0]) hint(info, ps);
     /* where it's used: every graph asset in the project */
     char used[480] = "";
     int uses = 0;
@@ -1584,7 +1589,7 @@ static void ab_build_details(void) {
                     a = gs[i]->states[s].action_count;
                 }
     if (uses > 6) { size_t l = strlen(used); snprintf(used + l, sizeof used - l, " and %d more", uses - 6); }
-    hint(det, uses ? used : "Not used in any open graph yet.");
+    hint(info, uses ? used : "Not used in any open graph yet.");
     row = ui_box(ED.ui, det, UI_ROW);
     row->h = 30;
     row->gap = 6;
@@ -1687,7 +1692,7 @@ void ge_open_action_browser(void) {
     GE.ab_list = list;
     ui_track(&GE.ab_list);
     UiNode *det = ui_box(ui, body, UI_COL);
-    det->h = 170;
+    det->h = 200;
     det->gap = 4;
     det->bg = UI_HEX(0x1d1e22);
     det->radius = 4;

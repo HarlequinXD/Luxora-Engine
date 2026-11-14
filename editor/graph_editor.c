@@ -369,7 +369,7 @@ static void draw_state(UiCtx *ui, const LxGraph *g, int i, const LxFsmRun *run) 
         ui_draw_rect(ui, x, ry, w, 1, UI_HEX(0x34363c), 0);
         bool hot = sel && GE.sel_trans == t;
         bool fired = run && run->prev_state == i && run->state_time < 1.0f && !strcmp(run->last_event, st->trans[t].event);
-        if (hot || fired) ui_draw_rect(ui, x + 1, ry + 1, w - 2, rh - 1, UI_HEX(0x2a1810), 0);
+        if (hot || fired) ui_draw_rect(ui, x + 1, ry + 1, w - 2, rh - 1, UI_HEX(0x1f3050), 0);
         if (GE.zoom >= 0.45f) {
             float tw = ui_text_width(ui, ef, st->trans[t].event);
             uint32_t c = hot || fired ? UI_HEX(0xffb03a) : !st->trans[t].to[0] ? COL_DIM : COL_TEXT;
@@ -400,7 +400,7 @@ static void draw_state(UiCtx *ui, const LxGraph *g, int i, const LxFsmRun *run) 
         const char *ev = g->globals[idx[k]].event;
         bool fired = run && run->state == i && run->state_time < 1.0f && !strcmp(run->last_event, ev);
         float tx = sx(xs[k]), tw = ws[k] * s;
-        ui_draw_rect(ui, tx, tab_y, tw, tab_h, UI_HEX(0x050303), 3 * s);
+        ui_draw_rect(ui, tx, tab_y, tw, tab_h, UI_HEX(0x111214), 3 * s);
         ui_draw_border(ui, tx, tab_y, tw, tab_h, fired ? COL_HOT : UI_HEX(0x45474e), 3 * s, 1);
         ui_draw_text(ui, sf, tx + 7 * ui_scale(ui), tab_y + (tab_h - ui_line_height(ui, sf)) * 0.5f, ev, fired ? UI_HEX(0xffb03a) : COL_TEXT);
         uint32_t lc = fired ? COL_HOT : COL_LINK;
@@ -504,7 +504,7 @@ static void draw_center_message(UiCtx *ui, UiNode *n, const char *title, const c
 
 static void canvas_draw(UiNode *n, UiCtx *ui) {
     float s = ui_scale(ui);
-    ui_draw_rect(ui, n->x, n->y, n->cw, n->ch, UI_HEX(0x0f0a0a), 0);
+    ui_draw_rect(ui, n->x, n->y, n->cw, n->ch, UI_HEX(0x16171a), 0);
     ui_push_clip(ui, n->x, n->y, n->cw, n->ch);
     draw_grid(ui, n);
     LxGraph *g = ge_graph();
