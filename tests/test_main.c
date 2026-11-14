@@ -759,6 +759,40 @@ static void test_gi_reconstruction(void) {
     CHECK(fabsf(lx_gi_eval_l1(even, lx_v3(0, 0, 1)) - LX_PI * 0.282095f) < 1e-4f, "even light stays even");
 }
 
+/* the user's scene: a flat ground, the sun and sky, a moving character. Before, the GI grid was sized from the
+ * static geometry alone (a metre-tall slab over flat ground): the character's head was above it, unlit, and its
+ * top edge cut across the face. Upper body, lower body, mid-jump and lifted high all get bounce light. */
+static void test_gi_headroom(void) {
+    printf("photon gi: room above the ground\n");
+    LxScene *s = lx_scene_create("Flat");
+    LxEntity ground = lx_spawn_primitive(s, LX_PRIM_PLANE, "Ground", lx_v3(0, 0, 0));
+    lx_entity_set_scale(s, ground, lx_v3(4, 1, 4));
+    LxEntity sun = lx_entity_create(s, "Sun");
+    lx_entity_set_euler(s, sun, lx_v3(-50, 30, 0));
+    lx_add_light(s, sun, LX_LIGHT_DIRECTIONAL)->intensity = 3;
+    LxEntity hero = lx_spawn_primitive(s, LX_PRIM_CAPSULE, "Hero", lx_v3(0, 0.9f, 0));
+    lx_entity_set_scale(s, hero, lx_v3(0.5f, 0.9f, 0.5f));
+    lx_add_character(s, hero);
+    LxGraphicsSettings g = lx_graphics_defaults(1);
+    g.gi_photons_per_frame = 40000;
+    float level[3];
+    float lifts[3] = {0, 2.0f, 9.0f};   /* standing, mid-jump, lifted high */
+    for (int k = 0; k < 3; k++) {
+        lx_entity_set_position(s, hero, lx_v3(0, 0.9f + lifts[k], 0));
+        for (int f = 0; f < 40; f++) lx_gi_update(s, &g);
+        float y0 = lifts[k];
+        LxVec3 low = lx_gi_irradiance(lx_v3(0.3f, y0 + 0.5f, 0), lx_v3(1, 0, 0), true);
+        LxVec3 high = lx_gi_irradiance(lx_v3(0.3f, y0 + 1.65f, 0), lx_v3(1, 0, 0), true);
+        float lo = low.x + low.y + low.z, hi = high.x + high.y + high.z;
+        level[k] = hi;
+        printf("  %s: bounce light %.3f at the waist, %.3f at the face\n", k == 0 ? "standing" : k == 1 ? "mid-jump" : "lifted 9 m", lo, hi);
+        CHECK(hi > 0 && hi > lo * 0.5f, "%s: the face gets bounce light like the waist (%.3f vs %.3f)", k == 0 ? "standing" : k == 1 ? "mid-jump" : "lifted", hi, lo);
+    }
+    CHECK(level[1] > level[0] * 0.4f, "jumping doesn't take the bounce light away (%.3f vs %.3f)", level[1], level[0]);
+    lx_gi_shutdown();
+    lx_scene_destroy(s);
+}
+
 static void test_gi_leaks(void) {
     printf("photon gi light leaks\n");
     float lit_old, lit_new;
@@ -1719,6 +1753,7 @@ int main(void) {
     test_gi_self_shadow();
     test_moving_refit();
     test_gi_reconstruction();
+    test_gi_headroom();
     test_gi_sky_calibration();
     test_acoustics();
     test_crowd();

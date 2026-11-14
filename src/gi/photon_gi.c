@@ -208,8 +208,19 @@ const float *lx_gi_cell(int x, int y, int z) {
     return G.accum + ((size_t)((z * G.res[1] + y) * G.res[0] + x)) * SH_FLOATS;
 }
 
+/* Room above the ground for things that move (and the air they move through): the grid, and the sky's light
+ * which starts at its top, reach at least this far above the level's lowest point, and above every moving object.
+ * Sized from the static geometry alone, a flat level got a grid a metre tall: characters stood with their heads
+ * out of it, unlit, with its top edge cutting across them. */
+#define GI_HEADROOM 5.0f
 static void setup_grid(int longest_res, bool cpu) {
     LxAabb b = G.bvh.bounds;
+    b.max.y = lx_maxf(b.max.y, b.min.y + GI_HEADROOM);
+    if (G.moving.tri_count) {   /* and whatever moves, with a couple of metres to spare */
+        b.max.y = lx_maxf(b.max.y, G.moving.bounds.max.y + 2.0f);
+        b.min = lx_min3(b.min, lx_v3(G.moving.bounds.min.x, b.min.y, G.moving.bounds.min.z));
+        b.max = lx_max3(b.max, lx_v3(G.moving.bounds.max.x, b.max.y, G.moving.bounds.max.z));
+    }
     LxVec3 ext = lx_sub3(b.max, b.min);
     float pad = lx_maxf(0.5f, lx_maxf(ext.x, lx_maxf(ext.y, ext.z)) * 0.05f);
     b.min = lx_sub3(b.min, lx_v3s(pad));
@@ -505,6 +516,7 @@ static int prepare(LxScene *s, const LxGraphicsSettings *g, bool gpu) {
     if (G.gpu != gpu) { G.gpu = gpu; G.built_scene = NULL; }   /* switching tracer: rebuild the grid for it */
     if (G.built_scene != s || G.built_version != s->static_version) {
         lx_bvh_build_from_scene(&G.bvh, s);
+        update_moving(s);   /* the grid makes room for them */
         G.built_scene = s;
         G.built_version = s->static_version;
         if (G.bvh.tri_count) { setup_grid(g->gi_grid_resolution, !gpu); compute_vis(); }
@@ -513,15 +525,23 @@ static int prepare(LxScene *s, const LxGraphicsSettings *g, bool gpu) {
         G.scene_version++;
     }
     if (!G.bvh.tri_count) return 0;
-    if (g->gi_grid_resolution != G.grid_setting) {
+    lx_scene_update_transforms(s);
+    update_moving(s);
+    /* something moving left the grid (jumped above it, walked off its edge): make the grid big enough again */
+    bool outgrown = false;
+    if (G.moving.tri_count && G.cells) {
+        LxVec3 top = lx_add3(G.origin, lx_scale3(lx_v3((float)G.res[0], (float)G.res[1], (float)G.res[2]), G.cell_size.x));
+        outgrown = G.moving.bounds.max.y > top.y - 0.5f || G.moving.bounds.min.x < G.origin.x || G.moving.bounds.min.z < G.origin.z ||
+                   G.moving.bounds.max.x > top.x || G.moving.bounds.max.z > top.z;
+    }
+    if (g->gi_grid_resolution != G.grid_setting || outgrown) {
         G.grid_setting = g->gi_grid_resolution;
         setup_grid(g->gi_grid_resolution, !gpu);
         compute_vis();
         G.version++;
+        G.scene_version++;   /* the GPU re-uploads and resizes too */
     }
-    lx_scene_update_transforms(s);
     gather_emitters(s);
-    update_moving(s);
     G.light_hash = (G.light_hash ^ G.moving_hash) * 1099511628211ull;   /* something moved: GI refreshes */
     {   /* graphics settings changes (bounces, intensity...) count as a lighting change too */
         const uint8_t *gb = (const uint8_t *)g;

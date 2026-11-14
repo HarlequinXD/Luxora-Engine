@@ -355,8 +355,15 @@ void main() {
     vec3 irradiance;
     float ambient = u.sky_zenith.w;
     GiSH gi_sh = GiSH(vec4(0.0), vec4(0.0), vec4(0.0));
-    if (u.gi_origin.w > 0.5) { gi_sh = gi_gather(v_world, ng); irradiance = gi_eval(gi_sh, n); }
-    else irradiance = mix(u.ground_color.rgb, u.sky_zenith.rgb, n.y * 0.5 + 0.5) * ambient * PI;
+    vec3 sky_ambient = mix(u.ground_color.rgb, u.sky_zenith.rgb, n.y * 0.5 + 0.5) * ambient * PI;
+    float gi_cover = 0.0;   // how far inside the GI grid this point is: outside it there's no GI, so plain sky ambient
+    if (u.gi_origin.w > 0.5) {
+        vec3 g = (v_world - u.gi_origin.xyz) / u.gi_cell.xyz;
+        vec3 edge = min(g, u.gi_res.xyz - g);
+        gi_cover = clamp(min(min(edge.x, edge.y), edge.z) - 0.5, 0.0, 1.0);
+    }
+    if (gi_cover > 0.0) { gi_sh = gi_gather(v_world, ng); irradiance = mix(sky_ambient, gi_eval(gi_sh, n), gi_cover); }
+    else irradiance = sky_ambient;
     float ndv = max(dot(n, v), 1e-4);
     vec3 f0 = mix(vec3(0.04), albedo, metallic);
     vec3 spec_env = env_brdf_approx(f0, rough, ndv);
@@ -370,12 +377,13 @@ void main() {
     // open sky would deliver from there, so only reflections that really look into geometry darken.
     // Placed probes captured the real surroundings, so they need it much less.
     float occl = 1.0;
-    if (u.gi_origin.w > 0.5) {
+    if (gi_cover > 0.0) {
         vec3 gi_r = gi_eval(gi_sh, r);
         vec3 open_sky = mix(u.sky_horizon.rgb, u.sky_zenith.rgb, 0.5) * ambient * PI * clamp(0.5 + 0.5 * r.y, 0.05, 1.0);
         occl = clamp(dot(gi_r, vec3(0.333)) / max(dot(open_sky, vec3(0.333)), 1e-3), 0.0, 1.0);
         occl = mix(0.35, 1.0, sqrt(occl)); /* GI is low-frequency: never fully black out a reflection */
         occl = mix(occl, 1.0, local_w * 0.7);
+        occl = mix(1.0, occl, gi_cover);
     }
     // specular occlusion from the AO map (Lagarde & de Rousiers)
     float spec_ao = clamp(pow(ndv + ao, exp2(-16.0 * rough - 1.0)) - 1.0 + ao, 0.0, 1.0);
