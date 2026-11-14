@@ -6,6 +6,7 @@ layout(std430, set = 0, binding = 4) buffer Deposits { int dep[]; };
 layout(std430, set = 0, binding = 5) buffer Accum { float accum[]; };
 layout(std430, set = 0, binding = 6) buffer TmpA { float tmp_a[]; };
 layout(std430, set = 0, binding = 7) buffer TmpB { float tmp_b[]; };
+layout(std430, set = 0, binding = 11) readonly buffer Vis { float vis[]; };   // per cell: distance to the first surface (cells)
 layout(set = 0, binding = 8, rgba16f) uniform writeonly image3D out_r;
 layout(set = 0, binding = 9, rgba16f) uniform writeonly image3D out_g;
 layout(set = 0, binding = 10, rgba16f) uniform writeonly image3D out_b;
@@ -34,7 +35,10 @@ void main() {
     int axis = mode - 1;
     int stride = axis == 0 ? 1 : axis == 1 ? r.x : r.x * r.y;
     int p = c[axis], len = r[axis];
-    int lo = p > 0 ? i - stride : i, hi = p < len - 1 ? i + stride : i;
+    // a neighbour behind a wall counts as this cell again (as at the grid's edge): no blurring through walls
+    bool open_lo = p > 0 && vis[i * 6 + axis * 2 + 1] >= 0.98 && vis[(i - stride) * 6 + axis * 2] >= 0.98;
+    bool open_hi = p < len - 1 && vis[i * 6 + axis * 2] >= 0.98 && vis[(i + stride) * 6 + axis * 2 + 1] >= 0.98;
+    int lo = open_lo ? i - stride : i, hi = open_hi ? i + stride : i;
     float o[12];
     for (int k = 0; k < 12; k++) o[k] = 0.25 * src(mode, lo * 12 + k) + 0.5 * src(mode, i * 12 + k) + 0.25 * src(mode, hi * 12 + k);
     if (mode == 1) for (int k = 0; k < 12; k++) tmp_a[i * 12 + k] = o[k];

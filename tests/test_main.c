@@ -510,6 +510,53 @@ static void test_gi_convergence(void) {
     lx_scene_destroy(s);
 }
 
+/* two rooms side by side, a wall much thinner than a GI cell between them, a lamp in only one:
+ * the dark room must stay dark (before the fix, the cells straddling the wall carried light through it) */
+static float leak_ratio(bool walls, float *lit_out) {
+    lx_gi_set_walls(walls);
+    LxScene *s = lx_scene_create("Rooms");
+    LxEntity floor = lx_spawn_primitive(s, LX_PRIM_CUBE, "Floor", lx_v3(0, -0.5f, 0));
+    lx_entity_set_scale(s, floor, lx_v3(16, 1, 8));
+    LxEntity roof = lx_spawn_primitive(s, LX_PRIM_CUBE, "Ceiling", lx_v3(0, 3.5f, 0));
+    lx_entity_set_scale(s, roof, lx_v3(16, 1, 8));
+    static const float walls_xz[4][4] = {{-8.05f, 0, 0.1f, 8}, {8.05f, 0, 0.1f, 8}, {0, -4.05f, 16, 0.1f}, {0, 4.05f, 16, 0.1f}};
+    for (int i = 0; i < 4; i++) {
+        LxEntity w = lx_spawn_primitive(s, LX_PRIM_CUBE, "Outer Wall", lx_v3(walls_xz[i][0], 1.5f, walls_xz[i][1]));
+        lx_entity_set_scale(s, w, lx_v3(walls_xz[i][2], 3, walls_xz[i][3]));
+    }
+    LxEntity mid = lx_spawn_primitive(s, LX_PRIM_CUBE, "Thin Wall", lx_v3(0.13f, 1.5f, 0));   /* off the cell grid on purpose */
+    lx_entity_set_scale(s, mid, lx_v3(0.08f, 3, 8));
+    LxEntity lamp = lx_entity_create(s, "Lamp");
+    lx_entity_set_position(s, lamp, lx_v3(-4, 2, 0));
+    lx_add_light(s, lamp, LX_LIGHT_POINT)->intensity = 200;
+    s->env.ambient_intensity = 0;
+    LxGraphicsSettings g = lx_graphics_defaults(1);
+    g.gi_photons_per_frame = 40000;
+    for (int f = 0; f < 40; f++) lx_gi_update(s, &g);
+    /* floor points just either side of the thin wall, and the middle of each room */
+    float lit = 0, dark = 0;
+    for (int k = 0; k < 5; k++) {
+        float z = -2.0f + k;
+        LxVec3 a = lx_gi_irradiance(lx_v3(-0.25f, 0.01f, z), lx_v3(0, 1, 0), walls), b = lx_gi_irradiance(lx_v3(0.45f, 0.01f, z), lx_v3(0, 1, 0), walls);
+        lit += a.x + a.y + a.z;
+        dark += b.x + b.y + b.z;
+    }
+    lx_gi_shutdown();
+    lx_scene_destroy(s);
+    lx_gi_set_walls(true);
+    if (lit_out) *lit_out = lit;
+    return lit > 0 ? dark / lit : 1.0f;
+}
+static void test_gi_leaks(void) {
+    printf("photon gi light leaks\n");
+    float lit_old, lit_new;
+    float before = leak_ratio(false, &lit_old), after = leak_ratio(true, &lit_new);
+    printf("  dark room / lit room next to a thin wall: %.3f before, %.3f with walls\n", before, after);
+    CHECK(lit_new > 0, "the lit side has bounce light (%g)", lit_new);
+    CHECK(after < 0.05f, "no light leaks through a thin wall (%.3f, was %.3f)", after, before);
+    CHECK(lit_new > lit_old * 0.6f, "the lit side keeps its light (%g vs %g)", lit_new, lit_old);
+}
+
 static void test_acoustics(void) {
     printf("acoustics\n");
     LxAudioSettings *as = lx_audio_settings();
@@ -1454,6 +1501,7 @@ int main(void) {
     test_bvh();
     test_gi();
     test_gi_convergence();
+    test_gi_leaks();
     test_acoustics();
     test_crowd();
     test_project();

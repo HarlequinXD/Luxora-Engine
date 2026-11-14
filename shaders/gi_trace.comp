@@ -11,6 +11,7 @@ layout(std430, set = 0, binding = 1) readonly buffer Tris { Tri tris[]; };
 layout(std430, set = 0, binding = 2) readonly buffer Mats { vec4 albedo[]; };
 layout(std430, set = 0, binding = 3) readonly buffer Emitters { vec4 em[]; };   // 3 per emitter
 layout(std430, set = 0, binding = 4) buffer Deposits { int dep[]; };
+layout(std430, set = 0, binding = 11) readonly buffer Vis { float vis[]; };   // per cell: distance to the first surface +x -x +y -y +z -z (cells)
 
 layout(push_constant) uniform PC {
     vec4 origin_cell;    // grid origin, cell size
@@ -93,19 +94,54 @@ int trace(vec3 o, vec3 d, out float best) {
     return hit;
 }
 
+// can cell c see grid point g? (its walls along each axis, as the CPU's vis_sees)
+bool sees(ivec3 c, vec3 g) {
+    int i = ((c.z * pc.res_photons.y + c.y) * pc.res_photons.x + c.x) * 6;
+    vec3 d = g - (vec3(c) + 0.5);
+    for (int a = 0; a < 3; a++) {
+        float wall = d[a] >= 0.0 ? vis[i + a * 2] : vis[i + a * 2 + 1];
+        if (wall < abs(d[a]) - 0.02) return false;
+    }
+    return true;
+}
+
+// The deposit goes to one of the 8 cells around it, picked in proportion to its trilinear weight among the
+// cells on the photon's side of any wall (the CPU spreads it over them; same result on average).
 void deposit(vec3 pos, vec3 dir, vec3 flux) {
-    ivec3 c = ivec3(floor((pos - pc.origin_cell.xyz) / pc.origin_cell.w));
-    if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, pc.res_photons.xyz))) return;
-    int base = ((c.z * pc.res_photons.y + c.y) * pc.res_photons.x + c.x) * 12;
-    vec3 w = -dir;   // light arrives from where the photon came
-    vec4 sh = vec4(0.282095, 0.488603 * w.y, 0.488603 * w.z, 0.488603 * w.x);
-    vec3 f = flux * pc.scales.y;
+    ivec3 res = pc.res_photons.xyz;
+    vec3 g = (pos - pc.origin_cell.xyz) / pc.origin_cell.w;
+    vec3 t = g - 0.5;
+    ivec3 base = ivec3(floor(t));
+    vec3 f = t - vec3(base);
+    float w[8], plain[8];
+    float sum = 0.0, psum = 0.0;
+    for (int k = 0; k < 8; k++) {
+        ivec3 o = ivec3(k & 1, (k >> 1) & 1, k >> 2);
+        ivec3 c = base + o;
+        vec3 ww = mix(1.0 - f, f, vec3(o));
+        bool inside = all(greaterThanEqual(c, ivec3(0))) && all(lessThan(c, res));
+        plain[k] = inside ? ww.x * ww.y * ww.z : 0.0;
+        w[k] = (inside && sees(c, g)) ? plain[k] : 0.0;
+        sum += w[k];
+        psum += plain[k];
+    }
+    if (sum < 1e-6) { for (int k = 0; k < 8; k++) w[k] = plain[k]; sum = psum; }
+    if (sum < 1e-6) return;
+    float pick = rnd() * sum;
+    int chosen = 7;
+    for (int k = 0; k < 8; k++) { if (pick < w[k]) { chosen = k; break; } pick -= w[k]; }
+    if (w[chosen] <= 0.0) return;
+    ivec3 c = base + ivec3(chosen & 1, (chosen >> 1) & 1, chosen >> 2);
+    int cbase = ((c.z * res.y + c.y) * res.x + c.x) * 12;
+    vec3 wd = -dir;   // light arrives from where the photon came
+    vec4 sh = vec4(0.282095, 0.488603 * wd.y, 0.488603 * wd.z, 0.488603 * wd.x);
+    vec3 fl = flux * pc.scales.y;
     // random rounding: unbiased, so even deposits smaller than one unit add up to the right total
     for (int k = 0; k < 4; k++) {
-        int ir = int(floor(f.r * sh[k] + rnd())), ig = int(floor(f.g * sh[k] + rnd())), ib = int(floor(f.b * sh[k] + rnd()));
-        if (ir != 0) atomicAdd(dep[base + k], ir);
-        if (ig != 0) atomicAdd(dep[base + 4 + k], ig);
-        if (ib != 0) atomicAdd(dep[base + 8 + k], ib);
+        int ir = int(floor(fl.r * sh[k] + rnd())), ig = int(floor(fl.g * sh[k] + rnd())), ib = int(floor(fl.b * sh[k] + rnd()));
+        if (ir != 0) atomicAdd(dep[cbase + k], ir);
+        if (ig != 0) atomicAdd(dep[cbase + 4 + k], ig);
+        if (ib != 0) atomicAdd(dep[cbase + 8 + k], ib);
     }
 }
 

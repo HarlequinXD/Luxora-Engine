@@ -1003,6 +1003,61 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
 };
 
 /* the template steps start once everything above is finished (the 4K thumbnails can take a while) */
+/* GI doesn't leak through walls on the real renderer: two rooms in a new scene, a wall much thinner than a GI cell
+ * between them, a shadowed lamp in one, no sun or sky. Next to the wall the dark room's floor must stay black. */
+static void s_leak_setup(void) {
+    ED.dirty = false;
+    ed_new_scene("Leak Test");
+    LxScene *s = ED.scene;
+    for (int i = lx_scene_entity_count(s) - 1; i >= 0; i--) {   /* only the camera stays */
+        LxEntity e = lx_scene_entity_at(s, i);
+        if (e && !lx_get_camera(s, e)) lx_entity_destroy(s, e);
+    }
+    s->env.ambient_intensity = 0;
+    LxEntity floor = lx_spawn_primitive(s, LX_PRIM_CUBE, "Floor", lx_v3(0, -0.5f, 0));
+    lx_entity_set_scale(s, floor, lx_v3(16, 1, 8));
+    static const float walls_xz[4][4] = {{-8.05f, 0, 0.1f, 8}, {8.05f, 0, 0.1f, 8}, {0, -4.05f, 16, 0.1f}, {0, 4.05f, 16, 0.1f}};
+    for (int i = 0; i < 4; i++) {
+        LxEntity w = lx_spawn_primitive(s, LX_PRIM_CUBE, "Outer Wall", lx_v3(walls_xz[i][0], 1.5f, walls_xz[i][1]));
+        lx_entity_set_scale(s, w, lx_v3(walls_xz[i][2], 3, walls_xz[i][3]));
+    }
+    LxEntity mid = lx_spawn_primitive(s, LX_PRIM_CUBE, "Thin Wall", lx_v3(0.13f, 1.5f, 0));
+    lx_entity_set_scale(s, mid, lx_v3(0.08f, 3, 8));
+    LxEntity lamp = lx_entity_create(s, "Lamp");
+    lx_entity_set_position(s, lamp, lx_v3(-4, 2, 0));
+    LxLight *l = lx_add_light(s, lamp, LX_LIGHT_POINT);
+    l->intensity = 60;
+    l->range = 30;
+    l->cast_shadows = true;
+    ED.game_view = false;
+    ED.selected = 0;
+    ED.cam_pos = lx_v3(0, 16, 0.01f);
+    ED.cam_yaw = 0;
+    ED.cam_pitch = -89.5f;
+}
+static void s_leak_shot(void) { sg_shot("gi_leak.ppm"); }
+static void s_leak_check(void) {
+    const char *shot = getenv("LUXORA_SMOKE_SHOT");
+    if (!shot || !shot[0]) { LX_INFO("[smoke] no screenshots on this build - GI leak picture skipped"); return; }
+    int w, h;
+    unsigned char *px = ls_ppm("gi_leak.ppm", &w, &h);
+    SMOKE_CHECK(px != NULL, "GI leak picture taken");
+    if (!px) return;
+    int ww, wh;
+    lx_window_size(&ww, &wh);
+    float k = ww > 0 ? (float)w / (float)ww : 1.0f;
+    float lit = 0, dark = 0;
+    for (int i = 0; i < 5; i++) {
+        LxVec2 a, b;
+        float z = -2.0f + i;
+        if (ed_viewport_to_screen(lx_v3(-0.6f, 0, z), &a)) lit += ls_lum(px, w, h, a.x * k, a.y * k);
+        if (ed_viewport_to_screen(lx_v3(0.7f, 0, z), &b)) dark += ls_lum(px, w, h, b.x * k, b.y * k);
+    }
+    lit /= 5; dark /= 5;
+    SMOKE_CHECK(lit > 20 && dark < lx_maxf(4.0f, lit * 0.04f), "no light through a thin wall on the GPU (lit side %.0f, other side %.0f)", lit, dark);
+    lx_free(px);
+}
+
 static const struct { int frame; SmokeFn fn; const char *what; } TPL_STEPS[] = {
     {0, s_tpl_close, "close the project"},
     {4, s_tpl_dialog, "New Project"},
@@ -1024,6 +1079,9 @@ static const struct { int frame; SmokeFn fn; const char *what; } TPL_STEPS[] = {
     {196, s_ls_shot_on, "picture with its shadows on"},
     {200, s_ls_check, "the floor behind each wall is in shadow"},
     {290, s_gi_compare, "GPU photon GI matches the CPU tracer"},
+    {292, s_leak_setup, "two rooms, a thin wall, a lamp in one"},
+    {352, s_leak_shot, "picture of the two rooms"},
+    {356, s_leak_check, "the dark room stays dark"},
 };
 static int g_tpl_base = -1;
 
@@ -1044,5 +1102,5 @@ bool ed_smoke_step(int frame) {
             LX_INFO("[smoke] %s", TPL_STEPS[i].what);
             TPL_STEPS[i].fn();
         }
-    return frame - g_tpl_base < 292;
+    return frame - g_tpl_base < 358;
 }

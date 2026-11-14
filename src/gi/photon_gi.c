@@ -37,6 +37,8 @@ static struct {
     float frame_count;
     double settled_photons;   /* photons traced since the lighting last changed */
     bool gpu;                 /* the renderer traces (lx_gi_gpu_frame); grid arrays live on the GPU */
+    float *vis;               /* per cell: distance to the first surface along +x -x +y -y +z -z, in cells (max VIS_MAX) */
+    uint32_t vis_version;
     uint32_t scene_version;   /* bumps when the BVH is rebuilt */
     Emitter emitters[64];
     int emitter_count;
@@ -55,8 +57,75 @@ static struct {
 
 void lx_gi_init(void) { memset(&G, 0, sizeof G); }
 
+/* ---- walls between cells: what stops light leaking through them ----
+ * Each cell looks a short way along the six axes for the first surface. A cell then only lends its light
+ * to points it can see (shading, deposits) and only blurs with neighbours it can see, so a wall thinner than a
+ * cell no longer passes light from one room into the next, and cells buried inside solid geometry drop out. */
+#define VIS_MAX 1.5f
+static void vis_job(void *user, int begin, int end, int thread) {
+    LX_UNUSED(user);
+    LX_UNUSED(thread);
+    static const float dirs[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    float cell = G.cell_size.x;
+    for (int i = begin; i < end; i++) {
+        int x = i % G.res[0], y = (i / G.res[0]) % G.res[1], z = i / (G.res[0] * G.res[1]);
+        LxVec3 o = lx_v3(G.origin.x + (x + 0.5f) * cell, G.origin.y + (y + 0.5f) * cell, G.origin.z + (z + 0.5f) * cell);
+        for (int k = 0; k < 6; k++) {
+            LxHit hit;
+            LxRay r = {o, lx_v3(dirs[k][0], dirs[k][1], dirs[k][2])};
+            G.vis[i * 6 + k] = lx_bvh_intersect(&G.bvh, r, VIS_MAX * cell, &hit) ? hit.t / cell : VIS_MAX;
+        }
+    }
+}
+static bool g_walls = true;
+void lx_gi_set_walls(bool on) { g_walls = on; G.built_scene = NULL; }   /* tests: compare with the leaky lookup */
+static void compute_vis(void) {
+    lx_free(G.vis);
+    G.vis = NULL;
+    G.vis_version++;
+    if (!g_walls) return;
+    G.vis = lx_alloc((size_t)G.cells * 6 * sizeof(float));
+    lx_parallel_for(G.cells, 256, vis_job, NULL);
+}
+/* can cell c (grid coords) see point g (continuous grid coords, cell centres at +0.5)? per-axis test against its walls */
+static bool vis_sees(int cx, int cy, int cz, LxVec3 g) {
+    const float *v = G.vis + ((size_t)(cz * G.res[1] + cy) * G.res[0] + cx) * 6;
+    float d[3] = {g.x - (cx + 0.5f), g.y - (cy + 0.5f), g.z - (cz + 0.5f)};
+    for (int a = 0; a < 3; a++) {
+        float wall = d[a] >= 0 ? v[a * 2] : v[a * 2 + 1];
+        if (wall < fabsf(d[a]) - 0.02f) return false;
+    }
+    return true;
+}
+/* the trilinear corner weights of a point, with the corners that can't see it removed (renormalized). Returns
+ * false when no corner sees it (the caller falls back to plain trilinear). */
+static bool vis_weights(LxVec3 g, int base[3], float w[8]) {
+    LxVec3 t = lx_v3(g.x - 0.5f, g.y - 0.5f, g.z - 0.5f);
+    base[0] = (int)floorf(t.x); base[1] = (int)floorf(t.y); base[2] = (int)floorf(t.z);
+    float f[3] = {t.x - base[0], t.y - base[1], t.z - base[2]};
+    float sum = 0, plain[8];
+    for (int k = 0; k < 8; k++) {
+        int dx = k & 1, dy = (k >> 1) & 1, dz = k >> 2;
+        int x = base[0] + dx, y = base[1] + dy, z = base[2] + dz;
+        float wt = (dx ? f[0] : 1 - f[0]) * (dy ? f[1] : 1 - f[1]) * (dz ? f[2] : 1 - f[2]);
+        bool in = x >= 0 && y >= 0 && z >= 0 && x < G.res[0] && y < G.res[1] && z < G.res[2];
+        plain[k] = in ? wt : 0;
+        w[k] = (in && (!G.vis || vis_sees(x, y, z, g))) ? wt : 0;
+        sum += w[k];
+    }
+    if (sum < 1e-6f) { memcpy(w, plain, sizeof plain); return false; }
+    for (int k = 0; k < 8; k++) w[k] /= sum;
+    return true;
+}
+/* blur neighbours: no wall between the two centres */
+static bool vis_open(int i, int axis, int dir) {
+    if (!G.vis) return true;
+    return G.vis[(size_t)i * 6 + axis * 2 + (dir > 0 ? 0 : 1)] >= 0.98f;
+}
+
 void lx_gi_shutdown(void) {
     lx_bvh_free(&G.bvh);
+    lx_free(G.vis);
     lx_free(G.accum);
     lx_free(G.frame);
     lx_free(G.filtered);
@@ -265,35 +334,25 @@ static void splat_job(void *user, int begin, int end, int thread) {
         const Deposit *deps = G.thread_deps[t];
         int n = G.thread_dep_count[t];
         for (int i = 0; i < n; i++) {
-            LxVec3 g = lx_v3((deps[i].pos.x - G.origin.x) / G.cell_size.x - 0.5f, (deps[i].pos.y - G.origin.y) / G.cell_size.y - 0.5f,
-                             (deps[i].pos.z - G.origin.z) / G.cell_size.z - 0.5f);
-            int z0 = (int)floorf(g.z);
+            LxVec3 g = lx_v3((deps[i].pos.x - G.origin.x) / G.cell_size.x, (deps[i].pos.y - G.origin.y) / G.cell_size.y,
+                             (deps[i].pos.z - G.origin.z) / G.cell_size.z);
+            int z0 = (int)floorf(g.z - 0.5f);
             if (z0 + 1 < begin || z0 >= end) continue;
-            int x0 = (int)floorf(g.x), y0 = (int)floorf(g.y);
-            float fx = g.x - (float)x0, fy = g.y - (float)y0, fz = g.z - (float)z0;
+            int base[3];
+            float w[8];
+            vis_weights(g, base, w);   /* only the cells on the photon's side of any wall */
             /* incoming radiance arrives from -dir */
-            LxVec3 w = lx_neg3(deps[i].dir);
-            float sh[4] = {SH_C0, SH_C1 * w.y, SH_C1 * w.z, SH_C1 * w.x};
+            LxVec3 wd = lx_neg3(deps[i].dir);
+            float sh[4] = {SH_C0, SH_C1 * wd.y, SH_C1 * wd.z, SH_C1 * wd.x};
             LxVec3 f = lx_scale3(deps[i].flux, inv_area);
-            for (int dz = 0; dz < 2; dz++) {
-                int z = z0 + dz;
-                if (z < begin || z >= end || z < 0 || z >= G.res[2]) continue;
-                float wz = dz ? fz : 1 - fz;
-                for (int dy = 0; dy < 2; dy++) {
-                    int y = y0 + dy;
-                    if (y < 0 || y >= G.res[1]) continue;
-                    float wy = dy ? fy : 1 - fy;
-                    for (int dx = 0; dx < 2; dx++) {
-                        int x = x0 + dx;
-                        if (x < 0 || x >= G.res[0]) continue;
-                        float wgt = wz * wy * (dx ? fx : 1 - fx);
-                        float *c = G.frame + ((size_t)((z * G.res[1] + y) * G.res[0] + x)) * SH_FLOATS;
-                        for (int k = 0; k < 4; k++) {
-                            c[k] += f.x * sh[k] * wgt;
-                            c[4 + k] += f.y * sh[k] * wgt;
-                            c[8 + k] += f.z * sh[k] * wgt;
-                        }
-                    }
+            for (int k = 0; k < 8; k++) {
+                int x = base[0] + (k & 1), y = base[1] + ((k >> 1) & 1), z = base[2] + (k >> 2);
+                if (w[k] <= 0 || z < begin || z >= end || x < 0 || y < 0 || z < 0 || x >= G.res[0] || y >= G.res[1] || z >= G.res[2]) continue;
+                float *c = G.frame + ((size_t)((z * G.res[1] + y) * G.res[0] + x)) * SH_FLOATS;
+                for (int q = 0; q < 4; q++) {
+                    c[q] += f.x * sh[q] * w[k];
+                    c[4 + q] += f.y * sh[q] * w[k];
+                    c[8 + q] += f.z * sh[q] * w[k];
                 }
             }
         }
@@ -312,8 +371,9 @@ static void blur_job(void *user, int begin, int end, int thread) {
         int x = i % rx, y = (i / rx) % ry, z = i / (rx * ry);
         int p = b->axis == 0 ? x : b->axis == 1 ? y : z;
         const float *c = b->src + (size_t)i * SH_FLOATS;
-        const float *lo = p > 0 ? c - (size_t)stride * SH_FLOATS : c;
-        const float *hi = p < len - 1 ? c + (size_t)stride * SH_FLOATS : c;
+        /* a neighbour behind a wall counts as this cell again (as at the grid's edge) */
+        const float *lo = p > 0 && vis_open(i, b->axis, -1) && vis_open(i - stride, b->axis, 1) ? c - (size_t)stride * SH_FLOATS : c;
+        const float *hi = p < len - 1 && vis_open(i, b->axis, 1) && vis_open(i + stride, b->axis, -1) ? c + (size_t)stride * SH_FLOATS : c;
         float *o = b->dst + (size_t)i * SH_FLOATS;
         for (int k = 0; k < SH_FLOATS; k++) o[k] = 0.25f * lo[k] + 0.5f * c[k] + 0.25f * hi[k];
     }
@@ -336,7 +396,7 @@ static int prepare(LxScene *s, const LxGraphicsSettings *g, bool gpu) {
         lx_bvh_build_from_scene(&G.bvh, s);
         G.built_scene = s;
         G.built_version = s->static_version;
-        if (G.bvh.tri_count) setup_grid(g->gi_grid_resolution, !gpu);
+        if (G.bvh.tri_count) { setup_grid(g->gi_grid_resolution, !gpu); compute_vis(); }
         G.grid_setting = g->gi_grid_resolution;
         G.version++;
         G.scene_version++;
@@ -345,6 +405,7 @@ static int prepare(LxScene *s, const LxGraphicsSettings *g, bool gpu) {
     if (g->gi_grid_resolution != G.grid_setting) {
         G.grid_setting = g->gi_grid_resolution;
         setup_grid(g->gi_grid_resolution, !gpu);
+        compute_vis();
         G.version++;
     }
     lx_scene_update_transforms(s);
@@ -360,6 +421,8 @@ static int prepare(LxScene *s, const LxGraphicsSettings *g, bool gpu) {
     G.volume.res[0] = G.res[0];
     G.volume.res[1] = G.res[1];
     G.volume.res[2] = G.res[2];
+    G.volume.vis = G.vis;
+    G.volume.vis_version = G.vis_version;
     /* Converged: nothing has changed since enough photons were traced, so tracing more only burns every
      * core for no visible difference. Stop until a light, the sky or the geometry changes. */
     static const double SETTLED = 24e6;
@@ -512,4 +575,32 @@ float *lx_gi_cpu_reference(LxScene *s, const LxGraphicsSettings *g, int frames, 
     lx_gi_shutdown();
     G = saved;
     return out;
+}
+
+/* What the PBR shader does with the GI volume, on the CPU (tests): irradiance at a surface point with normal n.
+ * walls = false gives the old plain trilinear lookup, for comparison. */
+LxVec3 lx_gi_irradiance(LxVec3 p, LxVec3 n, bool walls) {
+    const float *sh = G.filtered;
+    if (!sh) return lx_v3(0, 0, 0);
+    LxVec3 q = lx_madd3(p, n, G.cell_size.x * 0.25f);
+    LxVec3 g = lx_v3((q.x - G.origin.x) / G.cell_size.x, (q.y - G.origin.y) / G.cell_size.y, (q.z - G.origin.z) / G.cell_size.z);
+    int base[3];
+    float w[8];
+    float *keep = G.vis;
+    if (!walls) G.vis = NULL;
+    vis_weights(g, base, w);
+    G.vis = keep;
+    float c[12] = {0};
+    for (int k = 0; k < 8; k++) {
+        int x = base[0] + (k & 1), y = base[1] + ((k >> 1) & 1), z = base[2] + (k >> 2);
+        if (w[k] <= 0) continue;
+        const float *src = sh + ((size_t)((z * G.res[1] + y) * G.res[0] + x)) * SH_FLOATS;
+        for (int j = 0; j < 12; j++) c[j] += src[j] * w[k];
+    }
+    float e[3];
+    for (int ch = 0; ch < 3; ch++) {
+        const float *k = c + ch * 4;
+        e[ch] = lx_maxf(0, LX_PI * 0.282095f * k[0] + (2.0f * LX_PI / 3.0f) * 0.488603f * (k[1] * n.y + k[2] * n.z + k[3] * n.x));
+    }
+    return lx_v3(e[0], e[1], e[2]);
 }

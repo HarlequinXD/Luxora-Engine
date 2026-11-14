@@ -427,6 +427,8 @@ typedef struct LxGiVolume {
     int res[3];
     const float *sh;    /* res.x*res.y*res.z cells x 12 floats (L1 SH: 4 coeffs x RGB, channel-major) */
     uint32_t version;   /* bumps when data changes */
+    const float *vis;   /* per cell: distance to the first surface along +x -x +y -y +z -z, in cells (walls stop leaks) */
+    uint32_t vis_version;
     bool valid;
 } LxGiVolume;
 void lx_gi_init(void);
@@ -450,7 +452,9 @@ typedef struct LxGiGpuFrame {
 } LxGiGpuFrame;
 bool lx_gi_gpu_frame(LxScene *s, const LxGraphicsSettings *g, int photon_multiplier, LxGiGpuFrame *f);
 float *lx_gi_cpu_reference(LxScene *s, const LxGraphicsSettings *g, int frames, int res[3]);
-float *lx_renderer_gi_readback(int res[3]);   /* the GPU tracer's running average (NULL when GI runs on the CPU) */
+float *lx_renderer_gi_readback(int res[3]);
+LxVec3 lx_gi_irradiance(LxVec3 p, LxVec3 n, bool walls);
+void lx_gi_set_walls(bool on);   /* tests: false = the old leaky grid */   /* the shader's GI lookup on the CPU (tests) */   /* the GPU tracer's running average (NULL when GI runs on the CPU) */
 float lx_gi_last_ms(void);
 /* CPU access for tests: SH coefficients (12 floats) of a cell */
 const float *lx_gi_cell(int x, int y, int z);

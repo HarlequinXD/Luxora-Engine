@@ -123,12 +123,43 @@ float local_shadow(int i, vec3 world, vec3 ng) {
     return sum / 9.0;
 }
 
-vec3 gi_irradiance(vec3 world, vec3 n) {
-    vec3 g = (world + n * u.gi_cell.x * 0.5 - u.gi_origin.xyz) / (u.gi_cell.xyz * u.gi_res.xyz);
-    vec4 r = texture(u_gi_r, g), gg = texture(u_gi_g, g), b = texture(u_gi_b, g);
+/* The GI volume around a surface point: the 8 surrounding cells, trilinear, leaving out the cells that can't
+ * see the point (a wall in between, or buried inside solid geometry), so light doesn't leak through walls.
+ * Returns the blended L1 SH of the red, green and blue channels. Same rule as the CPU (lx_gi_irradiance). */
+struct GiSH { vec4 r, g, b; };
+GiSH gi_gather(vec3 world, vec3 ng) {
+    ivec3 res = ivec3(u.gi_res.xyz);
+    vec3 g = (world + ng * u.gi_cell.x * 0.25 - u.gi_origin.xyz) / u.gi_cell.xyz;
+    vec3 t = g - 0.5;
+    ivec3 base = ivec3(floor(t));
+    vec3 f = t - vec3(base);
+    GiSH vis_sum = GiSH(vec4(0.0), vec4(0.0), vec4(0.0)), plain_sum = GiSH(vec4(0.0), vec4(0.0), vec4(0.0));
+    float wv = 0.0, wp = 0.0;
+    for (int k = 0; k < 8; k++) {
+        ivec3 o = ivec3(k & 1, (k >> 1) & 1, k >> 2);
+        ivec3 c = base + o;
+        if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, res))) continue;
+        vec3 ww = mix(1.0 - f, f, vec3(o));
+        float w = ww.x * ww.y * ww.z;
+        vec4 cr = texelFetch(u_gi_r, c, 0), cg = texelFetch(u_gi_g, c, 0), cb = texelFetch(u_gi_b, c, 0);
+        plain_sum.r += cr * w; plain_sum.g += cg * w; plain_sum.b += cb * w;
+        wp += w;
+        vec4 va = texelFetch(u_gi_vis_a, c, 0) * 1.5;
+        vec2 vb = texelFetch(u_gi_vis_b, c, 0).xy * 1.5;
+        vec3 d = g - (vec3(c) + 0.5);
+        vec3 wall = vec3(d.x >= 0.0 ? va.x : va.y, d.y >= 0.0 ? va.z : va.w, d.z >= 0.0 ? vb.x : vb.y);
+        if (any(lessThan(wall, abs(d) - 0.02))) continue;
+        vis_sum.r += cr * w; vis_sum.g += cg * w; vis_sum.b += cb * w;
+        wv += w;
+    }
+    if (wv > 1e-6) return GiSH(vis_sum.r / wv, vis_sum.g / wv, vis_sum.b / wv);
+    if (wp > 1e-6) return GiSH(plain_sum.r / wp, plain_sum.g / wp, plain_sum.b / wp);
+    return GiSH(vec4(0.0), vec4(0.0), vec4(0.0));
+}
+vec3 gi_eval(GiSH sh, vec3 n) {
     // L1 SH irradiance (coeff order: L0, y, z, x) with clamped-cosine convolution
     vec4 basis = vec4(PI * 0.282095, (2.0 * PI / 3.0) * 0.488603 * vec3(n.y, n.z, n.x));
-    return max(vec3(dot(r, basis), dot(gg, basis), dot(b, basis)), vec3(0.0)) * u.fog_color.w;
+    return max(vec3(dot(sh.r, basis), dot(sh.g, basis), dot(sh.b, basis)), vec3(0.0)) * u.fog_color.w;
 }
 
 vec3 env_brdf_approx(vec3 f0, float rough, float ndv) {
@@ -266,7 +297,8 @@ void main() {
     // indirect: virtual-photon GI volume (or hemisphere ambient when GI is off)
     vec3 irradiance;
     float ambient = u.sky_zenith.w;
-    if (u.gi_origin.w > 0.5) irradiance = gi_irradiance(v_world, n);
+    GiSH gi_sh = GiSH(vec4(0.0), vec4(0.0), vec4(0.0));
+    if (u.gi_origin.w > 0.5) { gi_sh = gi_gather(v_world, ng); irradiance = gi_eval(gi_sh, n); }
     else irradiance = mix(u.ground_color.rgb, u.sky_zenith.rgb, n.y * 0.5 + 0.5) * ambient * PI;
     float ndv = max(dot(n, v), 1e-4);
     vec3 f0 = mix(vec3(0.04), albedo, metallic);
@@ -282,7 +314,7 @@ void main() {
     // Placed probes captured the real surroundings, so they need it much less.
     float occl = 1.0;
     if (u.gi_origin.w > 0.5) {
-        vec3 gi_r = gi_irradiance(v_world, r);
+        vec3 gi_r = gi_eval(gi_sh, r);
         vec3 open_sky = mix(u.sky_horizon.rgb, u.sky_zenith.rgb, 0.5) * ambient * PI * clamp(0.5 + 0.5 * r.y, 0.05, 1.0);
         occl = clamp(dot(gi_r, vec3(0.333)) / max(dot(open_sky, vec3(0.333)), 1e-3), 0.0, 1.0);
         occl = mix(0.35, 1.0, sqrt(occl)); /* GI is low-frequency: never fully black out a reflection */

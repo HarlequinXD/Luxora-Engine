@@ -40,6 +40,8 @@ layout(set = 0, binding = 2) uniform sampler3D u_gi_r;
 layout(set = 0, binding = 3) uniform sampler3D u_gi_g;
 layout(set = 0, binding = 4) uniform sampler3D u_gi_b;
 layout(set = 0, binding = 5) uniform sampler2DShadow u_local_shadow;   // point / spot shadow atlas, 8 x 8 tiles
+layout(set = 0, binding = 6) uniform sampler3D u_gi_vis_a;   // GI cell walls: distance / 1.5 cells along +x -x +y -y
+layout(set = 0, binding = 7) uniform sampler3D u_gi_vis_b;   //   ... and +z -z
 
 // The engine builds OpenGL-style matrices; convert clip space for Vulkan (y down, z 0..1).
 vec4 lx_to_vulkan(vec4 p) {
