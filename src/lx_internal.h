@@ -322,6 +322,7 @@ void lx_gameplay_end_frame(LxScene *s);                                  /* defe
 void lx_gameplay_entity_destroyed(LxScene *s, LxEntity e);
 void lx_gameplay_free(LxScene *s);
 void lx_anim_free_entity(LxEntityData *d);                 /* src/model/anim.c: after a component is removed */
+void lx_scene_animation_begin(LxScene *s);
 void lx_anim_release(LxEntityData *d);                     /* the object is destroyed */
 LxMesh *lx_model_mesh_ref(const char *ref);                 /* "Models/x.fbx#mesh3" (src/model/model.c) */
 void lx_models_clear(void);

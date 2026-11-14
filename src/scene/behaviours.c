@@ -208,6 +208,7 @@ static void late_update(LxScene *s, float dt) {
 
 void lx_scene_simulate(LxScene *s, float real_dt) {
     float dt = lx_gameplay_scale_dt(real_dt);   /* time scale: pause, slow motion */
+    if (!s->simulating) lx_scene_animation_begin(s);
     s->simulating = true;
     s->last_dt = dt;
     s->in_update = true;
@@ -278,6 +279,7 @@ void lx_scene_stop_simulation(LxScene *s) {
     }
     lx_physics_world_free(s);
     lx_gameplay_free(s);
+    lx_scene_animation_begin(s);
     lx_time_set_scale(1.0f);
     s->simulating = false;
 }

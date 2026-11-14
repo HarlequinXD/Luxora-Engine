@@ -165,6 +165,7 @@ int main(int argc, char **argv) {
             break;
         }
         double now = lx_time();
+        if (smoke && now - last > 0.15) LX_WARN("[smoke] slow frame: %.0f ms", (now - last) * 1000);
         ED.dt = (float)(now - last);
         if (ED.dt > 0.1f) ED.dt = 0.1f;
         last = now;

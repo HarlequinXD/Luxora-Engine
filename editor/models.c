@@ -12,13 +12,16 @@
 LxEntity ed_model_place(const char *ref, LxVec3 pos, LxEntity parent) {
     if (!ED.scene) return 0;
     if (ED.play != ED_EDIT) { ui_notify(ED.ui, "Stop play mode to add objects"); return 0; }
+    double t0 = lx_time();
     LxEntity e = lx_model_instantiate(ED.scene, ref, parent ? lx_v3(0, 0, 0) : pos, parent);
+    double t1 = lx_time();
     if (!e) { ui_notify(ED.ui, "Could not import %s - see the Console", ref); return 0; }
     lx_scene_mark_static_dirty(ED.scene);
     ed_select(e);
     ED.hierarchy_hash = 0;
     ed_mark_changed();
     ed_commit();
+    LX_INFO("Placed %s: import+instantiate %.0f ms, editor %.0f ms", ref, (t1 - t0) * 1000, (lx_time() - t1) * 1000);
     return e;
 }
 

@@ -87,7 +87,8 @@ static bool bind_clip(Binding *b, LxModel *target, const char *clip_ref) {
 static void sample(const ModelClip *c, int t, float time, bool loop, LxVec3 *p, LxQuat *q, LxVec3 *s) {
     float f = time * c->fps;
     int last = c->frames - 1;
-    if (loop && c->length > 0) {
+    if (last <= 0 || !(time == time)) { f = 0; loop = false; }   /* one-frame clip, or a bad time: no NaN */
+    if (loop && c->length > 0 && last > 0) {
         float len = (float)last;
         f = fmodf(f, len);
         if (f < 0) f += len;
@@ -355,6 +356,16 @@ void lx_animator_reset_pose(LxScene *s, LxEntity e) {
         st->scl[i] = st->model->nodes[i].scale;
     }
     apply_pose(s, st);
+}
+
+/* entering play mode: every Animator starts from scratch (an editor preview may have run before) */
+void lx_scene_animation_begin(LxScene *s) {
+    for (int i = 1; i < s->count; i++) {
+        LxEntityData *d = &s->entities[i];
+        if (!d->alive || !d->anim) continue;
+        state_free(d->anim);
+        d->anim = NULL;
+    }
 }
 
 void lx_animator_update(LxScene *s, LxEntity e, float dt) {

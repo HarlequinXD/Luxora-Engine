@@ -292,6 +292,24 @@ static void s_model_reset(void) {
     SMOKE_CHECK(!lx_animator_playing(ED.scene, g_md_ent) && (!hips || fabsf(before.w - after.w) + fabsf(before.y - after.y) > 1e-4f),
                 "stopping the preview returns to the rest pose");
 }
+static float g_md_hips_y;
+static void s_model_play(void) {
+    if (!g_md_ent) return;
+    ed_play();
+    SMOKE_CHECK(ED.play == ED_PLAYING, "entered play mode with a character");
+}
+static void s_model_playing(void) {
+    if (!g_md_ent) return;
+    LxEntity c = lx_entity_find(ED.scene, "mixamo");
+    SMOKE_CHECK(c && lx_animator_playing(ED.scene, c) && lx_animator_time(ED.scene, c) > 0.05f, "character animates in play mode (t=%.2f)",
+                c ? lx_animator_time(ED.scene, c) : -1.0f);
+    g_md_hips_y = 0;
+}
+static void s_model_stop(void) {
+    if (!g_md_ent) return;
+    ed_stop();
+    SMOKE_CHECK(ED.play == ED_EDIT, "stopped play mode");
+}
 static void s_quit_cancel(void) {
     UiNode *cancel = find_node(ui_root(ED.ui), NULL, "Cancel");
     extern UiNode *ui_modal_node(UiCtx *ui);
@@ -532,6 +550,9 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {266, s_model_place, "place a character and preview another model's dance on it"},
     {270, s_model_anim_shot, "screenshot of the retargeted dance"},
     {272, s_model_reset, "stop the preview: back to the rest pose"},
+    {273, s_model_play, "play mode with an animated character"},
+    {283, s_model_playing, "the character animates in play mode"},
+    {285, s_model_stop, "stop play mode"},
 };
 
 bool ed_smoke_step(int frame) {
@@ -540,5 +561,5 @@ bool ed_smoke_step(int frame) {
             LX_INFO("[smoke] %s", STEPS[i].what);
             if (ED.mode == ED_MODE_EDITOR || frame >= 216) STEPS[i].fn(); /* the last steps run in the Project Manager */
         }
-    return frame < 275;
+    return frame < 288;
 }
