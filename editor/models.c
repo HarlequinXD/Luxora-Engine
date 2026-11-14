@@ -16,7 +16,6 @@ LxEntity ed_model_place(const char *ref, LxVec3 pos, LxEntity parent) {
     LxEntity e = lx_model_instantiate(ED.scene, ref, parent ? lx_v3(0, 0, 0) : pos, parent);
     double t1 = lx_time();
     if (!e) { ui_notify(ED.ui, "Could not import %s - see the Console", ref); return 0; }
-    lx_scene_mark_static_dirty(ED.scene);
     ed_select(e);
     ED.hierarchy_hash = 0;
     ed_mark_changed();

@@ -180,6 +180,7 @@ int main(int argc, char **argv) {
             if (ED.mode == ED_MODE_EDITOR) ed_render();
             ed_chrome_frame_before_ui();
             ui_frame(ED.ui, ED.dt, lx_v4(0.1f, 0.1f, 0.11f, 1));
+            if (smoke) { extern void ed_smoke_in_frame(void); ed_smoke_in_frame(); }   /* like a button clicked mid-frame */
             ed_chrome_frame_after_ui();
             if (shot && frame == shot_frames) lx_renderer_screenshot(shot);
             lx_renderer_end_frame();

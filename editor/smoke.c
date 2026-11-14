@@ -305,10 +305,21 @@ static void s_model_playing(void) {
                 c ? lx_animator_time(ED.scene, c) : -1.0f);
     g_md_hips_y = 0;
 }
+/* Stop is clicked while the frame is being recorded: the play scene (and its animated character's
+ * GPU buffers) is destroyed while that frame still uses them */
+static bool g_stop_in_frame;
+void ed_smoke_in_frame(void) {
+    if (!g_stop_in_frame) return;
+    g_stop_in_frame = false;
+    ed_stop();
+}
 static void s_model_stop(void) {
     if (!g_md_ent) return;
-    ed_stop();
-    SMOKE_CHECK(ED.play == ED_EDIT, "stopped play mode");
+    g_stop_in_frame = true;
+}
+static void s_model_stopped(void) {
+    if (!g_md_ent) return;
+    SMOKE_CHECK(ED.play == ED_EDIT && lx_entity_find(ED.scene, "mixamo"), "stopped play mode, the character is back in the edit scene");
 }
 static void s_quit_cancel(void) {
     UiNode *cancel = find_node(ui_root(ED.ui), NULL, "Cancel");
@@ -552,7 +563,8 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {272, s_model_reset, "stop the preview: back to the rest pose"},
     {273, s_model_play, "play mode with an animated character"},
     {283, s_model_playing, "the character animates in play mode"},
-    {285, s_model_stop, "stop play mode"},
+    {285, s_model_stop, "press Stop (mid-frame, like the toolbar button)"},
+    {290, s_model_stopped, "edit mode again after Stop"},
 };
 
 bool ed_smoke_step(int frame) {
@@ -561,5 +573,5 @@ bool ed_smoke_step(int frame) {
             LX_INFO("[smoke] %s", STEPS[i].what);
             if (ED.mode == ED_MODE_EDITOR || frame >= 216) STEPS[i].fn(); /* the last steps run in the Project Manager */
         }
-    return frame < 288;
+    return frame < 293;
 }

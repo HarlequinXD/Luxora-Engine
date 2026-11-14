@@ -1317,18 +1317,39 @@ static MeshGpu *mesh_gpu(LxMesh *m) {
     return g;
 }
 
-void lx_renderer_mesh_release(LxMesh *m) {
-    if (!m || !m->gpu || !R.device) return;
-    vkDeviceWaitIdle(R.device);
-    MeshGpu *g = m->gpu;
+static void mesh_gpu_destroy(MeshGpu *g) {
     if (g->dynamic) {
         for (int f = 0; f < FRAMES; f++) buffer_destroy(&g->dvb[f]);
         buffer_destroy(&g->ib[0]);
     } else
         for (int l = 0; l < LX_MAX_LODS; l++) { buffer_destroy(&g->vb[l]); buffer_destroy(&g->ib[l]); }
     lx_free(g);
+}
+
+/* GPU buffers of meshes freed while frames may still use them: the frame being recorded right now
+ * (an object deleted from a button click, Stop restoring the scene) and the frames in flight.
+ * They're destroyed a few frames later, once nothing can reference them. */
+typedef struct MeshGarbage { MeshGpu *g; int frames_left; } MeshGarbage;
+static MeshGarbage *g_mesh_garbage;
+static int g_mesh_garbage_count, g_mesh_garbage_cap;
+
+static void mesh_garbage_collect(bool all) {
+    int k = 0;
+    for (int i = 0; i < g_mesh_garbage_count; i++) {
+        MeshGarbage *mg = &g_mesh_garbage[i];
+        if (all || --mg->frames_left <= 0) mesh_gpu_destroy(mg->g);
+        else g_mesh_garbage[k++] = *mg;
+    }
+    g_mesh_garbage_count = k;
+}
+
+void lx_renderer_mesh_release(LxMesh *m) {
+    if (!m || !m->gpu || !R.device) return;
+    MeshGpu *g = m->gpu;
     m->gpu = NULL;
     for (int i = 0; i < g_live_mesh_count; i++) if (g_live_meshes[i] == m) { g_live_meshes[i] = g_live_meshes[--g_live_mesh_count]; break; }
+    MeshGarbage mg = {g, FRAMES + 1};
+    LX_VEC_PUSH(g_mesh_garbage, g_mesh_garbage_count, g_mesh_garbage_cap, mg);
 }
 
 static GpuImage *texture_gpu(LxTexture *t, bool srgb) {
@@ -1373,6 +1394,8 @@ void lx_renderer_texture_release(LxTexture *t) {
 
 static void release_all_meshes_textures(void) {
     while (g_live_mesh_count) lx_renderer_mesh_release(g_live_meshes[0]);
+    vkDeviceWaitIdle(R.device);
+    mesh_garbage_collect(true);
     while (g_live_tex_count) lx_renderer_texture_release(g_live_tex[0]);
 }
 
@@ -1581,6 +1604,7 @@ bool lx_renderer_begin_frame(void) {
     }
     FrameData *fr = &R.frames[R.frame];
     vkWaitForFences(R.device, 1, &fr->fence, VK_TRUE, UINT64_MAX);
+    if (g_mesh_garbage_count) mesh_garbage_collect(false);
     if (fr->inst_overflow) {
         /* grow the instance stream (safe now: this frame's GPU work is done) */
         R.inst_capacity *= 2;
