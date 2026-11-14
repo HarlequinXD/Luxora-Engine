@@ -198,10 +198,25 @@ GiSH gi_gather(vec3 world, vec3 ng) {
     }
     return f0 > 0.0 ? gi_mix(coarse, gi_gather_level(0, gi_at(world, ng, u.gi_casc[0].w)), f0) : coarse;
 }
+/* Irradiance from one channel's L1 SH (coeff order L0, y, z, x), Geomerics' non-negative reconstruction.
+ * The plain linear form a + b.n goes negative (clamped to black) for surfaces facing away from strongly
+ * directional light, which cut hard-edged dark shapes into curved surfaces such as faces. This one has the same
+ * average and main direction, never goes negative, and matches light from a single direction exactly
+ * (the same as lx_gi_eval_l1 on the CPU). */
+float gi_eval_l1(vec4 c, vec3 n) {
+    float a = PI * 0.282095 * c.x;                                   // average irradiance
+    if (a <= 0.0) return 0.0;
+    vec3 b = (2.0 * PI / 3.0) * 0.488603 * vec3(c.w, c.y, c.z);     // its change across directions (x, y, z)
+    float lb = length(b);
+    if (lb < 1e-6 * a) return a;
+    float rho = min(lb / (2.0 * a), 1.0);                            // 0 even light .. 1 all from one direction
+    float q = 0.5 * (1.0 + dot(b / lb, n));
+    float p = 1.0 + 2.0 * rho;
+    float k = (1.0 - rho) / (1.0 + rho);
+    return a * (k + (1.0 - k) * (p + 1.0) * pow(q, p));
+}
 vec3 gi_eval(GiSH sh, vec3 n) {
-    // L1 SH irradiance (coeff order: L0, y, z, x) with clamped-cosine convolution
-    vec4 basis = vec4(PI * 0.282095, (2.0 * PI / 3.0) * 0.488603 * vec3(n.y, n.z, n.x));
-    return max(vec3(dot(sh.r, basis), dot(sh.g, basis), dot(sh.b, basis)), vec3(0.0)) * u.fog_color.w;
+    return vec3(gi_eval_l1(sh.r, n), gi_eval_l1(sh.g, n), gi_eval_l1(sh.b, n)) * u.fog_color.w;
 }
 
 vec3 env_brdf_approx(vec3 f0, float rough, float ndv) {

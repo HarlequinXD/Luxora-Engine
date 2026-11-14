@@ -671,9 +671,8 @@ static void test_gi_sky_calibration(void) {
     LxGraphicsSettings g = lx_graphics_defaults(1);
     g.gi_photons_per_frame = 60000;
     for (int f = 0; f < 60; f++) lx_gi_update(s, &g);
-    /* The sky here is a 40 m square plane at the scene's top (y = 6), so it's a little short of a full sky. What
-     * the GI's light summary (L1 spherical harmonics) should hold below it, exactly: half of pi L x the plane's
-     * share of all directions, plus half of pi L x its share of the cosine-weighted ones. */
+    /* The sky here is a 40 m square plane at the scene's top (y = 6), so it's a little short of a full sky: the
+     * true irradiance below it is pi L x the plane's share of the cosine-weighted directions. */
     const float L = 0.5f;
     float lo = 0, hi = 0, want_lo = 0, want_hi = 0;
     for (int pass = 0; pass < 2; pass++) {
@@ -686,7 +685,8 @@ static void test_gi_sky_calibration(void) {
                 double x = -a + (i + 0.5) * 2 * a / N, z = -a + (j + 0.5) * 2 * a / N, r2 = x * x + z * z + (double)h * h;
                 e += (double)h * h / (r2 * r2) * (2.0 * a / N) * (2.0 * a / N);
             }
-        float want = LX_PI * L * 0.5f * (omega / (2.0f * LX_PI) + (float)(e / LX_PI));
+        float want = (float)e * L;   /* the integral of L cos over the plane */
+        (void)omega;
         float got = 0;
         for (int k = 0; k < 9; k++) {
             float x = -4.0f + (k % 3) * 4.0f, z = -4.0f + (k / 3) * 4.0f;
@@ -695,7 +695,7 @@ static void test_gi_sky_calibration(void) {
         if (pass) { hi = got; want_hi = want; } else { lo = got; want_lo = want; }
     }
     printf("  sky light on an upward surface: %.3f at the floor (expected %.3f), %.3f in mid-air (expected %.3f)\n", lo, want_lo, hi, want_hi);
-    CHECK(fabsf(lo / want_lo - 1.0f) < 0.08f, "at the floor it matches the sky exactly (%.3f vs %.3f)", lo, want_lo);
+    CHECK(fabsf(lo / want_lo - 1.0f) < 0.08f, "at the floor it matches the true irradiance (%.3f vs %.3f)", lo, want_lo);
     CHECK(fabsf(hi / want_hi - 1.0f) < 0.08f, "and in mid-air (%.3f vs %.3f)", hi, want_hi);
     lx_gi_shutdown();
     lx_scene_destroy(s);
@@ -734,6 +734,29 @@ static void test_moving_refit(void) {
     lx_bvh_free(&refit);
     lx_bvh_free(&fresh);
     lx_scene_destroy(s);
+}
+
+/* the GI's light reconstruction never goes negative (the hard-edged dark shapes on a character's face were the
+ * old one clamping at zero) and is exact for light from a single direction */
+static void test_gi_reconstruction(void) {
+    printf("photon gi: light reconstruction\n");
+    /* all light from straight above, irradiance w at normal incidence: radiance SH of a delta, w x basis */
+    const float w = 2.0f;
+    float c[4] = {w * 0.282095f, w * 0.488603f, 0, 0};   /* L0, y, z, x */
+    CHECK(fabsf(lx_gi_eval_l1(c, lx_v3(0, 1, 0)) - w) < 1e-3f, "light from one direction: exact facing it (%g)", lx_gi_eval_l1(c, lx_v3(0, 1, 0)));
+    float lowest = 1e9f, prev = lx_gi_eval_l1(c, lx_v3(0, 1, 0)), worst_jump = 0;
+    for (int i = 1; i <= 180; i++) {   /* turning the surface all the way round: never below zero, no jumps */
+        float a = (float)i * LX_PI / 180.0f;
+        float e = lx_gi_eval_l1(c, lx_v3(sinf(a), cosf(a), 0));
+        lowest = lx_minf(lowest, e);
+        worst_jump = lx_maxf(worst_jump, fabsf(e - prev));
+        prev = e;
+    }
+    float old_way = 0.282095f * LX_PI * c[0] + (2.0f * LX_PI / 3.0f) * 0.488603f * c[1] * -1.0f;   /* facing away, the old formula */
+    CHECK(lowest >= 0 && old_way < 0, "facing away it never goes below zero (lowest %g; the old formula gave %g)", lowest, old_way);
+    CHECK(worst_jump < w * 0.05f, "and changes smoothly as the surface turns (largest step %g per degree)", worst_jump);
+    float even[4] = {1.0f, 0, 0, 0};
+    CHECK(fabsf(lx_gi_eval_l1(even, lx_v3(0, 0, 1)) - LX_PI * 0.282095f) < 1e-4f, "even light stays even");
 }
 
 static void test_gi_leaks(void) {
@@ -1695,6 +1718,7 @@ int main(void) {
     test_gi_moving();
     test_gi_self_shadow();
     test_moving_refit();
+    test_gi_reconstruction();
     test_gi_sky_calibration();
     test_acoustics();
     test_crowd();

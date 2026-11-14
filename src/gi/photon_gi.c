@@ -801,12 +801,24 @@ LxVec3 lx_gi_irradiance(LxVec3 p, LxVec3 n, bool walls) {
         const float *src = sh + ((size_t)((z * G.res[1] + y) * G.res[0] + x)) * SH_FLOATS;
         for (int j = 0; j < 12; j++) c[j] += src[j] * w[k];
     }
-    float e[3];
-    for (int ch = 0; ch < 3; ch++) {
-        const float *k = c + ch * 4;
-        e[ch] = lx_maxf(0, LX_PI * 0.282095f * k[0] + (2.0f * LX_PI / 3.0f) * 0.488603f * (k[1] * n.y + k[2] * n.z + k[3] * n.x));
-    }
-    return lx_v3(e[0], e[1], e[2]);
+    return lx_v3(lx_gi_eval_l1(c, n), lx_gi_eval_l1(c + 4, n), lx_gi_eval_l1(c + 8, n));
+}
+
+/* Irradiance from one channel's L1 SH (L0, y, z, x): Geomerics' non-negative reconstruction (as the shader's
+ * gi_eval_l1). The plain linear form goes negative, and is clamped to black, facing away from strongly directional
+ * light; this keeps the same average and main direction, never goes negative and is exact for light from one
+ * direction. */
+float lx_gi_eval_l1(const float *c, LxVec3 n) {
+    float a = LX_PI * 0.282095f * c[0];
+    if (a <= 0) return 0;
+    LxVec3 b = lx_scale3(lx_v3(c[3], c[1], c[2]), (2.0f * LX_PI / 3.0f) * 0.488603f);
+    float lb = lx_len3(b);
+    if (lb < 1e-6f * a) return a;
+    float rho = lx_minf(lb / (2.0f * a), 1.0f);
+    float q = 0.5f * (1.0f + lx_dot3(lx_scale3(b, 1.0f / lb), n));
+    float p = 1.0f + 2.0f * rho;
+    float k = (1.0f - rho) / (1.0f + rho);
+    return a * (k + (1.0f - k) * (p + 1.0f) * powf(lx_maxf(q, 0.0f), p));
 }
 
 

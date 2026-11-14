@@ -476,6 +476,7 @@ float *lx_gi_cpu_reference(LxScene *s, const LxGraphicsSettings *g, int frames, 
 float *lx_renderer_gi_readback(int res[3]);   /* the GPU tracer's running average (NULL when GI runs on the CPU) */
 float *lx_renderer_gi_readback_level(int level, int res[3], LxVec3 *origin, float *cell);   /* 0 scene grid, 1.. camera grids */
 LxVec3 lx_gi_irradiance(LxVec3 p, LxVec3 n, bool walls);
+float lx_gi_eval_l1(const float *c, LxVec3 n);   /* one channel's irradiance from L1 SH (never negative) */
 void lx_gi_set_walls(bool on);   /* tests: false = the old leaky grid */   /* the shader's GI lookup on the CPU (tests) */   /* the GPU tracer's running average (NULL when GI runs on the CPU) */
 float lx_gi_last_ms(void);
 /* CPU access for tests: SH coefficients (12 floats) of a cell */
