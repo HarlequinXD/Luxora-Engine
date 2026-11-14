@@ -673,6 +673,8 @@ UiNode *ed_viewport_panel(UiNode *parent) {
     const UiTheme *t = ui_theme(ui);
     UiNode *p = ui_box(ui, parent, UI_COL);
     p->bg = t->panel;
+    lx_strcpy(p->text, sizeof p->text, "Scene");
+    p->icon = UI_ICON_VIEWPORT;
     UiNode *bar = ui_box(ui, p, UI_ROW);
     bar->h = 32;
     bar->bg = t->header;
@@ -724,6 +726,7 @@ UiNode *ed_viewport_panel(UiNode *parent) {
 
 void ed_render(void) {
     if (!ED.scene || !V.view || V.view->cw < 8 || V.view->ch < 8) return;
+    if (ED.view_tabs && ED.view_tabs->tab_index != 0) return;   /* the State Graph tab is showing */
     int w = (int)V.view->cw, h = (int)V.view->ch;
     if (!ED.viewport_rt) ED.viewport_rt = lx_render_target_create(w, h);
     else lx_render_target_resize(ED.viewport_rt, w, h);

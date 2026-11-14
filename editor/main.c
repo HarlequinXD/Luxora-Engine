@@ -8,6 +8,7 @@
  *   --play                                enter play mode after opening
  *   --smoke                               scripted tour of every window and tool, then quit
  *   --build                               build the open project for this platform, then quit
+ *   --show-graph <object>[/<state>]       select the object and open its State Graph (and a state)
  */
 #include "editor.h"
 
@@ -74,9 +75,12 @@ void ed_set_mode(EdMode mode) {
     ed_chrome_forget();
     ui_close_popups(ED.ui);
     ui_close_modal(ED.ui);
+    ui_close_windows(ED.ui);
     ui_clear(ED.ui, ui_root(ED.ui));
     ed_panels_forget();
+    ed_graph_forget();
     ED.hierarchy = ED.inspector = ED.viewport = NULL;
+    ED.view_tabs = ED.graph_panel = NULL;
     ED.hierarchy_list = ED.content_grid = ED.content_tree = NULL;
     if (mode == ED_MODE_PROJECT_MANAGER) ed_project_manager_build();
     else ed_build_shell();
@@ -94,7 +98,7 @@ void ed_update_title(void) {
 }
 
 int main(int argc, char **argv) {
-    const char *open_dir = NULL, *new_parent = NULL, *new_name = NULL, *shot = NULL;
+    const char *open_dir = NULL, *new_parent = NULL, *new_name = NULL, *shot = NULL, *show_graph = NULL;
     int shot_frames = 60;
     bool auto_play = false, smoke = false, build_game = false;
     int stress_frames = 0;
@@ -107,6 +111,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--smoke")) smoke = true;
         else if (!strcmp(argv[i], "--stress") && i + 1 < argc) { stress_frames = atoi(argv[++i]); ed_stress = true; }
         else if (!strcmp(argv[i], "--build")) build_game = true;
+        else if (!strcmp(argv[i], "--show-graph") && i + 1 < argc) show_graph = argv[++i];
         else if (argv[i][0] != '-') open_dir = argv[i];
     }
     memset(&ED, 0, sizeof ED);
@@ -157,6 +162,17 @@ int main(int argc, char **argv) {
     }
     if (open_dir) ed_open_project(open_dir);
     if (!ED.has_project) ed_set_mode(ED_MODE_PROJECT_MANAGER);
+    if (show_graph && ED.has_project && ED.scene) {   /* open the State Graph editor on an object */
+        char obj[LX_NAME_MAX];
+        lx_strcpy(obj, sizeof obj, show_graph);
+        char *state = strchr(obj, '/');
+        if (state) *state++ = 0;
+        LxEntity e = lx_entity_find(ED.scene, obj);
+        if (e) { ed_select(e); ed_graph_edit(e, 0); if (state) ed_graph_select_state(state); }
+        const char *tab = getenv("LUXORA_GRAPH_TAB");   /* screenshots: 0 FSM, 1 State, 2 Events, 3 Variables, 4 Action Browser */
+        extern void ed_graph_show_tab(int tab);
+        if (tab) ed_graph_show_tab(atoi(tab));
+    }
     if (auto_play && ED.has_project) ed_play();
 
     double last = lx_time();

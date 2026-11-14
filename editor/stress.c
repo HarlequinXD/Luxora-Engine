@@ -87,6 +87,8 @@ static void check_editor(void) {
     check_scene(ED.scene, "scene");
     if (ED.play == ED_EDIT && ED.play_snapshot) BROKEN("a play-mode snapshot is left over in edit mode");
     if (ED.undo_count < 0 || ED.undo_count > ED_MAX_UNDO || ED.redo_count < 0 || ED.redo_count > ED_MAX_UNDO) BROKEN("undo stack out of range");
+    char err[200];
+    if (!ed_graph_check(err, sizeof err)) BROKEN("state graph: %s", err);
 }
 
 /* text round trip: what's saved loads back the same */
@@ -180,6 +182,9 @@ static void collect_layer(void) {
     UiNode *m = ui_modal_node(ED.ui);
     if (m) { collect(m); return; }
     collect(ui_root(ED.ui));
+    UiNode *win[8];   /* floating windows (Action Browser) */
+    int nw = ui_window_nodes(ED.ui, win, 8);
+    for (int i = 0; i < nw; i++) collect(win[i]);
 }
 
 /* words people type, and things they shouldn't */
@@ -269,7 +274,12 @@ static const char *CREATE[] = {"Empty", "Cube", "Sphere", "Plane", "Cylinder", "
 
 static void editor_action(void) {
     if (ED.mode != ED_MODE_EDITOR || !ED.scene) return;
-    switch (rnd_n(22)) {
+    switch (rnd_n(26)) {
+    case 22: case 23: case 24: case 25: {   /* the State Graph editor */
+        const char *what = ed_graph_stress(rnd());
+        act("graph: %s", what);
+        break;
+    }
     case 0: case 1: {
         const char *w = CREATE[rnd_n((int)(sizeof CREATE / sizeof CREATE[0]))];
         act("create %s", w);
@@ -439,7 +449,12 @@ bool ed_stress_step(int frame, int frames) {
     int actions = 1;   /* one per frame, as a person would: the editor gets a frame to catch up in between */
     for (int i = 0; i < actions; i++) {
         int r = rnd_n(100);
-        if (r < 55) {
+        static int graph_focus = -1;   /* LUXORA_STRESS_GRAPH=1: mostly the State Graph editor */
+        if (graph_focus < 0) graph_focus = getenv("LUXORA_STRESS_GRAPH") ? 1 : 0;
+        if (graph_focus && r < 45 && ED.mode == ED_MODE_EDITOR && ED.scene) {
+            const char *what = ed_graph_stress(rnd());
+            act("graph: %s", what);
+        } else if (r < 55) {
             if (chance(50)) g_in_frame_kind = 1;
             else ui_monkey();
         } else if (r < 92) {

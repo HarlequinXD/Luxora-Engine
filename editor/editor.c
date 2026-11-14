@@ -1072,7 +1072,10 @@ void ed_build_shell(void) {
     right_split->split_min = 260;
     UiNode *center = ui_split(ui, right_split, UI_COL, 0.68f);
     center->split_min = 140;
-    ED.viewport = ed_viewport_panel(center);
+    UiNode *views = ui_tabs(ui, center);
+    ED.view_tabs = views;
+    ED.viewport = ed_viewport_panel(views);
+    ED.graph_panel = ed_graph_panel(views);
     UiNode *bottom = ui_tabs(ui, center);
     ED.bottom_tabs = bottom;
     ED.content_panel = ed_content_panel(bottom);
@@ -1113,6 +1116,13 @@ void ed_build_shell(void) {
  * ====================================================================== */
 void ed_shortcuts(void) {
     if (ui_wants_keyboard(ED.ui) || ui_has_modal(ED.ui)) return;
+    if (ed_graph_keys()) {   /* the State Graph view has focus: only the global Ctrl shortcuts stay */
+        if (!lx_key_down(LX_KEY_CTRL)) return;
+        if (lx_key_pressed(LX_KEY_S)) { if (lx_key_down(LX_KEY_SHIFT)) ed_save_scene_as_dialog(); else ed_save_scene(); }
+        if (lx_key_pressed(LX_KEY_P)) { if (lx_key_down(LX_KEY_ALT)) ed_step(); else if (lx_key_down(LX_KEY_SHIFT)) ed_pause(); else m_play(NULL); }
+        if (lx_key_pressed(LX_KEY_B)) { if (lx_key_down(LX_KEY_SHIFT)) ed_build_settings(); else ed_build(ED.project.build.target, false); }
+        return;
+    }
     bool ctrl = lx_key_down(LX_KEY_CTRL), shift = lx_key_down(LX_KEY_SHIFT), alt = lx_key_down(LX_KEY_ALT);
     bool looking = lx_mouse_down(LX_MOUSE_RIGHT);
     if (ctrl) {

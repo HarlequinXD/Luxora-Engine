@@ -64,6 +64,13 @@ jobs:
               || { tail -80 stress$seed.log; grep -E "BROKEN" -A2 stress$seed.log | head -40; exit 1; }
             grep "\[stress\] done" stress$seed.log
           done
+          # the State Graph editor, hard: most actions are graph edits
+          rm -rf "$RUNNER_TEMP/sg" && cp -r "$P" "$RUNNER_TEMP/sg"
+          ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+          LUXORA_NO_AUDIO=1 LUXORA_STRESS_GRAPH=1 LUXORA_STRESS_SEED=11 LUXORA_STRESS_PROJECT="$RUNNER_TEMP/sg" \
+            xvfb-run -a -s "-screen 0 1600x940x24" ./build-asan/luxora_editor_nogpu "$RUNNER_TEMP/sg" --stress 2500 > stress_graph.log 2>&1 \
+            || { tail -80 stress_graph.log; grep -E "BROKEN" -A2 stress_graph.log | head -40; exit 1; }
+          grep "\[stress\] done" stress_graph.log
 
       - name: Build a game from the editor pipeline
         run: |

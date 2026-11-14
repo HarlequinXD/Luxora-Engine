@@ -69,6 +69,7 @@ typedef struct Editor {
     UiNode *inspector_tabs, *inspector, *lighting_panel, *stats_panel;
     UiNode *bottom_tabs, *content_panel, *console_panel, *mixer_panel, *scenes_panel;
     UiNode *viewport;
+    UiNode *view_tabs, *graph_panel;  /* Scene | State Graph */
     uint64_t hierarchy_hash;
     char hierarchy_search[64];
     LxEntity inspector_entity;
@@ -180,6 +181,19 @@ void ed_log_sink(LxLogLevel level, const char *msg, void *user);
 UiIcon ed_icon_for_entity(LxScene *s, LxEntity e);
 UiIcon ed_icon_for_file(const char *name, bool dir);
 uint32_t ed_color_for_icon(UiIcon icon);
+
+/* State Graph editor (graph_editor.c, graph_inspector.c) */
+UiNode *ed_graph_panel(UiNode *parent);
+bool ed_graph_has_focus(void);
+bool ed_graph_keys(void);                 /* true: the graph view took the keyboard */
+void ed_graph_forget(void);
+void ed_graph_edit(LxEntity e, int slot);
+void ed_graph_open_asset(const char *ref);
+bool ed_graph_select_state(const char *name);
+const char *ed_graph_stress(uint32_t seed);       /* stress tester: one random graph edit */
+bool ed_graph_check(char *err, size_t cap);
+void ed_state_graph_section(UiNode *sec, LxEntity e);
+void ed_graph_asset_inspector(UiNode *body, const char *ref);
 
 /* windows */
 void ed_project_settings(int category);  /* 0 general, 1 graphics, 2 sound, 3 input, 4 platforms */

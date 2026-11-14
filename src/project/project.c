@@ -339,6 +339,37 @@ static bool write_cobblestone_textures(const char *assets) {
     return ok;
 }
 
+/* the sample project's State Graph: walks between two points, waits, hops when Space is pressed */
+static const char SAMPLE_GRAPH[] =
+    "[graph]\nname = Patroller\n"
+    "description = Walks between two points and waits at each. Press Space while playing to make it hop.\n"
+    "start = Wait at A\n"
+    "[event]\nname = ARRIVED\n"
+    "[event]\nname = HOP\n"
+    "[variable]\nname = Speed\ntype = float\nvalue = 2\ninspector = 1\ntooltip = Walking speed in metres per second\n"
+    "[variable]\nname = Point A\ntype = vector3\nvalue = -3 0.4 3\ninspector = 1\n"
+    "[variable]\nname = Point B\ntype = vector3\nvalue = 3 0.4 3\ninspector = 1\n"
+    "[variable]\nname = Laps\ntype = int\nvalue = 0\n"
+    "[global]\nevent = HOP\nto = Hop\n"
+    "[state]\nname = Wait at A\npos = 80 120\ndescription = Pause before walking to B\ntransition = FINISHED > Go to B\n"
+    "[action]\ntype = Wait\nupdate = every_frame\np0 = 1\n"
+    "[state]\nname = Go to B\npos = 360 120\ncolor = 2\ntransition = ARRIVED > Wait at B\n"
+    "[action]\ntype = Look At\nupdate = every_frame\nfolded = 1\np0 = Owner\np1 = None\np2 = $Point B\np3 = true\n"
+    "[action]\ntype = Move Towards\nupdate = every_frame\np0 = Owner\np1 = None\np2 = $Point B\np3 = $Speed\np4 = 0.05\np5 = ARRIVED\np6 = true\n"
+    "[action]\ntype = Key Event\nupdate = every_frame\nfolded = 1\np0 = Space\np1 = Pressed\np2 = HOP\n"
+    "[state]\nname = Wait at B\npos = 640 120\ntransition = FINISHED > Go to A\n"
+    "[action]\ntype = Wait\nupdate = every_frame\np0 = 1\n"
+    "[action]\ntype = Int Add\nupdate = once\np0 = $Laps\np1 = 1\n"
+    "[state]\nname = Go to A\npos = 360 330\ncolor = 2\ntransition = ARRIVED > Wait at A\n"
+    "[action]\ntype = Look At\nupdate = every_frame\nfolded = 1\np0 = Owner\np1 = None\np2 = $Point A\np3 = true\n"
+    "[action]\ntype = Move Towards\nupdate = every_frame\np0 = Owner\np1 = None\np2 = $Point A\np3 = $Speed\np4 = 0.05\np5 = ARRIVED\np6 = true\n"
+    "[action]\ntype = Key Event\nupdate = every_frame\nfolded = 1\np0 = Space\np1 = Pressed\np2 = HOP\n"
+    "[state]\nname = Hop\npos = 640 330\ncolor = 3\nsequence = 1\ndescription = Up, then down with a bounce\ntransition = FINISHED > Go to A\n"
+    "[action]\ntype = Move Object\nupdate = every_frame\np0 = Owner\np1 = 0 1.2 0\np2 = 0.25\np3 = Ease Out\np5 = true\n"
+    "[action]\ntype = Move Object\nupdate = every_frame\np0 = Owner\np1 = 0 -1.2 0\np2 = 0.45\np3 = Bounce Out\np5 = true\n"
+    "[comment]\nrect = 80 300 232 104\ncolor = 0\n"
+    "text = HOP is a global transition: from any state that listens for Space, the graph jumps straight to Hop.\n";
+
 bool lx_project_create(LxProject *p, const char *parent, const char *name, LxProjectTemplate tpl) {
     defaults(p);
     lx_strcpy(p->name, sizeof p->name, name);
@@ -350,7 +381,7 @@ bool lx_project_create(LxProject *p, const char *parent, const char *name, LxPro
         LX_ERROR("A project already exists at %s", p->root);
         return false;
     }
-    static const char *folders[] = {"Scenes", "Materials", "Meshes", "Textures", "Sounds", "Scripts", "Prefabs"};
+    static const char *folders[] = {"Scenes", "Materials", "Meshes", "Textures", "Sounds", "Scripts", "Prefabs", "Graphs"};
     for (int i = 0; i < LX_ARRAY_COUNT(folders); i++) {
         char d[LX_PATH_MAX];
         lx_path_join(d, sizeof d, p->assets, folders[i]);
@@ -426,6 +457,12 @@ bool lx_project_create(LxProject *p, const char *parent, const char *name, LxPro
             lx_entity_set_scale(s, path, lx_v3(0.45f, 1, 0.45f));
             lx_strcpy(lx_get_mesh(s, path)->material, LX_REF_MAX, "Materials/Cobblestone.lxmat");
         }
+        /* a State Graph: the Patroller walks between two points (Assets/Graphs/Patroller.lxgraph) */
+        write_text(p->assets, "Graphs/Patroller.lxgraph", SAMPLE_GRAPH);
+        LxEntity pat = lx_spawn_primitive(s, LX_PRIM_CUBE, "Patroller", lx_v3(-3, 0.4f, 3));
+        lx_entity_set_scale(s, pat, lx_v3(0.8f, 0.8f, 0.8f));
+        lx_strcpy(lx_get_mesh(s, pat)->material, LX_REF_MAX, "builtin:blue");
+        lx_add_state_graph(s, pat, "Graphs/Patroller.lxgraph");
         /* a reflection probe over the play area: box-projected reflections of the walls and floor */
         LxEntity probe = lx_entity_create(s, "Reflection Probe");
         lx_entity_set_position(s, probe, lx_v3(0, 1.5f, 0));

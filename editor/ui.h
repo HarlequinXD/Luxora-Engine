@@ -32,7 +32,7 @@ typedef enum UiIcon {
     /* scene objects */
     UI_ICON_CAMERA, UI_ICON_LIGHT, UI_ICON_SUN, UI_ICON_BULB, UI_ICON_SPOT, UI_ICON_CUBE, UI_ICON_SPHERE, UI_ICON_PLANE,
     UI_ICON_CYLINDER, UI_ICON_CAPSULE, UI_ICON_ENTITY, UI_ICON_SPEAKER, UI_ICON_LISTENER, UI_ICON_CROWD, UI_ICON_BEHAVIOUR,
-    UI_ICON_PROBE, UI_ICON_COLLIDER, UI_ICON_RIGIDBODY, UI_ICON_CHARACTER, UI_ICON_ANIMATOR, UI_ICON_AVATAR, UI_ICON_MODEL,
+    UI_ICON_PROBE, UI_ICON_COLLIDER, UI_ICON_RIGIDBODY, UI_ICON_CHARACTER, UI_ICON_ANIMATOR, UI_ICON_AVATAR, UI_ICON_MODEL, UI_ICON_GRAPH,
     UI_ICON_APP,   /* the Luxora app icon (a texture, see ui_set_app_icon); marks Luxora projects */
     /* window controls */
     UI_ICON_WIN_MIN, UI_ICON_WIN_MAX, UI_ICON_WIN_RESTORE, UI_ICON_WIN_CLOSE,
@@ -177,6 +177,13 @@ UiNode *ui_modal(UiCtx *ui, const char *title, float w, float h); /* centred dia
 void ui_close_popups(UiCtx *ui);
 void ui_close_modal(UiCtx *ui);
 bool ui_has_modal(UiCtx *ui);
+/* floating tool window: stays open (unlike popups), dragged by its title bar, closed with its X.
+   Returns the body; on_change of the window node (body->parent) runs when it is closed. */
+UiNode *ui_window(UiCtx *ui, const char *title, float x, float y, float w, float h);
+UiNode *ui_window_of(UiCtx *ui, UiNode *n);   /* the floating window containing n, or NULL */
+void ui_window_front(UiCtx *ui, UiNode *win);
+void ui_close_windows(UiCtx *ui);
+int ui_window_nodes(UiCtx *ui, UiNode **out, int max);
 bool ui_popup_open(UiCtx *ui);
 
 /* queries */

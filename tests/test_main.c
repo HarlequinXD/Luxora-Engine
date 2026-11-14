@@ -803,7 +803,13 @@ static const char *TEST_SCRIPT =
     "}\n"
     "LX_SCRIPT_REGISTER(second) {\n"
     "    LxBehaviourDesc d = {0}; d.name = \"TestSecond\"; lx_register_behaviour(&d);\n"
-    "}\n";
+    "}\n"
+    /* a custom State Graph action */
+    "static void double_it(LxFsmCtx *c) { lx_fsm_set_float(c, 1, lx_fsm_float(c, 0) * 2); lx_fsm_send(c, lx_fsm_event(c, 2)); }\n"
+    "static const LxFsmActionDesc DOUBLE_IT = {\"Test Double\", \"Your Scripts\", \"Doubles a number.\", \"{1} = {0} x 2\",\n"
+    "    {{\"Value\", LX_FSM_FLOAT, \"21\", 0, 0, 0}, {\"Store\", LX_FSM_FLOAT, \"\", LX_FSM_P_OUT, 0, 0}, {\"Done\", LX_FSM_EVENT, \"\", LX_FSM_P_OPTIONAL, 0, 0}},\n"
+    "    0, 0, LX_FSM_ONCE, double_it, 0, 0};\n"
+    "LX_SCRIPT_REGISTER(actions) { lx_fsm_register_action(&DOUBLE_IT); }\n";
 
 static void test_scripts(void) {
     printf("scripts\n");
@@ -821,7 +827,7 @@ static void test_scripts(void) {
     g_diag_errors = 0;
     bool ok = lx_script_compile(files, 1, sdk, out, test_diag, NULL, &st);
     CHECK(ok && st.errors == 0, "script compiles (%d errors)", st.errors);
-    CHECK(st.registrations == 2, "two registrations found (%d)", st.registrations);
+    CHECK(st.registrations == 3, "three registrations found (%d)", st.registrations);
     CHECK(lx_file_exists(out), "module written");
     int before = lx_behaviour_count();
     CHECK(lx_scripts_load(out), "module loads");
@@ -839,6 +845,29 @@ static void test_scripts(void) {
     CHECK(NEAR(p.x, 4.0f, 1e-5f), "second frame %g", p.x);
     lx_scene_stop_simulation(s);
     lx_scene_destroy(s);
+    {   /* the script's State Graph action runs in a graph */
+        CHECK(lx_fsm_action_find("Test Double") != NULL, "script registers a State Graph action");
+        const char *gt = "[graph]\nstart = A\n[variable]\nname = out\ntype = float\nvalue = 0\n"
+                         "[state]\nname = A\ntransition = DONE > B\n[action]\ntype = Test Double\np0 = 21\np1 = $out\np2 = DONE\n[state]\nname = B\n";
+        char gp[LX_PATH_MAX];
+        lx_assets_set_root(dir);
+        lx_path_join(gp, sizeof gp, dir, "T.lxgraph");
+        lx_file_write(gp, gt, strlen(gt));
+        LxScene *gs = lx_scene_create("ScriptGraph");
+        LxEntity ge = lx_entity_create(gs, "G");
+        lx_add_state_graph(gs, ge, "T.lxgraph");
+        lx_scene_simulate(gs, 1.0f / 60);
+        lx_scene_simulate(gs, 1.0f / 60);
+        CHECK(NEAR(lx_fsm_get_var_float(gs, ge, 0, "out"), 42, 1e-4f) && !strcmp(lx_fsm_current_state(gs, ge, 0), "B"), "custom action ran (%g, %s)",
+              lx_fsm_get_var_float(gs, ge, 0, "out"), lx_fsm_current_state(gs, ge, 0));
+        lx_scripts_unload();   /* while the graph still runs: it must let go of the action */
+        lx_scene_simulate(gs, 1.0f / 60);
+        CHECK(!lx_fsm_action_find("Test Double"), "unloading forgets the script's action");
+        lx_scene_stop_simulation(gs);
+        lx_scene_destroy(gs);
+        lx_assets_clear();
+        lx_scripts_load(out);
+    }
     lx_scripts_unload();
     CHECK(!lx_behaviour_find("TestMover") && lx_behaviour_count() == before, "unloading forgets the behaviours");
     CHECK(lx_behaviour_find("Rotator") != NULL, "built-ins stay");
@@ -1323,6 +1352,39 @@ static void test_state_graph(void) {
     CHECK(lx_fsm_current_state(s, l, 0)[0] != 0 && lx_fsm_run_of(s, l, 0)->error, "infinite FINISHED loop is caught");
     lx_scene_stop_simulation(s);
     lx_scene_destroy(s);
+    lx_assets_clear();
+
+    /* the sample project's Patroller walks from A to B, waits, and counts laps */
+    char pdir[LX_PATH_MAX];
+    lx_path_join(pdir, sizeof pdir, tmpdir(), "luxora_test_sgproj");
+    lx_path_remove(pdir);
+    LxProject proj;
+    CHECK(lx_project_create(&proj, pdir, "Demo", LX_TEMPLATE_SAMPLE_3D), "sample project with a State Graph");
+    lx_assets_set_root(proj.assets);
+    char scene_path[LX_PATH_MAX];
+    lx_path_join(scene_path, sizeof scene_path, proj.assets, "Scenes/Main.lxscene");
+    LxScene *ps = lx_scene_load(scene_path);
+    LxEntity pat = ps ? lx_entity_find(ps, "Patroller") : 0;
+    CHECK(pat && lx_get_state_graph(ps, pat), "Patroller has its graph");
+    if (pat) {
+        LxGraph *pg = lx_asset_graph("Graphs/Patroller.lxgraph");
+        char probs[8][160];
+        CHECK(pg && lx_graph_problems(pg, probs, 8) == 0, "sample graph has no problems (%s)", pg && lx_graph_problems(pg, probs, 8) ? probs[0] : "");
+        for (int i = 0; i < 66; i++) lx_scene_simulate(ps, 1.0f / 60);   /* waits a second at A */
+        CHECK(!strcmp(lx_fsm_current_state(ps, pat, 0), "Go to B"), "after waiting it walks to B (%s)", lx_fsm_current_state(ps, pat, 0));
+        for (int i = 0; i < 60 * 3 + 12; i++) lx_scene_simulate(ps, 1.0f / 60);   /* 6 m at 2 m/s */
+        LxVec3 at = lx_entity_world_position(ps, pat);
+        CHECK(NEAR(at.x, 3, 0.1f) && !strcmp(lx_fsm_current_state(ps, pat, 0), "Wait at B"), "arrives at B (x %.2f, %s)", at.x, lx_fsm_current_state(ps, pat, 0));
+        CHECK(NEAR(lx_fsm_get_var_float(ps, pat, 0, "Laps"), 1, 1e-4f), "counts the lap");
+        lx_fsm_send_event(ps, pat, "HOP", 0, 0);
+        lx_scene_simulate(ps, 1.0f / 60);
+        CHECK(!strcmp(lx_fsm_current_state(ps, pat, 0), "Hop"), "HOP is global: works from Wait at B");
+        for (int i = 0; i < 60; i++) lx_scene_simulate(ps, 1.0f / 60);
+        at = lx_entity_world_position(ps, pat);
+        CHECK(!strcmp(lx_fsm_current_state(ps, pat, 0), "Go to A") && NEAR(at.y, 0.4f, 0.05f), "hops up and lands (y %.2f, %s)", at.y, lx_fsm_current_state(ps, pat, 0));
+        lx_scene_stop_simulation(ps);
+    }
+    if (ps) lx_scene_destroy(ps);
     lx_assets_clear();
 }
 

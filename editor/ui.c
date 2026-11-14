@@ -16,6 +16,7 @@ typedef struct FontData {
     int extra_count;
 } FontData;
 
+#define MAX_WINDOWS 8
 typedef struct Toast { char text[160]; float time; } Toast;
 
 struct UiCtx {
@@ -25,6 +26,8 @@ struct UiCtx {
     UiNode *popups[MAX_POPUPS];
     int popup_count;
     UiNode *modal;
+    UiNode *windows[MAX_WINDOWS];   /* floating tool windows (Action Browser): stay open, can be dragged */
+    int window_count;
     UiTheme theme;
     float scale;           /* logical -> physical */
     float atlas_scale;     /* 1 or 2 */
@@ -669,6 +672,15 @@ void ui_draw_icon(UiCtx *ui, UiIcon icon, float x, float y, float s, uint32_t c)
         ui_draw_line(ui, P(0.5f, 0.36f), P(0.3f, 0.46f), t * 1.1f, c);
         break;
     }
+    case UI_ICON_GRAPH:
+        /* three states joined by links: a state graph */
+        ui_draw_rect(ui, x + s * 0.06f, y + s * 0.12f, s * 0.36f, s * 0.24f, c, s * 0.05f);
+        ui_draw_rect(ui, x + s * 0.58f, y + s * 0.12f, s * 0.36f, s * 0.24f, c, s * 0.05f);
+        ui_draw_rect(ui, x + s * 0.32f, y + s * 0.66f, s * 0.36f, s * 0.24f, c, s * 0.05f);
+        ui_draw_line(ui, P(0.42f, 0.24f), P(0.58f, 0.24f), t * 1.2f, c);
+        ui_draw_line(ui, P(0.24f, 0.36f), P(0.4f, 0.66f), t * 1.2f, c);
+        ui_draw_line(ui, P(0.76f, 0.36f), P(0.6f, 0.66f), t * 1.2f, c);
+        break;
     case UI_ICON_AVATAR:
         /* a standing figure with its joints marked */
         ui_draw_circle(ui, x + s * 0.5f, y + s * 0.15f, s * 0.11f, c, 14);
@@ -1069,6 +1081,8 @@ void ui_remove(UiCtx *ui, UiNode *n) {
     for (int i = 0; i < ui->popup_count; i++)
         if (ui->popups[i] == n) { ui->popups[i] = ui->popups[--ui->popup_count]; break; }
     if (ui->modal == n) ui->modal = NULL;
+    for (int i = 0; i < ui->window_count; i++)
+        if (ui->windows[i] == n) { memmove(ui->windows + i, ui->windows + i + 1, sizeof(UiNode *) * (size_t)(ui->window_count - i - 1)); ui->window_count--; break; }
     free_tree(ui, n);
 }
 
@@ -1203,6 +1217,36 @@ static float S(UiCtx *ui, float v) { return v * ui->scale; }
 static bool is_field(UiType t) { return t == UI_TEXTFIELD || t == UI_NUMBER || t == UI_SLIDER || t == UI_DROPDOWN || t == UI_COLOR; }
 
 /* intrinsic size in physical pixels */
+/* labels with wrap set break their text into lines that fit their width (known from the last layout) */
+static int wrap_text(UiCtx *ui, UiFont f, const char *text, float room, float x, float y, uint32_t color, bool draw) {
+    char line[256];
+    int lines = 0;
+    float lh = ui_line_height(ui, f);
+    const char *p = text;
+    while (*p) {
+        size_t n = 0, last_space = 0, best = 0;
+        while (p[n] && p[n] != '\n' && n < sizeof line - 1) {
+            line[n] = p[n];
+            line[n + 1] = 0;
+            if (p[n] == ' ') last_space = n;
+            if (n > 0 && ui_text_width(ui, f, line) > room) break;
+            n++;
+            best = n;
+        }
+        size_t take = best;
+        if (p[take] && p[take] != '\n' && last_space > 0) take = last_space;
+        if (take == 0) take = p[0] == '\n' ? 0 : 1;
+        memcpy(line, p, take);
+        line[take] = 0;
+        if (draw) ui_draw_text(ui, f, x, y + lh * (float)lines, line, color);
+        lines++;
+        p += take;
+        if (*p == '\n') p++;
+        else while (*p == ' ') p++;
+    }
+    return lines ? lines : 1;
+}
+
 static void measure(UiCtx *ui, UiNode *n, float *ow, float *oh) {
     float pw = S(ui, n->pad[0] + n->pad[2]), ph = S(ui, n->pad[1] + n->pad[3]);
     float w = 0, h = 0;
@@ -1213,6 +1257,14 @@ static void measure(UiCtx *ui, UiNode *n, float *ow, float *oh) {
         w = tw + icon + (icon > 0 && tw > 0 ? S(ui, 6) : 0);
         h = lx_maxf(ui_line_height(ui, n->font), icon);
         h = lx_maxf(h, n->font == UI_FONT_TITLE ? 0 : S(ui, 20));
+        if (n->wrap && n->cw > 0 && n->text[0]) {
+            float room = n->cw - pw - (icon > 0 ? icon + S(ui, 6) : 0);
+            if (room > S(ui, 20)) {
+                int lines = wrap_text(ui, n->font, n->text, room, 0, 0, 0, false);
+                if (lines > 1) { w = room + icon; h = lx_maxf(h, ui_line_height(ui, n->font) * (float)lines + S(ui, 2)); }
+            }
+            w = lx_minf(w, n->cw - pw);   /* never asks to be wider than it is: it wraps instead */
+        }
         break;
     }
     case UI_BUTTON: {
@@ -1484,6 +1536,81 @@ void ui_close_modal(UiCtx *ui) {
 bool ui_has_modal(UiCtx *ui) { return ui->modal != NULL; }
 UiNode *ui_modal_node(UiCtx *ui) { return ui->modal; }
 
+/* ---------------- floating windows ---------------- */
+static void window_close_click(UiNode *n) {
+    UiNode *w = n->user;
+    UiCtx *ui = n->ctx;
+    if (w && w->on_change) w->on_change(w);   /* owner hears about it before it goes */
+    ui_remove(ui, w);
+}
+static void window_header_frame(UiNode *h) {
+    UiCtx *ui = h->ctx;
+    UiNode *w = h->parent;
+    if (ui->active == h && lx_mouse_down(LX_MOUSE_LEFT)) {
+        LxVec2 d = lx_mouse_delta();
+        int sw, sh;
+        lx_window_size(&sw, &sh);
+        w->x = lx_clampf(w->x + d.x, -w->cw + S(ui, 80), (float)sw - S(ui, 80));
+        w->y = lx_clampf(w->y + d.y, 0, (float)sh - S(ui, 30));
+    }
+}
+UiNode *ui_window(UiCtx *ui, const char *title, float x, float y, float w, float h) {
+    if (ui->window_count >= MAX_WINDOWS) ui_remove(ui, ui->windows[0]);
+    UiNode *win = alloc_node(ui, UI_BOX);
+    win->dir = UI_COL;
+    win->bg = ui->theme.panel;
+    win->border = ui->theme.border_light;
+    win->radius = 8;
+    win->clip = true;
+    win->w = w;
+    win->h = h;
+    win->x = x;
+    win->y = y;
+    win->tag = 0x77696e; /* window marker */
+    UiNode *header = ui_box(ui, win, UI_ROW);
+    header->h = 30;
+    header->bg = ui->theme.header;
+    header->radius = 8;
+    ui_pad(header, 12, 0, 4, 0);
+    header->cross_align = UI_ALIGN_CENTER;
+    header->on_frame = window_header_frame;
+    header->on_click = NULL;
+    lx_strcpy(header->tooltip, sizeof header->tooltip, "Drag to move");
+    UiNode *t = ui_label(ui, header, title);
+    t->font = UI_FONT_BOLD;
+    t->grow = 1;
+    UiNode *x_ = ui_icon_button(ui, header, UI_ICON_CLOSE, "Close", window_close_click);
+    x_->user = win;
+    x_->w = 24;
+    x_->h = 24;
+    x_->bg = 0;
+    ui->windows[ui->window_count++] = win;
+    UiNode *body = ui_box(ui, win, UI_COL);
+    body->grow = 1;
+    return body;
+}
+UiNode *ui_window_of(UiCtx *ui, UiNode *n) {
+    for (; n; n = n->parent)
+        for (int i = 0; i < ui->window_count; i++) if (ui->windows[i] == n) return n;
+    return NULL;
+}
+void ui_window_front(UiCtx *ui, UiNode *win) {
+    for (int i = 0; i < ui->window_count; i++)
+        if (ui->windows[i] == win) {
+            memmove(ui->windows + i, ui->windows + i + 1, sizeof(UiNode *) * (size_t)(ui->window_count - i - 1));
+            ui->windows[ui->window_count - 1] = win;
+            return;
+        }
+}
+void ui_close_windows(UiCtx *ui) {
+    while (ui->window_count) ui_remove(ui, ui->windows[ui->window_count - 1]);
+}
+int ui_window_nodes(UiCtx *ui, UiNode **out, int max) {
+    int n = 0;
+    for (int i = 0; i < ui->window_count && n < max; i++) out[n++] = ui->windows[i];
+    return n;
+}
+
 void ui_notify(UiCtx *ui, const char *fmt, ...) {
     if (ui->toast_count == MAX_TOASTS) {
         memmove(ui->toasts, ui->toasts + 1, sizeof(Toast) * (MAX_TOASTS - 1));
@@ -1723,7 +1850,16 @@ static void process_input(UiCtx *ui, float dt) {
     bool over_popup = false;
     for (int i = 0; i < ui->popup_count; i++) over_popup |= inside(ui->popups[i], m);
     UiNode *split = NULL;
-    if (!h && !over_popup) {
+    bool over_window = false;
+    if (!h && !over_popup && !ui->modal)
+        for (int i = ui->window_count - 1; i >= 0; i--)
+            if (!ui->windows[i]->hidden && inside(ui->windows[i], m)) {
+                over_window = true;
+                h = hit(ui->windows[i], m);
+                if (lx_mouse_pressed(LX_MOUSE_LEFT) || lx_mouse_pressed(LX_MOUSE_RIGHT)) ui_window_front(ui, ui->windows[i]);
+                break;
+            }
+    if (!h && !over_popup && !over_window) {
         if (ui->modal) h = hit(ui->modal, m);
         else {
             split = find_split(ui, ui->root, m);
@@ -2022,6 +2158,10 @@ static void draw_node(UiCtx *ui, UiNode *n) {
             ui_draw_icon(ui, n->icon, x, n->y + (n->ch - is) * 0.5f, is, n->icon_color ? n->icon_color : n->fg);
             x += is + S(ui, 6);
         }
+        if (n->wrap && room > S(ui, 20) && content > room) {
+            wrap_text(ui, n->font, n->text, n->x + n->cw - x - S(ui, n->pad[2]), x, n->y + S(ui, n->pad[1]) + S(ui, 1), n->disabled ? t->text_disabled : n->fg, true);
+            break;
+        }
         draw_text_fit(ui, n->font, x, text_y(ui, n, n->font), n->text, n->disabled ? t->text_disabled : n->fg,
                       n->x + n->cw - x - S(ui, n->pad[2]));
         break;
@@ -2235,6 +2375,18 @@ static void run_frame_hooks(UiNode *n) {
     }
 }
 
+static void layout_windows(UiCtx *ui) {
+    int sw, sh;
+    lx_window_size(&sw, &sh);
+    for (int i = 0; i < ui->window_count; i++) {
+        UiNode *w = ui->windows[i];
+        float ww = lx_minf(S(ui, w->w), (float)sw), wh = lx_minf(S(ui, w->h), (float)sh);
+        w->x = lx_clampf(w->x, -ww + S(ui, 80), lx_maxf(0, (float)sw - S(ui, 80)));
+        w->y = lx_clampf(w->y, 0, lx_maxf(0, (float)sh - S(ui, 30)));
+        layout(ui, w, w->x, w->y, ww, wh);
+    }
+}
+
 static void layout_popup(UiCtx *ui, UiNode *p) {
     float w, h;
     measure(ui, p, &w, &h);
@@ -2254,9 +2406,11 @@ void ui_frame(UiCtx *ui, float dt, LxVec4 clear) {
     float want = lx_maxf(1.0f, lx_dpi_scale());
     if (fabsf(want - ui->scale) > 0.01f) { ui->scale = want; load_fonts(ui); }
     run_frame_hooks(ui->root);
+    for (int i = 0; i < ui->window_count; i++) run_frame_hooks(ui->windows[i]);
     if (ui->modal) run_frame_hooks(ui->modal);
     for (int i = 0; i < ui->popup_count; i++) run_frame_hooks(ui->popups[i]);
     layout(ui, ui->root, 0, 0, (float)sw, (float)sh);
+    layout_windows(ui);
     if (ui->modal) {
         float w = S(ui, ui->modal->w), h = S(ui, ui->modal->h);
         layout(ui, ui->modal, ((float)sw - w) * 0.5f, ((float)sh - h) * 0.5f, w, h);
@@ -2266,6 +2420,7 @@ void ui_frame(UiCtx *ui, float dt, LxVec4 clear) {
     if (ui->after_input) ui->after_input(ui);
     /* input handlers may have rebuilt parts of the tree: lay out again before drawing */
     layout(ui, ui->root, 0, 0, (float)sw, (float)sh);
+    layout_windows(ui);
     if (ui->modal) {
         float w = S(ui, ui->modal->w), h = S(ui, ui->modal->h);
         layout(ui, ui->modal, ((float)sw - w) * 0.5f, ((float)sh - h) * 0.5f, w, h);
@@ -2277,6 +2432,12 @@ void ui_frame(UiCtx *ui, float dt, LxVec4 clear) {
     ui->clip[0][0] = 0; ui->clip[0][1] = 0; ui->clip[0][2] = (float)sw; ui->clip[0][3] = (float)sh;
     if (ui->root->bg) ui_draw_rect(ui, 0, 0, (float)sw, (float)sh, ui->root->bg, 0);
     draw_children(ui, ui->root);
+    for (int i = 0; i < ui->window_count; i++) {
+        UiNode *w = ui->windows[i];
+        if (w->hidden) continue;
+        ui_draw_rect(ui, w->x + 3, w->y + 6, w->cw, w->ch, UI_RGBA(0, 0, 0, 110), S(ui, 10));
+        draw_node(ui, w);
+    }
     if (ui->modal) {
         ui_draw_rect(ui, 0, 0, (float)sw, (float)sh, UI_RGBA(0, 0, 0, 140), 0);
         UiNode *m = ui->modal;
@@ -2316,6 +2477,7 @@ void ui_destroy(UiCtx *ui) {
     if (!ui) return;
     ui_close_popups(ui);
     ui_close_modal(ui);
+    ui_close_windows(ui);
     free_tree(ui, ui->root);
     lx_free(ui->verts);
     lx_free(ui->idx);

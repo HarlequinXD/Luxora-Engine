@@ -449,6 +449,7 @@ static LxModule *g_scripts;
 void lx_scripts_unload(void) {
     if (!g_scripts) return;
     lx_behaviours_drop_module(g_scripts);
+    lx_fsm_actions_drop_module(g_scripts);
     lx_module_unload(g_scripts);
     g_scripts = NULL;
     lx_register_builtin_behaviours(); /* in case a script had replaced one */

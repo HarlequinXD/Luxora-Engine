@@ -4,6 +4,7 @@
 #include <math.h>
 #include <stdio.h>
 #include "editor.h"
+#include "graph_editor.h"
 
 typedef void (*SmokeFn)(void);
 int ed_smoke_failures;
@@ -563,6 +564,90 @@ static void s_menu(void) {
 static void s_game_view(void) { ED.game_view = !ED.game_view; ED.show_stats = !ED.show_stats; }
 static void s_rename_dialog(void) { ed_rename_dialog(lx_entity_find(ED.scene, "Cube")); }
 
+/* the State Graph editor on the sample's Patroller */
+static void sg_shot(const char *name) {
+    const char *shot = getenv("LUXORA_SMOKE_SHOT");
+    if (!shot || !shot[0]) return;
+    char dir[LX_PATH_MAX], path[LX_PATH_MAX];
+    lx_path_parent(dir, sizeof dir, shot);
+    lx_path_join(path, sizeof path, dir[0] ? dir : ".", name);
+    lx_renderer_screenshot(path);
+    if (g_big_last) g_big_last = lx_time();   /* a slow screenshot isn't a slow editor frame */
+}
+static UiNode *find_hint(UiNode *n, const char *hint) {
+    if (!n) return NULL;
+    if (n->type == UI_TEXTFIELD && strstr(n->hint, hint)) return n;
+    for (UiNode *c = n->first; c; c = c->next) { UiNode *r = find_hint(c, hint); if (r) return r; }
+    return NULL;
+}
+static int g_sg_actions;
+static int sg_action_count(void) {
+    LxGraph *g = lx_asset_graph("Graphs/Patroller.lxgraph");
+    LxGraphState *st = g ? lx_graph_find_state(g, "Go to B") : NULL;
+    return st ? st->action_count : -1;
+}
+static void s_sg_open(void) {
+    LxEntity e = lx_entity_find(ED.scene, "Patroller");
+    SMOKE_CHECK(e && lx_get_state_graph(ED.scene, e), "the sample has a Patroller with a State Graph");
+    if (!e) return;
+    ed_graph_edit(e, 0);
+    SMOKE_CHECK(ED.view_tabs && ED.view_tabs->tab_index == 1 && ge_graph() && ge_graph()->state_count == 5, "State Graph editor shows its graph");
+    SMOKE_CHECK(ed_graph_select_state("Go to B"), "select a state");
+    g_sg_actions = sg_action_count();
+}
+static void s_sg_browser(void) {
+    UiNode *b = find_node(ui_root(ED.ui), NULL, "Action Browser");
+    SMOKE_CHECK(b != NULL, "Action Browser button in the bottom bar");
+    if (b) ui_test_click(ED.ui, b, false);
+    UiNode *w[8];
+    SMOKE_CHECK(ui_window_nodes(ED.ui, w, 8) == 1 && GE.ab_win, "the Action Browser opens as a window");
+}
+static void s_sg_search(void) {
+    UiNode *w[8];
+    int n = ui_window_nodes(ED.ui, w, 8);
+    UiNode *f = n ? find_hint(w[0], "Search actions") : NULL;
+    SMOKE_CHECK(f != NULL, "Action Browser search field");
+    if (f) ui_test_type(ED.ui, f, "rotate");
+}
+static void s_sg_shot(void) {
+    SMOKE_CHECK(!strcmp(GE.ab_sel, "Rotate"), "searching picks the first match (%s)", GE.ab_sel);
+    sg_shot("state_graph.ppm");
+}
+static void s_sg_add(void) {
+    UiNode *w[8];
+    int n = ui_window_nodes(ED.ui, w, 8);
+    UiNode *b = n ? find_node(w[0], NULL, "Add Action To State") : NULL;
+    SMOKE_CHECK(b && !b->disabled, "Add Action To State is enabled");
+    if (b) ui_test_click(ED.ui, b, false);
+    SMOKE_CHECK(sg_action_count() == g_sg_actions + 1, "the action was added (%d)", sg_action_count());
+}
+static void s_sg_saved(void) {
+    char path[LX_PATH_MAX];
+    lx_asset_path(path, sizeof path, "Graphs/Patroller.lxgraph");
+    char *t = lx_file_read(path, NULL);
+    SMOKE_CHECK(t && strstr(t, "type = Rotate"), "the graph asset was saved");
+    lx_free(t);
+    ge_undo();
+    SMOKE_CHECK(sg_action_count() == g_sg_actions, "graph undo removes it again");
+    ge_action_browser_toggle();
+    UiNode *w[8];
+    SMOKE_CHECK(ui_window_nodes(ED.ui, w, 8) == 0, "the Action Browser closes");
+}
+static void s_sg_play(void) { ed_play(); }
+static void s_sg_playing(void) {
+    LxEntity e = lx_entity_find(ED.scene, "Patroller");
+    const char *st = e ? lx_fsm_current_state(ED.scene, e, 0) : "";
+    SMOKE_CHECK(st[0] != 0, "the graph runs in play mode (%s)", st);
+    SMOKE_CHECK(ge_run() != NULL, "the editor shows the running graph");
+    sg_shot("state_graph_play.ppm");
+}
+static void s_sg_stop(void) { ed_stop(); }
+static void s_sg_stopped(void) {
+    char err[200] = "";
+    SMOKE_CHECK(ED.play == ED_EDIT && ed_graph_check(err, sizeof err), "edit mode again, graph still fine %s", err);
+    if (ED.view_tabs) ED.view_tabs->tab_index = 0;
+}
+
 static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {2, s_mat_select, "select a material asset"},
     {3, s_mat_capture, "find material widgets"},
@@ -650,6 +735,16 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {290, s_model_stopped, "edit mode again after Stop"},
     {292, s_big_make, "make a folder of 4K textures"},
     {294, s_big_open, "open it in the Content Browser"},
+    {300, s_sg_open, "open the State Graph editor"},
+    {303, s_sg_browser, "open the Action Browser"},
+    {305, s_sg_search, "search for an action"},
+    {308, s_sg_shot, "screenshot of the State Graph editor"},
+    {309, s_sg_add, "add the action to the selected state"},
+    {312, s_sg_saved, "saved; undo; close the browser"},
+    {314, s_sg_play, "play"},
+    {330, s_sg_playing, "the State Graph runs"},
+    {332, s_sg_stop, "stop"},
+    {335, s_sg_stopped, "back in edit mode"},
 };
 
 bool ed_smoke_step(int frame) {
@@ -659,5 +754,5 @@ bool ed_smoke_step(int frame) {
             LX_INFO("[smoke] %s", STEPS[i].what);
             if (ED.mode == ED_MODE_EDITOR || frame >= 216) STEPS[i].fn(); /* the last steps run in the Project Manager */
         }
-    return frame < 300 || (g_big_last && !g_big_done);
+    return frame < 340 || (g_big_last && !g_big_done);
 }

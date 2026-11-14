@@ -19,6 +19,21 @@ void lx_fsm_register_action(const LxFsmActionDesc *d) {
         if (!strcmp(g_actions[i]->name, d->name)) { g_actions[i] = d; return; }   /* re-registering replaces (script reloads) */
     LX_VEC_PUSH(g_actions, g_action_count, g_action_cap, d);
 }
+static uint32_t g_actions_epoch = 1;
+uint32_t lx_fsm_actions_epoch(void) { return g_actions_epoch; }
+/* scripts are about to unload: forget their actions; graphs re-bind on their next update */
+void lx_fsm_actions_drop_module(const LxModule *m) {
+    int n = 0;
+    for (int i = 0; i < g_action_count; i++) {
+        const LxFsmActionDesc *d = g_actions[i];
+        bool inside = lx_module_contains(m, d) || lx_module_contains(m, d->name) ||
+                      (d->on_enter && lx_module_contains(m, (const void *)(uintptr_t)d->on_enter)) ||
+                      (d->on_update && lx_module_contains(m, (const void *)(uintptr_t)d->on_update)) ||
+                      (d->on_exit && lx_module_contains(m, (const void *)(uintptr_t)d->on_exit));
+        if (!inside) g_actions[n++] = d;
+    }
+    if (n != g_action_count) { g_action_count = n; g_actions_epoch++; lx_graphs_touch_all(); }
+}
 int lx_fsm_action_count(void) { return g_action_count; }
 const LxFsmActionDesc *lx_fsm_action_at(int i) { return i >= 0 && i < g_action_count ? g_actions[i] : NULL; }
 const LxFsmActionDesc *lx_fsm_action_find(const char *name) {
@@ -186,6 +201,10 @@ LxStateGraph *lx_add_state_graph(LxScene *s, LxEntity e, const char *graph_ref) 
     if (!d->sgraph) d->sgraph = lx_state_graph_alloc();
     d->comps |= LX_COMP_STATE_GRAPH;
     LxStateGraph *g = d->sgraph;
+    if (graph_ref && graph_ref[0]) {   /* fill an empty slot first */
+        for (int i = 0; i < g->count; i++)
+            if (!g->slots[i].graph[0]) { lx_strcpy(g->slots[i].graph, LX_REF_MAX, graph_ref); return g; }
+    }
     if (graph_ref && graph_ref[0] && g->count < LX_FSM_GRAPHS_PER_OBJECT) {
         lx_strcpy(g->slots[g->count].graph, LX_REF_MAX, graph_ref);
         g->count++;
@@ -279,6 +298,7 @@ static void bind(LxFsmRun *r, LxScene *s, const LxStateGraphSlot *slot) {
     LX_UNUSED(s);
     bind_states(r);
     r->bound_version = g->version;
+    r->actions_epoch = g_actions_epoch;
 }
 
 /* ======================================================================
@@ -569,8 +589,9 @@ static void run_start(LxScene *s, LxFsmRun *r) {
 /* the graph was edited while running: keep the current state, re-enter it only if its actions changed */
 static void rebind(LxScene *s, LxFsmRun *r, const LxStateGraphSlot *slot) {
     char cur[LX_FSM_NAME] = "";
-    char types[64][LX_FSM_NAME];
+    const LxFsmActionDesc *types[64];   /* compared, never read: a script reload may have unloaded them */
     int ntypes = 0;
+    uint32_t old_epoch = r->actions_epoch;
     bool flags_f[64] = {0}, flags_e[64] = {0};
     void *states_[64] = {0};
     if (r->state >= 0 && r->state < r->bound_states) {
@@ -578,7 +599,7 @@ static void rebind(LxScene *s, LxFsmRun *r, const LxStateGraphSlot *slot) {
         ntypes = r->bound_counts[r->state] < 64 ? r->bound_counts[r->state] : 64;
         for (int a = 0; a < ntypes; a++) {
             LxFsmBound *b = &r->bound[r->state][a];
-            lx_strcpy(types[a], LX_FSM_NAME, b->desc ? b->desc->name : "");
+            types[a] = b->desc;
             flags_f[a] = b->finished;
             flags_e[a] = b->entered;
             states_[a] = b->state;
@@ -593,8 +614,8 @@ static void rebind(LxScene *s, LxFsmRun *r, const LxStateGraphSlot *slot) {
         if (r->started && r->graph->state_count) { r->state = -1; run_start(s, r); }
         return;
     }
-    bool same = r->bound_counts[idx] == ntypes;
-    for (int a = 0; same && a < ntypes; a++) same = r->bound[idx][a].desc && !strcmp(r->bound[idx][a].desc->name, types[a]);
+    bool same = r->bound_counts[idx] == ntypes && old_epoch == r->actions_epoch;   /* reloaded scripts: start the state again */
+    for (int a = 0; same && a < ntypes; a++) same = r->bound[idx][a].desc && r->bound[idx][a].desc == types[a];
     r->state = idx;
     if (same) {
         for (int a = 0; a < ntypes; a++) {
@@ -611,7 +632,7 @@ static void rebind(LxScene *s, LxFsmRun *r, const LxStateGraphSlot *slot) {
 }
 
 static void run_free(LxScene *s, LxFsmRun *r) {
-    if (s && r->graph && r->bound) exit_state(s, r);
+    if (s && r->graph && r->bound && r->actions_epoch == g_actions_epoch) exit_state(s, r);   /* not into unloaded script code */
     bound_free(r);
     lx_free(r->vars);
     lx_free(r->var_names);

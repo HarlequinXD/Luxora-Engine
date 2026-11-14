@@ -81,6 +81,8 @@ bool lx_graph_save(LxGraph *g, const char *path);
 LxGraph *lx_asset_graph(const char *ref);   /* cached; NULL if missing */
 void lx_graph_replace(const char *ref, LxGraph *g);   /* the editor's copy becomes the cached one (undo) */
 void lx_graphs_clear(void);
+int lx_graphs_loaded(LxGraph **out, int max);   /* graphs in memory */
+void lx_graphs_touch_all(void);           /* every loaded graph re-binds (actions changed) */
 void lx_graph_touch(LxGraph *g);            /* after an edit: version++, dirty */
 
 /* editing helpers (keep names unique, fix references) */
@@ -110,7 +112,7 @@ const char *lx_fsm_default_value(LxFsmType t);
 /* plain-English line for an action ("Move self towards Player at 4.5") */
 void lx_graph_action_summary(const LxGraphAction *a, const LxFsmActionDesc *d, char *out, size_t cap);
 /* problems: unconnected transitions, unknown actions, empty required parameters... (count, text lines) */
-int lx_graph_problems(const LxGraph *g, char (*out)[160], int max);
+int lx_graph_problems(const LxGraph *g, char (*out)[160], int max);   /* how many there are; the first max are written */
 
 /* ---------------- global variables / events (Assets/Globals.lxglobals) ---------------- */
 typedef struct LxGlobals {
@@ -127,6 +129,10 @@ int lx_fsm_globals_index(const char *name);
 LxGraphVar *lx_fsm_globals_find_var(const char *name);
 struct LxFsmValue *lx_fsm_global_value(int i);
 void lx_fsm_globals_reset_values(void);   /* play starts: runtime values from their starting values */
+
+struct LxModule;
+void lx_fsm_actions_drop_module(const struct LxModule *m);
+uint32_t lx_fsm_actions_epoch(void);
 
 /* ---------------- runtime ---------------- */
 typedef struct LxFsmValue {
@@ -151,6 +157,7 @@ typedef struct LxFsmBound {   /* one action as it runs */
 
 typedef struct LxFsmRun {
     LxGraph *graph;
+    uint32_t actions_epoch;     /* lx_fsm_actions_epoch() when bound: scripts unloaded since = don't call their code */
     uint32_t bound_version;
     LxEntity self;
     int slot;

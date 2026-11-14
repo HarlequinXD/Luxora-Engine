@@ -22,6 +22,7 @@ uint32_t ed_color_for_icon(UiIcon icon) {
     case UI_ICON_PREFAB: return UI_HEX(0x6fb7ff);
     case UI_ICON_MODEL: return UI_HEX(0xe8a07a);
     case UI_ICON_ANIMATOR: return UI_HEX(0xf08a4b);
+    case UI_ICON_GRAPH: return UI_HEX(0xc58cff);
     case UI_ICON_AVATAR: return UI_HEX(0x7fd47a);
     case UI_ICON_COLLIDER: return UI_HEX(0x8fd46b);
     case UI_ICON_RIGIDBODY: return UI_HEX(0xffa657);
@@ -75,6 +76,7 @@ UiIcon ed_icon_for_file(const char *name, bool dir) {
     if (ext_is(name, ".wav")) return UI_ICON_SOUND;
     if (ext_is(name, ".c") || ext_is(name, ".h")) return UI_ICON_SCRIPT;
     if (ext_is(name, ".lxprefab")) return UI_ICON_PREFAB;
+    if (ext_is(name, ".lxgraph")) return UI_ICON_GRAPH;
     return UI_ICON_FILE;
 }
 
@@ -89,6 +91,7 @@ static const char *drag_type_for(UiIcon icon) {
     case UI_ICON_FOLDER: return "folder";
     case UI_ICON_PREFAB: return "prefab";
     case UI_ICON_MODEL: return "model";
+    case UI_ICON_GRAPH: return "graph";
     default: return "file";
     }
 }
@@ -677,7 +680,7 @@ static void add_component_menu(UiNode *b) {
         {LX_COMP_BEHAVIOUR, "Behaviour (Script)", UI_ICON_BEHAVIOUR}, {LX_COMP_CROWD, "Crowd", UI_ICON_CROWD},
         {LX_COMP_REFLECTION_PROBE, "Reflection Probe", UI_ICON_PROBE}, {LX_COMP_COLLIDER, "Collider", UI_ICON_COLLIDER},
         {LX_COMP_RIGIDBODY, "Rigidbody", UI_ICON_RIGIDBODY}, {LX_COMP_CHARACTER, "Character Controller", UI_ICON_CHARACTER},
-        {LX_COMP_ANIMATOR, "Animator", UI_ICON_ANIMATOR}, {LX_COMP_STATE_GRAPH, "State Graph", UI_ICON_BEHAVIOUR}};
+        {LX_COMP_ANIMATOR, "Animator", UI_ICON_ANIMATOR}, {LX_COMP_STATE_GRAPH, "State Graph", UI_ICON_GRAPH}};
     for (int i = 0; i < (int)(sizeof comps / sizeof comps[0]); i++) {
         UiNode *it = ui_menu_item(ED.ui, p, comps[i].name, NULL, add_component);
         it->icon = comps[i].icon;
@@ -959,6 +962,11 @@ static void build_entity_inspector(UiNode *body) {
         sec = comp_section(body, UI_ICON_ANIMATOR, "Animator", &g_open_animator, LX_COMP_ANIMATOR);
         ed_animator_section(sec, e);
     }
+    if (d->comps & LX_COMP_STATE_GRAPH) {
+        static bool g_open_sgraph = true;
+        sec = comp_section(body, UI_ICON_GRAPH, "State Graph", &g_open_sgraph, LX_COMP_STATE_GRAPH);
+        ed_state_graph_section(sec, e);
+    }
     if (d->comps & LX_COMP_CROWD) {
         sec = comp_section(body, UI_ICON_CROWD, "Crowd", &g_open_crowd, LX_COMP_CROWD);
         UiNode *row = ed_prop_row(sec, "Agents");
@@ -1155,6 +1163,7 @@ static void build_asset_inspector(UiNode *body) {
     pl->fg = t->text_dim;
     ui_pad(pl, 12, 0, 8, 0);
     if (icon == UI_ICON_MODEL) { ed_model_inspector(body, ref); return; }
+    if (icon == UI_ICON_GRAPH) { ed_graph_asset_inspector(body, ref); return; }
     if (icon == UI_ICON_PREFAB) {
         /* what's inside: every object (indented by depth) and its components */
         static bool g_open_prefab = true;

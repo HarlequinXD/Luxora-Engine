@@ -591,3 +591,13 @@ int lx_graph_problems(const LxGraph *g, char (*out)[160], int max) {
     return n;
 #undef PROBLEM
 }
+
+void lx_graphs_touch_all(void) {
+    for (int i = 0; i < g_graph_count; i++) if (g_graphs[i].g) g_graphs[i].g->version++;
+}
+
+int lx_graphs_loaded(LxGraph **out, int max) {
+    int n = 0;
+    for (int i = 0; i < g_graph_count && n < max; i++) if (g_graphs[i].g) out[n++] = g_graphs[i].g;
+    return n;
+}
