@@ -2959,7 +2959,14 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
             float radius = lx_len3(lx_aabb_extent(wb));
             if (lx_frustum_test_aabb(&frustum, wb)) {
                 float dist = lx_maxf(lx_len3(lx_sub3(c, view->eye)), 1e-3f);
-                dl_add(&R.main_list, mesh, pick_lod(mesh, radius * proj_scale / dist), mat, d->world.m, white);
+                /* moving objects (GI box stand-ins) are marked in the matrix's unused corner: the shader reads their
+                 * bounce light from just outside them, not from the cells their own stand-in keeps dark */
+                LxEntity ent = lx_entity_make((uint32_t)i, d->generation & 0xfffu);
+                if (gi_on && !lx_entity_can_be_static(s, ent, NULL)) {
+                    LxMat4 mk = d->world;
+                    mk.m[15] = 2.0f;
+                    dl_add(&R.main_list, mesh, pick_lod(mesh, radius * proj_scale / dist), mat, mk.m, white);
+                } else dl_add(&R.main_list, mesh, pick_lod(mesh, radius * proj_scale / dist), mat, d->world.m, white);
             } else R.stats.instances_culled++;
             if (d->mesh.cast_shadows) {
                 for (int k = 0; k < cascades; k++)

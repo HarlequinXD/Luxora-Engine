@@ -618,6 +618,90 @@ static void test_gi_moving(void) {
     lx_scene_destroy(s);
 }
 
+/* a moving object's own stand-in mustn't darken it: its surfaces get bounce light like their surroundings
+ * (the user's character had black patches where her face read cells inside her own box) */
+static float self_lit(bool with_object, bool moving_lookup) {
+    LxScene *s = lx_scene_create("Self");
+    LxEntity floor = lx_spawn_primitive(s, LX_PRIM_CUBE, "Floor", lx_v3(0, -0.5f, 0));
+    lx_entity_set_scale(s, floor, lx_v3(12, 1, 12));
+    LxEntity wall = lx_spawn_primitive(s, LX_PRIM_CUBE, "Wall", lx_v3(0, 1.5f, -3));
+    lx_entity_set_scale(s, wall, lx_v3(12, 3, 0.3f));
+    LxEntity lamp = lx_entity_create(s, "Lamp");
+    lx_entity_set_position(s, lamp, lx_v3(0, 2.5f, -1.5f));
+    lx_add_light(s, lamp, LX_LIGHT_POINT)->intensity = 150;
+    s->env.ambient_intensity = 0;
+    if (with_object) {   /* a person-sized moving box */
+        LxEntity body = lx_spawn_primitive(s, LX_PRIM_CUBE, "Person", lx_v3(0, 0.9f, 0));
+        lx_entity_set_scale(s, body, lx_v3(0.5f, 1.8f, 0.35f));
+        lx_add_rigidbody(s, body);
+    }
+    LxGraphicsSettings g = lx_graphics_defaults(1);
+    g.gi_photons_per_frame = 40000;
+    for (int f = 0; f < 40; f++) lx_gi_update(s, &g);
+    float sum = 0;
+    for (int k = 0; k < 4; k++) {   /* the "face", towards the lamp-lit wall: what the bounce light comes from */
+        LxVec3 e = lx_gi_irradiance_ex(lx_v3(-0.15f + 0.1f * k, 1.2f + 0.1f * k, -0.18f), lx_v3(0, 0, -1), true, moving_lookup);
+        sum += e.x + e.y + e.z;
+    }
+    lx_gi_shutdown();
+    lx_scene_destroy(s);
+    return sum;
+}
+static void test_gi_self_shadow(void) {
+    printf("photon gi: moving objects don't darken themselves\n");
+    float open_air = self_lit(false, false), old_way = self_lit(true, false), fixed = self_lit(true, true);
+    printf("  bounce light on a moving body's face: %.4g in open air, %.4g reading its own cells, %.4g reading outside\n", open_air, old_way, fixed);
+    CHECK(open_air > 0, "open air has bounce light (light is recorded along the photons' paths) (%.4g)", open_air);
+    CHECK(fixed >= old_way * 0.95f && fixed > open_air * 0.7f, "a moving body's face is lit like the air around it (%.4g vs %.4g)", fixed, open_air);
+}
+
+/* calibration: under an open sky of radiance L, the light arriving at an upward-facing surface is pi x L
+ * (exactly what the shader uses as ambient light when GI is off). Floor reflects almost no blue, so the blue
+ * channel is the sky alone: near the floor and in mid-air, the photon GI must give pi x L. */
+static void test_gi_sky_calibration(void) {
+    printf("photon gi: sky calibration\n");
+    LxScene *s = lx_scene_create("Sky");
+    LxEntity floor = lx_spawn_primitive(s, LX_PRIM_CUBE, "Floor", lx_v3(0, -0.5f, 0));
+    lx_entity_set_scale(s, floor, lx_v3(40, 1, 40));
+    lx_strcpy(lx_get_mesh(s, floor)->material, LX_REF_MAX, "builtin:red");
+    LxEntity pole = lx_spawn_primitive(s, LX_PRIM_CUBE, "Pole", lx_v3(19.8f, 3, 19.8f));   /* makes the grid tall */
+    lx_entity_set_scale(s, pole, lx_v3(0.2f, 6, 0.2f));
+    s->env.sky_zenith = lx_v3(1, 1, 1);
+    s->env.sky_horizon = lx_v3(1, 1, 1);
+    s->env.ambient_intensity = 0.5f;
+    LxGraphicsSettings g = lx_graphics_defaults(1);
+    g.gi_photons_per_frame = 60000;
+    for (int f = 0; f < 60; f++) lx_gi_update(s, &g);
+    /* The sky here is a 40 m square plane at the scene's top (y = 6), so it's a little short of a full sky. What
+     * the GI's light summary (L1 spherical harmonics) should hold below it, exactly: half of pi L x the plane's
+     * share of all directions, plus half of pi L x its share of the cosine-weighted ones. */
+    const float L = 0.5f;
+    float lo = 0, hi = 0, want_lo = 0, want_hi = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        float y = pass ? 1.6f : 0.02f, h = 6.0f - y, a = 20.0f;
+        float omega = 4.0f * asinf(a * a / (a * a + h * h));
+        double e = 0;
+        const int N = 400;
+        for (int i = 0; i < N; i++)
+            for (int j = 0; j < N; j++) {
+                double x = -a + (i + 0.5) * 2 * a / N, z = -a + (j + 0.5) * 2 * a / N, r2 = x * x + z * z + (double)h * h;
+                e += (double)h * h / (r2 * r2) * (2.0 * a / N) * (2.0 * a / N);
+            }
+        float want = LX_PI * L * 0.5f * (omega / (2.0f * LX_PI) + (float)(e / LX_PI));
+        float got = 0;
+        for (int k = 0; k < 9; k++) {
+            float x = -4.0f + (k % 3) * 4.0f, z = -4.0f + (k / 3) * 4.0f;
+            got += lx_gi_irradiance(lx_v3(x, y, z), lx_v3(0, 1, 0), true).z / 9.0f;
+        }
+        if (pass) { hi = got; want_hi = want; } else { lo = got; want_lo = want; }
+    }
+    printf("  sky light on an upward surface: %.3f at the floor (expected %.3f), %.3f in mid-air (expected %.3f)\n", lo, want_lo, hi, want_hi);
+    CHECK(fabsf(lo / want_lo - 1.0f) < 0.08f, "at the floor it matches the sky exactly (%.3f vs %.3f)", lo, want_lo);
+    CHECK(fabsf(hi / want_hi - 1.0f) < 0.08f, "and in mid-air (%.3f vs %.3f)", hi, want_hi);
+    lx_gi_shutdown();
+    lx_scene_destroy(s);
+}
+
 static void test_gi_leaks(void) {
     printf("photon gi light leaks\n");
     float lit_old, lit_new;
@@ -1575,6 +1659,8 @@ int main(void) {
     test_gi_leaks();
     test_static_safeguard();
     test_gi_moving();
+    test_gi_self_shadow();
+    test_gi_sky_calibration();
     test_acoustics();
     test_crowd();
     test_project();

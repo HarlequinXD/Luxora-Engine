@@ -7,7 +7,7 @@ layout(location = 5) in vec4 in_m1;
 layout(location = 6) in vec4 in_m2;
 layout(location = 7) in vec4 in_m3;
 void main() {
-    mat4 model = mat4(in_m0, in_m1, in_m2, in_m3);
+    mat4 model = mat4(in_m0, in_m1, in_m2, vec4(in_m3.xyz, 1.0));   // w carries the moving-object mark
     vec4 world = model * vec4(in_pos, 1.0);
     vec3 n = normalize(mat3(model) * in_normal);
     float d = length(u.camera_pos.xyz - world.xyz);

@@ -1,12 +1,14 @@
 /* Virtual photon global illumination.
  *
  * Every frame a budget of photons is emitted from the scene's lights (directional, point, spot)
- * and from the sky. Photons are traced through the static-geometry BVH; at each surface they
- * deposit their flux into an irradiance volume stored as L1 spherical harmonics, then bounce
- * diffusely with Russian roulette weighted by surface albedo. Light photons only deposit after
- * their first bounce (direct light is shaded analytically with shadows); sky photons deposit on
- * every hit, which gives sky occlusion for free. Frames are blended temporally so the solution
- * converges progressively and adapts when lights move. */
+ * and from the sky. Photons are traced through the static-geometry BVH (and moving objects' box
+ * stand-ins), then bounce diffusely with Russian roulette weighted by surface albedo. Along every
+ * stretch of path that carries bounced or sky light, the light is recorded in the cells it passes
+ * through (a track-length estimate of the radiance field, as L1 spherical harmonics), so every
+ * point in space has the right bounce light, not only surfaces. The first stretch from a light is
+ * left out (direct light is shaded analytically with shadows); sky light is kept from the start,
+ * which gives sky occlusion for free. Frames are blended temporally so the solution converges
+ * progressively and adapts when lights move. */
 #include "../lx_internal.h"
 
 #define SH_FLOATS 12
@@ -369,6 +371,46 @@ static void push_dep(int thread, LxVec3 pos, LxVec3 dir, LxVec3 flux) {
     LX_VEC_PUSH(G.thread_deps[thread], G.thread_dep_count[thread], G.thread_dep_cap[thread], dp);
 }
 
+/* ---- light along the photons' paths ----
+ * Each stretch of a photon's path that carries bounced (or sky) light adds that light to the cells it passes
+ * through, not just where it lands: light fills the air it travels through, so any point in space (a face, an
+ * arm, a floating platform) has the right bounce light. Two random points along the stretch stand in for every
+ * cell it crosses (the same average, at a fraction of the cost). A photon of flux F crossing length l of a cell
+ * of volume V adds F l / V of light, so each point carries F x (stretch length / 2) / cell (the splat then
+ * divides by the cell's area). */
+#define PATH_POINTS 2
+static bool clip_to_grid(LxVec3 o, LxVec3 d, float t_hit, float *t0, float *t1) {
+    float tn = 0, tf = t_hit;
+    for (int a = 0; a < 3; a++) {
+        float lo = lx_comp3(G.origin, a), hi = lo + lx_comp3(G.cell_size, a) * (float)G.res[a];
+        float oa = lx_comp3(o, a), da = lx_comp3(d, a);
+        if (fabsf(da) < 1e-9f) { if (oa < lo || oa > hi) return false; continue; }
+        float a1 = (lo - oa) / da, a2 = (hi - oa) / da;
+        tn = lx_maxf(tn, lx_minf(a1, a2));
+        tf = lx_minf(tf, lx_maxf(a1, a2));
+    }
+    *t0 = tn;
+    *t1 = tf;
+    return tf > tn;
+}
+static void push_path(int thread, LxRng *rng, LxVec3 o, LxVec3 d, float t_hit, LxVec3 flux) {
+    float t0, t1;
+    if (!clip_to_grid(o, d, t_hit, &t0, &t1)) return;
+    float w = (t1 - t0) / (PATH_POINTS * G.cell_size.x);
+    for (int k = 0; k < PATH_POINTS; k++) {
+        float t = t0 + (t1 - t0) * lx_rng_f(rng);
+        push_dep(thread, lx_madd3(o, d, t), d, lx_scale3(flux, w));
+    }
+}
+/* a cell cut by a wall only has its open part for light to pass through: scale its light up to match */
+static float open_fraction(int i) {
+    if (!G.vis) return 1.0f;
+    const float *v = G.vis + (size_t)i * 6;
+    float f = 1.0f;
+    for (int a = 0; a < 3; a++) f *= lx_minf(v[a * 2], 0.5f) + lx_minf(v[a * 2 + 1], 0.5f);
+    return lx_maxf(f, 0.2f);
+}
+
 static void trace_job(void *user, int begin, int end, int thread) {
     TraceJob *job = user;
     for (int chunk = begin; chunk < end; chunk++) {
@@ -402,10 +444,10 @@ static void trace_job(void *user, int begin, int end, int thread) {
                     LxVec3 np;
                     if (lx_gi_proxy_hit(&G.proxies[pi], o, d, best, &tp, &np)) { best = tp; n = np; alb = G.proxies[pi].albedo; got = true; }
                 }
+                if (bounce > 0 || is_sky) push_path(thread, &rng, o, d, got ? best : 1e30f, flux);   /* bounced light fills the air */
                 if (!got) break;
                 LxVec3 pos = lx_madd3(o, d, best);
                 if (lx_dot3(n, d) > 0) n = lx_neg3(n);
-                if (bounce > 0 || is_sky) push_dep(thread, lx_madd3(pos, n, G.cell_size.x * 0.5f), d, flux);
                 float survive = lx_clampf(lx_maxf(alb.x, lx_maxf(alb.y, alb.z)), 0.0f, 0.95f);
                 if (lx_rng_f(&rng) >= survive) break;
                 flux = lx_scale3(lx_mul3(flux, alb), 1.0f / survive);
@@ -475,7 +517,10 @@ typedef struct BlendJob { float alpha; } BlendJob;
 static void blend_job(void *user, int begin, int end, int thread) {
     LX_UNUSED(thread);
     float a = ((BlendJob *)user)->alpha;
-    for (int i = begin * SH_FLOATS; i < end * SH_FLOATS; i++) G.accum[i] += (G.frame[i] - G.accum[i]) * a;
+    for (int c = begin; c < end; c++) {
+        float k = 1.0f / open_fraction(c);
+        for (int i = c * SH_FLOATS; i < (c + 1) * SH_FLOATS; i++) G.accum[i] += (G.frame[i] * k - G.accum[i]) * a;
+    }
 }
 
 /* Everything both tracers share: the BVH and grid, the emitters, the lighting signature and convergence.
@@ -593,7 +638,7 @@ void lx_gi_update(LxScene *s, const LxGraphicsSettings *g) {
 
 /* ---------------- the GPU tracer's side: the renderer runs the photons in compute shaders ---------------- */
 /* Fill one GPU dispatch: emitters (sun and sky powers follow the area photons are aimed at), budget, scales. */
-static void fill_trace(LxGiTrace *t, int photons, LxAabb aim, float step_back, float cell, LxVec3 near_c, float near_r) {
+static void fill_trace(LxGiTrace *t, int photons, LxAabb aim, float step_back, float cell, int res_max, LxVec3 near_c, float near_r) {
     LxVec3 ext = lx_sub3(aim.max, aim.min);
     t->trace = true;
     t->photons = photons;
@@ -627,9 +672,10 @@ static void fill_trace(LxGiTrace *t, int photons, LxAabb aim, float step_back, f
     t->flux_scale = cum / (float)photons;
     /* Deposits are summed with integer atomics (every Vulkan GPU has them). The fixed-point scale is
      * chosen so even every deposit of the frame landing in one cell can't overflow: a deposit is at
-     * most flux x chroma x 1.4 (albedo / survival over the bounces) x 0.49 (largest SH basis value). */
+     * most flux x chroma x 1.4 (albedo / survival over the bounces) x 0.49 (largest SH basis value), and a stretch
+     * of path adds at most its length in cells (the grid's diagonal: 1.75 x its resolution). */
     float inv_area = 1.0f / (cell * cell);
-    double worst = (double)photons * (double)(G.max_bounces + 1) * (double)t->flux_scale * inv_area * chroma * 1.4 * 0.49;
+    double worst = (double)photons * (double)(G.max_bounces + 1) * (double)t->flux_scale * inv_area * chroma * 1.4 * 0.49 * 1.75 * res_max;
     t->fixed_scale = (float)(2.0e9 / lx_maxf((float)worst, 1e-20f));
     t->deposit_scale = t->fixed_scale * inv_area;
     if (n == 0) t->trace = false;
@@ -674,7 +720,7 @@ bool lx_gi_gpu_frame(LxScene *s, const LxGraphicsSettings *g, int photon_multipl
     LxVec3 sext = lx_sub3(G.scene_bounds.max, G.scene_bounds.min);
     float step_back = lx_len3(sext) * 1.5f;
     if (st == 2) {
-        fill_trace(&f->t, photons, G.scene_bounds, step_back, G.cell_size.x, lx_v3(0, 0, 0), 0);
+        fill_trace(&f->t, photons, G.scene_bounds, step_back, G.cell_size.x, lx_maxf((float)G.res[0], lx_maxf((float)G.res[1], (float)G.res[2])), lx_v3(0, 0, 0), 0);
         f->t.blend = next_blend(g);
         G.version++;
         G.photons_last = photons;
@@ -731,7 +777,7 @@ bool lx_gi_gpu_frame(LxScene *s, const LxGraphicsSettings *g, int photon_multipl
         aim.max = lx_v3(lx_minf(hi.x, G.scene_bounds.max.x), G.scene_bounds.max.y, lx_minf(hi.z, G.scene_bounds.max.z));
         if (aim.max.x <= aim.min.x || aim.max.z <= aim.min.z) continue;   /* the camera is outside the scene */
         LxVec3 centre = lx_madd3(cf->origin, lx_v3(1, 1, 1), size * 0.5f);
-        fill_trace(&cf->t, photons, aim, step_back, cell, centre, size);
+        fill_trace(&cf->t, photons, aim, step_back, cell, cres, centre, size);
         if (!cf->t.trace) continue;
         C[l].frame_count = lx_minf(C[l].frame_count + 1.0f, 1024.0f);
         cf->t.blend = 1.0f / C[l].frame_count;
@@ -771,10 +817,12 @@ float *lx_gi_cpu_reference(LxScene *s, const LxGraphicsSettings *g, int frames, 
 
 /* What the PBR shader does with the GI volume, on the CPU (tests): irradiance at a surface point with normal n.
  * walls = false gives the old plain trilinear lookup, for comparison. */
-LxVec3 lx_gi_irradiance(LxVec3 p, LxVec3 n, bool walls) {
+LxVec3 lx_gi_irradiance(LxVec3 p, LxVec3 n, bool walls) { return lx_gi_irradiance_ex(p, n, walls, false); }
+/* moving: a moving object's surface, which reads the GI from just outside itself (as the shader does) */
+LxVec3 lx_gi_irradiance_ex(LxVec3 p, LxVec3 n, bool walls, bool moving) {
     const float *sh = G.filtered;
     if (!sh) return lx_v3(0, 0, 0);
-    LxVec3 q = lx_madd3(p, n, G.cell_size.x * 0.25f);
+    LxVec3 q = lx_madd3(p, n, moving ? G.cell_size.x * 0.75f + 0.35f : G.cell_size.x * 0.25f);
     LxVec3 g = lx_v3((q.x - G.origin.x) / G.cell_size.x, (q.y - G.origin.y) / G.cell_size.y, (q.z - G.origin.z) / G.cell_size.z);
     int base[3];
     float w[8];

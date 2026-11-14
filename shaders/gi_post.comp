@@ -33,8 +33,12 @@ void main() {
     if (mode == 0) {
         float n = count[i] + 1.0;
         float a = max(1.0 / n, pc.params.x);   // a cell's own first frames weigh fully, then the grid's history rule
+        // a cell cut by a wall only has its open part for light to pass through: scale its light up to match
+        float open = 1.0;
+        for (int ax = 0; ax < 3; ax++) open *= min(vis[i * 6 + ax * 2], 0.5) + min(vis[i * 6 + ax * 2 + 1], 0.5);
+        float scale = pc.params.y / max(open, 0.2);
         for (int k = 0; k < 12; k++) {
-            float f = float(dep[i * 12 + k]) * pc.params.y;
+            float f = float(dep[i * 12 + k]) * scale;
             accum[i * 12 + k] += (f - accum[i * 12 + k]) * a;
         }
         count[i] = min(n, 1024.0);

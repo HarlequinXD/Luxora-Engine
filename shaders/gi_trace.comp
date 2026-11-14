@@ -192,6 +192,22 @@ void find_walls(int i) {
     imageStore(vis_b, at, vec4(v[4], v[5], 1.0, 1.0) / vec4(1.5, 1.5, 1.0, 1.0));
 }
 
+// Bounced (and sky) light fills the air it travels through: two random points along each stretch of a photon's
+// path (clipped to this grid) carry its light, flux x (length / 2) / cell each, as photon_gi.c's push_path.
+void deposit_path(vec3 o, vec3 d, float t_hit, vec3 flux) {
+    vec3 lo = pc.origin_cell.xyz, hi = lo + vec3(pc.res_photons.xyz) * pc.origin_cell.w;
+    float tn = 0.0, tf = t_hit;
+    for (int a = 0; a < 3; a++) {
+        if (abs(d[a]) < 1e-9) { if (o[a] < lo[a] || o[a] > hi[a]) return; continue; }
+        float a1 = (lo[a] - o[a]) / d[a], a2 = (hi[a] - o[a]) / d[a];
+        tn = max(tn, min(a1, a2));
+        tf = min(tf, max(a1, a2));
+    }
+    if (tf <= tn) return;
+    float w = (tf - tn) / (2.0 * pc.origin_cell.w);
+    for (int k = 0; k < 2; k++) deposit(o + d * (tn + (tf - tn) * rnd()), d, flux * w);
+}
+
 void main() {
     uint id = gl_GlobalInvocationID.x;
     if (pc.misc.y == 1) { find_walls(int(id)); return; }
@@ -242,10 +258,10 @@ void main() {
             int base = pc.misc2.x + k * 5;
             if (proxy_hit(base, o, d, t, tp, np)) { t = tp; n = np; alb = px[base + 4].xyz; got = true; }
         }
+        if (b > 0 || sky) deposit_path(o, d, got ? t : 1e30, flux);   // bounced light fills the air
         if (!got) break;
         vec3 pos = o + d * t;
         if (dot(n, d) > 0.0) n = -n;
-        if (b > 0 || sky) deposit(pos + n * (pc.origin_cell.w * 0.5), d, flux);
         float survive = clamp(max(alb.x, max(alb.y, alb.z)), 0.0, 0.95);
         if (rnd() >= survive) break;
         flux = flux * alb / survive;
