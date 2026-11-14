@@ -701,7 +701,10 @@ static void s_tpl_dialog(void) {
     UiNode *b = find_node(ui_root(ED.ui), NULL, "New Project");
     SMOKE_CHECK(ED.mode != ED_MODE_EDITOR && b && b->on_click, "the Project Manager has New Project");
     if (b && b->on_click) b->on_click(b);
-    UiNode *fps = find_label(ui_root(ED.ui), "First Person Shooter"), *tps = find_label(ui_root(ED.ui), "Third Person Action");
+}
+static void s_tpl_pick(void) {
+    UiNode *dlg = ui_modal_node(ED.ui);   /* the dialog floats over the root */
+    UiNode *fps = find_label(dlg, "First Person Shooter"), *tps = find_label(dlg, "Third Person Action");
     SMOKE_CHECK(fps && tps, "the dialog offers the game templates");
     UiNode *card = fps ? fps->parent->parent : NULL;   /* label > top row > card */
     if (card && card->on_click) card->on_click(card);
@@ -844,20 +847,26 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {333, s_sg_loaded, "the new scene plays"},
     {335, s_sg_stop, "stop"},
     {337, s_sg_stopped, "back in edit mode"},
-    {340, s_tpl_close, "close the project"},
-    {344, s_tpl_dialog, "New Project: pick the First Person Shooter template"},
-    {348, s_tpl_dialog_shot, "screenshot of the New Project dialog"},
-    {350, s_tpl_fps, "create and open the FPS template"},
-    {356, s_tpl_play, "play the FPS template"},
-    {420, s_tpl_fps_playing, "the FPS template runs"},
-    {422, s_tpl_stop, "stop"},
-    {426, s_tpl_stopped, "edit mode, mouse free"},
-    {428, s_tpl_tps, "create and open the Third Person template"},
-    {434, s_tpl_play, "play the Third Person template"},
-    {500, s_tpl_tps_playing, "the Third Person template runs"},
-    {502, s_tpl_stop, "stop"},
-    {506, s_tpl_stopped, "edit mode, mouse free"},
 };
+
+/* the template steps start once everything above is finished (the 4K thumbnails can take a while) */
+static const struct { int frame; SmokeFn fn; const char *what; } TPL_STEPS[] = {
+    {0, s_tpl_close, "close the project"},
+    {4, s_tpl_dialog, "New Project"},
+    {8, s_tpl_pick, "pick the First Person Shooter template"},
+    {12, s_tpl_dialog_shot, "screenshot of the New Project dialog"},
+    {14, s_tpl_fps, "create and open the FPS template"},
+    {20, s_tpl_play, "play the FPS template"},
+    {84, s_tpl_fps_playing, "the FPS template runs"},
+    {86, s_tpl_stop, "stop"},
+    {90, s_tpl_stopped, "edit mode, mouse free"},
+    {92, s_tpl_tps, "create and open the Third Person template"},
+    {98, s_tpl_play, "play the Third Person template"},
+    {164, s_tpl_tps_playing, "the Third Person template runs"},
+    {166, s_tpl_stop, "stop"},
+    {170, s_tpl_stopped, "edit mode, mouse free"},
+};
+static int g_tpl_base = -1;
 
 bool ed_smoke_step(int frame) {
     double now = lx_time();
@@ -869,5 +878,12 @@ bool ed_smoke_step(int frame) {
             LX_INFO("[smoke] %s", STEPS[i].what);
             if (ED.mode == ED_MODE_EDITOR || frame >= 216) STEPS[i].fn(); /* the last steps run in the Project Manager */
         }
-    return frame < 510 || (g_big_last && !g_big_done);
+    if (frame < 340 || (g_big_last && !g_big_done)) return true;
+    if (g_tpl_base < 0) g_tpl_base = frame + 1;
+    for (size_t i = 0; i < sizeof TPL_STEPS / sizeof TPL_STEPS[0]; i++)
+        if (TPL_STEPS[i].frame == frame - g_tpl_base) {
+            LX_INFO("[smoke] %s", TPL_STEPS[i].what);
+            TPL_STEPS[i].fn();
+        }
+    return frame - g_tpl_base < 172;
 }
