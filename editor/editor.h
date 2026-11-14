@@ -112,6 +112,7 @@ void ed_build_shell(void);
 void ed_update(float dt);
 void ed_render(void);
 bool ed_viewport_showing_game(void);
+bool ed_viewport_to_screen(LxVec3 p, LxVec2 *out);
 void ed_shortcuts(void);
 void ed_save_prefs(void);
 void ed_load_prefs(void);

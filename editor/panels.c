@@ -789,7 +789,7 @@ static void build_entity_inspector(UiNode *body) {
         float_row(sec, "Intensity", &d->light.intensity, 0.05f, 0, 100000);
         if (d->light.type != LX_LIGHT_DIRECTIONAL) float_row(sec, "Range", &d->light.range, 0.1f, 0.01f, 10000);
         if (d->light.type == LX_LIGHT_SPOT) slider_row(sec, "Spot Angle", &d->light.spot_angle_deg, 1, 179);
-        if (d->light.type == LX_LIGHT_DIRECTIONAL) bool_row(sec, "Cast Shadows", &d->light.cast_shadows);
+        bool_row(sec, "Cast Shadows", &d->light.cast_shadows);   /* point / spot: the nearest 8 in view get shadows */
         bool_row(sec, "Global Illumination", &d->light.contribute_gi);
     }
     if (d->comps & LX_COMP_MESH) {

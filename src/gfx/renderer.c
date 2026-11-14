@@ -18,6 +18,9 @@
 #define FRAMES 2
 #define MAX_CASCADES 4
 #define MAX_LIGHTS 16
+#define LOCAL_SHADOW_LIGHTS 8    /* point / spot lights with shadows at once (the nearest to the camera) */
+#define ATLAS_TILES 8            /* the local shadow atlas is ATLAS_TILES x ATLAS_TILES tiles; a point light uses 6 */
+#define POINT_SHADOW_TAN 1.05f   /* cube faces are a touch wider than 90 degrees so filtering never runs off a face */
 #define MAX_VIEWS_PER_FRAME 24   /* camera views + reflection-probe faces */
 #define PROBE_SLOTS 5            /* 0: automatic environment probe, 1..4: Reflection Probe objects */
 #define PROBE_MAX_MIPS 7
@@ -85,7 +88,9 @@ typedef struct SceneUBO {
     float probe_pos[PROBE_SLOTS][4], probe_min[PROBE_SLOTS][4], probe_max[PROBE_SLOTS][4];
     float refl[4];
     float lights[MAX_LIGHTS][12];
+    float light_shadow[MAX_LIGHTS][8];   /* (first tile or -1, near, far, tan half-angle), (up xyz, tile resolution) */
 } SceneUBO;
+_Static_assert(sizeof(SceneUBO) <= 4096, "SceneUBO must fit its 4 KB slot");
 
 typedef struct Batch { LxMesh *mesh; int lod; const LxMaterial *mat; uint32_t first, count; } Batch;
 typedef struct DrawList {
@@ -160,6 +165,9 @@ static struct {
     /* images */
     GpuImage shadow_map;
     int shadow_res, shadow_layers;
+    GpuImage local_shadow;               /* atlas of point (6 cube faces) and spot (1 tile) light shadow maps */
+    int local_shadow_res;
+    DrawList local_lists[LOCAL_SHADOW_LIGHTS];
     GpuImage gi[3];
     int gi_res[3];
     GpuImage white, flat_normal;
@@ -831,6 +839,7 @@ static bool create_swapchain(void) {
 /* ------------------------------------------------------------------ resources */
 static void create_shadow_map(int res, int layers) {
     image_destroy(&R.shadow_map);
+    image_destroy(&R.local_shadow);
     ImageDesc d = {(uint32_t)res, (uint32_t)res, 1, (uint32_t)layers, 1, R.depth_format,
                    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_DEPTH_BIT,
                    VK_IMAGE_VIEW_TYPE_2D_ARRAY, true};
@@ -842,6 +851,25 @@ static void create_shadow_map(int res, int layers) {
     R.shadow_res = res;
     R.shadow_layers = layers;
 }
+
+/* the point / spot shadow atlas follows the shadow quality: tiles of shadow_resolution / 8 */
+static void create_local_shadow(int res) {
+    image_destroy(&R.local_shadow);
+    ImageDesc d = {(uint32_t)res, (uint32_t)res, 1, 1, 1, R.depth_format,
+                   VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_DEPTH_BIT,
+                   VK_IMAGE_VIEW_TYPE_2D, false};
+    image_create(&R.local_shadow, &d);
+    VkCommandBuffer cmd = one_shot_begin();
+    image_barrier(cmd, R.local_shadow.img, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, 0, 1, 1);
+    one_shot_end(cmd);
+    R.local_shadow_res = res;
+}
+static int local_shadow_size(int shadow_res) { return shadow_res <= 1024 ? 1024 : shadow_res >= 4096 ? 4096 : 2048; }
+
+/* the cube faces of a point light's shadow: direction and up (the shader picks the same ones) */
+static const float CUBE_FACES[6][6] = {{1, 0, 0, 0, 1, 0}, {-1, 0, 0, 0, 1, 0}, {0, 1, 0, 0, 0, 1},
+                                       {0, -1, 0, 0, 0, 1}, {0, 0, 1, 0, 1, 0}, {0, 0, -1, 0, 1, 0}};
 
 static uint16_t f2h(float f) {
     uint32_t x;
@@ -900,6 +928,7 @@ static void write_scene_sets(void) {
         w.pBufferInfo = &bi;
         vkUpdateDescriptorSets(R.device, 1, &w, 0, NULL);
         write_image(s, 1, R.shadow_map.view, R.shadow_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        write_image(s, 5, R.local_shadow.view, R.shadow_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         for (int c = 0; c < 3; c++) write_image(s, (uint32_t)(2 + c), R.gi[c].view, R.linear_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
 }
@@ -1026,13 +1055,14 @@ static void create_static_resources(void) {
     VK_CHECK(vkCreateDescriptorPool(R.device, &pi, NULL, &R.desc_pool));
 
     VkShaderStageFlags vf = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    VkDescriptorSetLayoutBinding sb[5] = {
+    VkDescriptorSetLayoutBinding sb[6] = {
         {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, vf, NULL},
         {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
         {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
         {3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
-        {4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL}};
-    R.scene_layout = set_layout(sb, 5);
+        {4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
+        {5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL}};
+    R.scene_layout = set_layout(sb, 6);
     VkDescriptorSetLayoutBinding mb[MAT_TEXTURES];
     for (uint32_t i = 0; i < MAT_TEXTURES; i++) mb[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
     R.material_layout = set_layout(mb, MAT_TEXTURES);
@@ -1163,6 +1193,7 @@ static void create_static_resources(void) {
         fr->scene_set = alloc_set(R.scene_layout);
     }
     create_shadow_map(R.settings.shadow_resolution, R.settings.shadow_cascades);
+    create_local_shadow(local_shadow_size(R.settings.shadow_resolution));
     create_gi_images(2, 2, 2);
     write_scene_sets();
     create_dummy_cube();
@@ -1252,6 +1283,7 @@ void lx_renderer_shutdown(void) {
     if (R.messenger) vkDestroyDebugUtilsMessengerEXT(R.instance, R.messenger, NULL);
     vkDestroyInstance(R.instance, NULL);
     lx_free(R.mat_sets);
+    for (int i = 0; i < LOCAL_SHADOW_LIGHTS; i++) { lx_free(R.local_lists[i].batches); lx_free(R.local_lists[i].inst); lx_free(R.local_lists[i].item_batch); }
     for (int i = 0; i < MAX_CASCADES; i++) { lx_free(R.shadow_lists[i].batches); lx_free(R.shadow_lists[i].inst); lx_free(R.shadow_lists[i].item_batch); }
     lx_free(R.main_list.batches); lx_free(R.main_list.inst); lx_free(R.main_list.item_batch);
     lx_free(R.probe_list.batches); lx_free(R.probe_list.inst); lx_free(R.probe_list.item_batch);
@@ -2259,6 +2291,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
         int layers = gs->shadow_cascades < 1 ? 1 : (gs->shadow_cascades > MAX_CASCADES ? MAX_CASCADES : gs->shadow_cascades);
         gs->shadow_cascades = layers;
         create_shadow_map(gs->shadow_resolution < 256 ? 256 : gs->shadow_resolution, layers);
+        if (local_shadow_size(gs->shadow_resolution) != R.local_shadow_res) create_local_shadow(local_shadow_size(gs->shadow_resolution));
         write_scene_sets();
     }
     lx_scene_update_transforms(s);
@@ -2276,6 +2309,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     LxVec3 sun_dir = lx_norm3(lx_v3(-0.4f, -1.0f, -0.3f));
     bool sun_shadows = false;
     int nl = 0;
+    bool light_casts[MAX_LIGHTS];
     for (int i = 1; i < s->count; i++) {
         LxEntityData *d = &s->entities[i];
         if (!d->alive || !d->active || !(d->comps & LX_COMP_LIGHT)) continue;
@@ -2290,6 +2324,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
                 ubo.sun_color[0] = col.x; ubo.sun_color[1] = col.y; ubo.sun_color[2] = col.z; ubo.sun_color[3] = 1.0f;
             }
         } else if (nl < MAX_LIGHTS) {
+            light_casts[nl] = l->cast_shadows;
             float *L = ubo.lights[nl++];
             L[0] = d->world.m[12]; L[1] = d->world.m[13]; L[2] = d->world.m[14]; L[3] = l->range > 0.01f ? l->range : 0.01f;
             L[4] = col.x; L[5] = col.y; L[6] = col.z; L[7] = l->type == LX_LIGHT_SPOT ? 2.0f : 1.0f;
@@ -2324,6 +2359,57 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     ubo.gi_cell[0] = gv->cell_size.x; ubo.gi_cell[1] = gv->cell_size.y; ubo.gi_cell[2] = gv->cell_size.z;
     ubo.gi_res[0] = (float)gv->res[0]; ubo.gi_res[1] = (float)gv->res[1]; ubo.gi_res[2] = (float)gv->res[2];
     ubo.counts[0] = nl; ubo.counts[1] = cascades; ubo.counts[2] = R.shadow_res;
+    /* point and spot shadows: the shadow-casting lights nearest the camera whose reach is in view get atlas tiles */
+    int local_n = 0, local_light[LOCAL_SHADOW_LIGHTS];
+    LxMat4 local_vp[LOCAL_SHADOW_LIGHTS][6];
+    int local_faces[LOCAL_SHADOW_LIGHTS];
+    {
+        LxFrustum vf = lx_frustum_from_matrix(lx_mat4_mul(view->proj, view->view));
+        float score[MAX_LIGHTS];
+        int order[MAX_LIGHTS], no = 0;
+        for (int i = 0; i < nl; i++) {
+            ubo.light_shadow[i][0] = -1.0f;
+            const float *L = ubo.lights[i];
+            LxVec3 lp = lx_v3(L[0], L[1], L[2]);
+            if (!light_casts[i] || !lx_frustum_test_sphere(&vf, lp, L[3])) continue;
+            score[i] = lx_maxf(0.0f, lx_len3(lx_sub3(lp, view->eye)) - L[3]) / L[3];
+            int k = no++;
+            while (k > 0 && score[order[k - 1]] > score[i]) { order[k] = order[k - 1]; k--; }
+            order[k] = i;
+        }
+        int tile = 0, tile_res = R.local_shadow_res / ATLAS_TILES;
+        for (int o = 0; o < no && local_n < LOCAL_SHADOW_LIGHTS; o++) {
+            int i = order[o];
+            const float *L = ubo.lights[i];
+            bool spot = L[7] > 1.5f;
+            int faces = spot ? 1 : 6;
+            if (tile + faces > ATLAS_TILES * ATLAS_TILES) break;
+            LxVec3 lp = lx_v3(L[0], L[1], L[2]);
+            float zn = lx_clampf(L[3] * 0.005f, 0.02f, 0.2f), zf = L[3];
+            float th = POINT_SHADOW_TAN;
+            LxVec3 up = lx_v3(0, 1, 0);
+            if (spot) {
+                LxVec3 f = lx_norm3(lx_v3(L[8], L[9], L[10]));
+                float half = acosf(lx_clampf(L[11], -1.0f, 1.0f));
+                th = tanf(lx_clampf(half * 1.08f, 0.02f, 1.45f));   /* a little wider than the cone */
+                LxVec3 ref = fabsf(f.y) < 0.99f ? lx_v3(0, 1, 0) : lx_v3(1, 0, 0);
+                up = lx_norm3(lx_cross3(lx_cross3(f, ref), f));   /* ref with its part along f removed */
+                local_vp[local_n][0] = lx_mat4_mul(lx_mat4_perspective(2.0f * atanf(th), 1.0f, zn, zf), lx_mat4_look_at(lp, lx_add3(lp, f), up));
+            } else
+                for (int fc = 0; fc < 6; fc++) {
+                    const float *c = CUBE_FACES[fc];
+                    local_vp[local_n][fc] = lx_mat4_mul(lx_mat4_perspective(2.0f * atanf(th), 1.0f, zn, zf),
+                                                        lx_mat4_look_at(lp, lx_add3(lp, lx_v3(c[0], c[1], c[2])), lx_v3(c[3], c[4], c[5])));
+                }
+            float *S = ubo.light_shadow[i];
+            S[0] = (float)tile; S[1] = zn; S[2] = zf; S[3] = th;
+            S[4] = up.x; S[5] = up.y; S[6] = up.z; S[7] = (float)tile_res;
+            local_light[local_n] = i;
+            local_faces[local_n] = faces;
+            tile += faces;
+            local_n++;
+        }
+    }
     /* reflection probes: the first view rendered each frame owns probe placement and capture */
     bool probe_owner = R.probe_frame != R.frame_serial;
     if (probe_owner) {
@@ -2346,6 +2432,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     LxFrustum cfr[MAX_CASCADES];
     for (int c = 0; c < cascades; c++) { cfr[c] = lx_frustum_from_matrix(cvp[c]); dl_reset(&R.shadow_lists[c]); }
     dl_reset(&R.main_list);
+    for (int k = 0; k < local_n; k++) dl_reset(&R.local_lists[k]);
     float proj_scale = view->proj.m[5] * 0.5f; /* screen-height fraction per unit at distance 1 */
     LxVec4 white = lx_v4(1, 1, 1, 1);
     for (int i = 1; i < s->count; i++) {
@@ -2366,10 +2453,17 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
                 float dist = lx_maxf(lx_len3(lx_sub3(c, view->eye)), 1e-3f);
                 dl_add(&R.main_list, mesh, pick_lod(mesh, radius * proj_scale / dist), mat, d->world.m, white);
             } else R.stats.instances_culled++;
-            if (d->mesh.cast_shadows)
+            if (d->mesh.cast_shadows) {
                 for (int k = 0; k < cascades; k++)
                     if (lx_frustum_test_sphere(&cfr[k], c, radius))
                         dl_add(&R.shadow_lists[k], mesh, mesh->lod_count > 1 ? 1 : 0, mat, d->world.m, white);
+                for (int k = 0; k < local_n; k++) {   /* within the light's reach */
+                    const float *L = ubo.lights[local_light[k]];
+                    float reach = L[3] + radius;
+                    if (lx_len3sq(lx_sub3(c, lx_v3(L[0], L[1], L[2]))) < reach * reach)
+                        dl_add(&R.local_lists[k], mesh, mesh->lod_count > 1 ? 1 : 0, mat, d->world.m, white);
+                }
+            }
         }
         if ((d->comps & LX_COMP_CROWD) && d->crowd_sim) {
             LxMesh *mesh = lx_asset_mesh(d->crowd.mesh);
@@ -2400,11 +2494,13 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     }
     bool ok = dl_upload(&R.main_list, fr);
     for (int c = 0; c < cascades; c++) ok = dl_upload(&R.shadow_lists[c], fr) && ok;
+    for (int k = 0; k < local_n; k++) ok = dl_upload(&R.local_lists[k], fr) && ok;
     R.stats.cull_ms = (float)((lx_time() - t_cull) * 1000.0);
     if (!ok) {
         /* instance stream full: draw nothing extra this frame, buffer grows next frame */
         dl_reset(&R.main_list);
         for (int c = 0; c < cascades; c++) dl_reset(&R.shadow_lists[c]);
+        for (int k = 0; k < local_n; k++) dl_reset(&R.local_lists[k]);
     }
 
     /* ---- shadow pass ---- */
@@ -2439,6 +2535,45 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                       VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, 0, 1,
                       (uint32_t)R.shadow_layers);
+    }
+
+    /* ---- point / spot light shadows: one pass over the atlas, a viewport per tile ---- */
+    R.stats.local_shadows = local_n;
+    if (local_n) {
+        image_barrier(cmd, R.local_shadow.img, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+                      VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                      VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT, 0, 1, 1);
+        VkRenderingAttachmentInfo da = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+        da.imageView = R.local_shadow.view;
+        da.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        da.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        da.clearValue.depthStencil.depth = 1.0f;
+        VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO};
+        ri.renderArea.extent.width = (uint32_t)R.local_shadow_res;
+        ri.renderArea.extent.height = (uint32_t)R.local_shadow_res;
+        ri.layerCount = 1;
+        ri.pDepthAttachment = &da;
+        vkCmdBeginRendering(cmd, &ri);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.shadow);
+        int tres = R.local_shadow_res / ATLAS_TILES;
+        for (int k = 0; k < local_n; k++) {
+            int first = (int)ubo.light_shadow[local_light[k]][0];
+            for (int fc = 0; fc < local_faces[k]; fc++) {
+                int t = first + fc, tx = t % ATLAS_TILES, ty = t / ATLAS_TILES;
+                VkViewport vp = {(float)(tx * tres), (float)(ty * tres), (float)tres, (float)tres, 0, 1};
+                VkRect2D sc = {{tx * tres, ty * tres}, {(uint32_t)tres, (uint32_t)tres}};
+                vkCmdSetViewport(cmd, 0, 1, &vp);
+                vkCmdSetScissor(cmd, 0, 1, &sc);
+                vkCmdPushConstants(cmd, R.shadow_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 64, local_vp[k][fc].m);
+                draw_batches(cmd, &R.local_lists[k], fr->inst.buf, false, VK_NULL_HANDLE, 0);
+            }
+        }
+        vkCmdEndRendering(cmd);
+        image_barrier(cmd, R.local_shadow.img, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                      VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, 0, 1, 1);
     }
 
     /* ---- reflection probe capture (time-sliced) ---- */

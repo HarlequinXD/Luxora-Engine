@@ -76,6 +76,53 @@ float shadow_factor(vec3 world, vec3 n) {
     return sum / 9.0;
 }
 
+/* Point and spot light shadows from the atlas. A point light has 6 tiles (cube faces, picked by the
+ * major axis); a spot light has one looking down its cone. The projection is the renderer's perspective
+ * camera written out, so no matrices are needed. Normal offset grows with distance (one texel). */
+const vec3 LX_CUBE_F[6] = vec3[6](vec3(1, 0, 0), vec3(-1, 0, 0), vec3(0, 1, 0), vec3(0, -1, 0), vec3(0, 0, 1), vec3(0, 0, -1));
+const vec3 LX_CUBE_U[6] = vec3[6](vec3(0, 1, 0), vec3(0, 1, 0), vec3(0, 0, 1), vec3(0, 0, 1), vec3(0, 1, 0), vec3(0, 1, 0));
+float local_shadow(int i, vec3 world, vec3 ng) {
+    vec4 s0 = u.light_shadow[i * 2];
+    if (s0.x < 0.0) return 1.0;
+    vec4 s1 = u.light_shadow[i * 2 + 1];
+    vec3 lp = u.lights[i].pos_range.xyz;
+    vec3 d = world - lp;
+    float tile = s0.x;
+    vec3 f, up;
+    if (u.lights[i].color_type.w > 1.5) {
+        f = normalize(u.lights[i].dir_cos.xyz);
+        up = s1.xyz;
+    } else {
+        vec3 a = abs(d);
+        int face = a.x >= a.y && a.x >= a.z ? (d.x >= 0.0 ? 0 : 1) : a.y >= a.z ? (d.y >= 0.0 ? 2 : 3) : (d.z >= 0.0 ? 4 : 5);
+        f = LX_CUBE_F[face];
+        up = LX_CUBE_U[face];
+        tile += float(face);
+    }
+    float zn = s0.y, zf = s0.z, th = s0.w, res = s1.w;
+    float z = dot(d, f);
+    if (z <= zn) return 1.0;
+    vec3 p = world + ng * (2.0 * z * th / res) * 1.5;   // about a texel and a half along the normal
+    d = p - lp;
+    z = max(dot(d, f), zn * 1.001);
+    vec3 r = normalize(cross(f, up));
+    vec2 ndc = vec2(dot(d, r), dot(d, up)) / (z * th);
+    if (any(greaterThan(abs(ndc), vec2(1.0)))) return 1.0;   // outside a spot light's tile
+    vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    float depth = zf * (1.0 - zn / (z * 0.998)) / (zf - zn);
+    if (depth >= 1.0) return 1.0;
+    const float TILES = 8.0;
+    float margin = 1.5 / res;
+    uv = clamp(uv, vec2(margin), vec2(1.0 - margin));
+    vec2 base = (vec2(mod(tile, TILES), floor(tile / TILES)) + uv) / TILES;
+    float texel = 1.0 / (TILES * res);
+    float sum = 0.0;
+    for (int y = -1; y <= 1; y++)
+        for (int x = -1; x <= 1; x++)
+            sum += texture(u_local_shadow, vec3(base + vec2(x, y) * texel, depth));
+    return sum / 9.0;
+}
+
 vec3 gi_irradiance(vec3 world, vec3 n) {
     vec3 g = (world + n * u.gi_cell.x * 0.5 - u.gi_origin.xyz) / (u.gi_cell.xyz * u.gi_res.xyz);
     vec4 r = texture(u_gi_r, g), gg = texture(u_gi_g, g), b = texture(u_gi_b, g);
@@ -213,6 +260,7 @@ void main() {
             float cd = dot(-l, normalize(L.dir_cos.xyz));
             att *= smoothstep(L.dir_cos.w, mix(L.dir_cos.w, 1.0, 0.25), cd);
         }
+        if (att > 0.0) att *= local_shadow(i, v_world, ng);
         color += brdf(n, v, l, albedo, metallic, rough) * L.color_type.rgb * att;
     }
     // indirect: virtual-photon GI volume (or hemisphere ambient when GI is off)

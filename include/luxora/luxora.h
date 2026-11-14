@@ -935,6 +935,7 @@ typedef struct LxRenderStats {
     int gi_photons_traced;
     float gi_ms, cull_ms, frame_ms;
     int probes_active, probe_faces_rendered;
+    int local_shadows;          /* point / spot lights drawn with shadows this frame */
 } LxRenderStats;
 
 typedef struct LxRenderView {

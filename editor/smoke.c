@@ -761,6 +761,94 @@ static void s_tpl_stopped(void) {
     SMOKE_CHECK(ED.play == ED_EDIT && !lx_mouse_locked() && lx_mouse_shown(), "stopping gives the mouse back");
 }
 
+/* point light shadows on the real renderer: a light between two walls, pictured with its shadows off and on;
+ * the floor behind each wall must go dark (two different cube faces), open floor must not change */
+static LxEntity g_ls_light;
+static bool g_ls_gi, g_ls_ssr;
+static const LxVec3 LS_O = {1000, 0, 0};
+static void s_ls_setup(void) {
+    LxScene *s = ED.scene;
+    ED.game_view = false;
+    ED.selected = 0;
+    LxGraphicsSettings *g = lx_graphics_settings();
+    g_ls_gi = g->gi_enabled; g_ls_ssr = g->ssr_enabled;
+    g->gi_enabled = false;   /* nothing that keeps changing between the two pictures */
+    g->ssr_enabled = false;
+    LxEntity floor = lx_spawn_primitive(s, LX_PRIM_PLANE, "LS Floor", LS_O);
+    lx_entity_set_scale(s, floor, lx_v3(4, 1, 4));
+    LxEntity w1 = lx_spawn_primitive(s, LX_PRIM_CUBE, "LS Wall X", lx_add3(LS_O, lx_v3(3, 1, 0)));
+    lx_entity_set_scale(s, w1, lx_v3(0.4f, 2, 3));
+    LxEntity w2 = lx_spawn_primitive(s, LX_PRIM_CUBE, "LS Wall Z", lx_add3(LS_O, lx_v3(0, 1, -3)));
+    lx_entity_set_scale(s, w2, lx_v3(3, 2, 0.4f));
+    g_ls_light = lx_entity_create(s, "LS Lamp");
+    lx_entity_set_position(s, g_ls_light, lx_add3(LS_O, lx_v3(0, 1.5f, 0)));
+    LxLight *l = lx_add_light(s, g_ls_light, LX_LIGHT_POINT);
+    l->color = lx_v3(1, 1, 1);
+    l->intensity = 400;
+    l->range = 25;
+    l->cast_shadows = false;
+    ED.cam_pos = lx_add3(LS_O, lx_v3(0, 20, 0.01f));
+    ED.cam_yaw = 0;
+    ED.cam_pitch = -89.5f;
+}
+static void s_ls_shot_off(void) { sg_shot("light_shadows_off.ppm"); }
+static void s_ls_on(void) { lx_get_light(ED.scene, g_ls_light)->cast_shadows = true; }
+static void s_ls_shot_on(void) { sg_shot("light_shadows_on.ppm"); }
+static unsigned char *ls_ppm(const char *name, int *w, int *h) {
+    const char *shot = getenv("LUXORA_SMOKE_SHOT");
+    char dir[LX_PATH_MAX], path[LX_PATH_MAX];
+    lx_path_parent(dir, sizeof dir, shot);
+    lx_path_join(path, sizeof path, dir[0] ? dir : ".", name);
+    size_t n = 0;
+    unsigned char *t = (unsigned char *)lx_file_read(path, &n);
+    if (!t) return NULL;
+    int maxv = 0, off = 0;
+    if (sscanf((char *)t, "P6 %d %d %d%n", w, h, &maxv, &off) != 3 || (size_t)off + 1 + (size_t)*w * (size_t)*h * 3 > n) { lx_free(t); return NULL; }
+    memmove(t, t + off + 1, (size_t)*w * (size_t)*h * 3);
+    return t;
+}
+static float ls_lum(const unsigned char *px, int w, int h, float x, float y) {
+    float sum = 0;
+    int cnt = 0;
+    for (int dy = -3; dy <= 3; dy++)
+        for (int dx = -3; dx <= 3; dx++) {
+            int X = (int)x + dx, Y = (int)y + dy;
+            if (X < 0 || Y < 0 || X >= w || Y >= h) continue;
+            const unsigned char *p = px + ((size_t)Y * (size_t)w + (size_t)X) * 3;
+            sum += 0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2];
+            cnt++;
+        }
+    return cnt ? sum / (float)cnt : 0;
+}
+static void s_ls_check(void) {
+    LxGraphicsSettings *g = lx_graphics_settings();
+    g->gi_enabled = g_ls_gi; g->ssr_enabled = g_ls_ssr;
+    const char *shot = getenv("LUXORA_SMOKE_SHOT");
+    if (!shot || !shot[0]) { LX_INFO("[smoke] no screenshots on this build - light shadow pictures skipped"); return; }
+    int w0, h0, w1, h1;
+    unsigned char *off = ls_ppm("light_shadows_off.ppm", &w0, &h0), *on = ls_ppm("light_shadows_on.ppm", &w1, &h1);
+    SMOKE_CHECK(off && on && w0 == w1 && h0 == h1, "both light shadow pictures were taken");
+    if (off && on && w0 == w1 && h0 == h1) {
+        int ww, wh;
+        lx_window_size(&ww, &wh);
+        float k = ww > 0 ? (float)w0 / (float)ww : 1.0f;   /* UI coordinates to picture pixels */
+        static const struct { float x, z; bool behind_wall; const char *what; } P[] = {
+            {6.5f, 0, true, "behind the wall on +X"}, {0, -6.5f, true, "behind the wall on -Z"},
+            {-5, 0, false, "open floor on -X"}, {0, 5, false, "open floor on +Z"}};
+        for (int i = 0; i < 4; i++) {
+            LxVec2 sp;
+            bool vis = ed_viewport_to_screen(lx_add3(LS_O, lx_v3(P[i].x, 0, P[i].z)), &sp);
+            float a = vis ? ls_lum(off, w0, h0, sp.x * k, sp.y * k) : -1, b = vis ? ls_lum(on, w0, h0, sp.x * k, sp.y * k) : -1;
+            if (P[i].behind_wall)
+                SMOKE_CHECK(vis && a > 20 && b < a * 0.6f, "point light shadow %s (lit %.0f, shadowed %.0f)", P[i].what, a, b);
+            else
+                SMOKE_CHECK(vis && a > 20 && fabsf(b - a) < a * 0.12f + 3, "no shadow on the %s (%.0f vs %.0f)", P[i].what, a, b);
+        }
+    }
+    lx_free(off);
+    lx_free(on);
+}
+
 static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {2, s_mat_select, "select a material asset"},
     {3, s_mat_capture, "find material widgets"},
@@ -883,6 +971,11 @@ static const struct { int frame; SmokeFn fn; const char *what; } TPL_STEPS[] = {
     {164, s_tpl_tps_playing, "the Third Person template runs"},
     {166, s_tpl_stop, "stop"},
     {170, s_tpl_stopped, "edit mode, mouse free"},
+    {172, s_ls_setup, "a point light between two walls"},
+    {182, s_ls_shot_off, "picture with its shadows off"},
+    {186, s_ls_on, "turn its shadows on"},
+    {196, s_ls_shot_on, "picture with its shadows on"},
+    {200, s_ls_check, "the floor behind each wall is in shadow"},
 };
 static int g_tpl_base = -1;
 
@@ -903,5 +996,5 @@ bool ed_smoke_step(int frame) {
             LX_INFO("[smoke] %s", TPL_STEPS[i].what);
             TPL_STEPS[i].fn();
         }
-    return frame - g_tpl_base < 172;
+    return frame - g_tpl_base < 202;
 }

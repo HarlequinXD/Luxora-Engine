@@ -32,12 +32,14 @@ layout(set = 0, binding = 0, std140) uniform SceneUBO {
     vec4 probe_max[LX_PROBE_SLOTS];  // xyz influence box max, w 1 = box projection
     vec4 refl_params;     // x probe mip count, y 1 = probes on
     LxLightData lights[LX_MAX_LIGHTS];
+    vec4 light_shadow[LX_MAX_LIGHTS * 2];  // per light: (first atlas tile or -1, near, far, tan half-angle), (up xyz, tile resolution)
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2DArrayShadow u_shadow;
 layout(set = 0, binding = 2) uniform sampler3D u_gi_r;
 layout(set = 0, binding = 3) uniform sampler3D u_gi_g;
 layout(set = 0, binding = 4) uniform sampler3D u_gi_b;
+layout(set = 0, binding = 5) uniform sampler2DShadow u_local_shadow;   // point / spot shadow atlas, 8 x 8 tiles
 
 // The engine builds OpenGL-style matrices; convert clip space for Vulkan (y down, z 0..1).
 vec4 lx_to_vulkan(vec4 p) {

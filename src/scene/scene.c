@@ -397,7 +397,7 @@ LxLight *lx_add_light(LxScene *s, LxEntity e, LxLightType type) {
     d->light.intensity = type == LX_LIGHT_DIRECTIONAL ? 3.0f : 20.0f;
     d->light.range = 10.0f;
     d->light.spot_angle_deg = 45.0f;
-    d->light.cast_shadows = type == LX_LIGHT_DIRECTIONAL;
+    d->light.cast_shadows = true;   /* every light: point and spot lights use the shadow atlas */
     d->light.contribute_gi = true;
     s->static_version++;
     return &d->light;

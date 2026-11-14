@@ -48,6 +48,8 @@ static bool to_screen(LxVec3 p, LxVec2 *out) {
     return true;
 }
 
+bool ed_viewport_to_screen(LxVec3 p, LxVec2 *out) { return V.view && to_screen(p, out); }   /* UI coordinates */
+
 static LxRay mouse_ray(void) {
     UiNode *n = V.view;
     LxVec2 m = lx_mouse_pos();
