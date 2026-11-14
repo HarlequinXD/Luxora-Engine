@@ -7,3 +7,4 @@ out/
 android/.gradle/
 android/app/build/
 android/local.properties
+*.raw

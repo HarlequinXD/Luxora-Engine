@@ -512,6 +512,8 @@ static void browse_assets(UiNode *n) {
     g_pick_cap = field->s_cap;
     const char *kind = field->accept;
     UiNode *p = ui_popup(ED.ui, field->x, field->y + field->ch, field->cw / ui_scale(ED.ui) + 30);
+    if (!p) return;
+    p->owner = field;   /* picking writes into the field's data: the list closes if the field goes away */
     int count = 0;
     if (!strcmp(kind, "mesh")) {
         static const char *b[] = {"builtin:cube", "builtin:sphere", "builtin:plane", "builtin:cylinder", "builtin:capsule"};

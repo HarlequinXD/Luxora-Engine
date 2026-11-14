@@ -67,6 +67,12 @@ LxEntity ed_prefab_place(const char *ref, LxVec3 pos, LxEntity parent) {
 }
 
 /* Writes the instance back to its prefab and refreshes every other copy in the scene. */
+/* e is a or under a */
+static bool is_within(LxEntity e, LxEntity a) {
+    for (LxEntity p = e; p; p = lx_entity_parent(ED.scene, p)) if (p == a) return true;
+    return false;
+}
+
 void ed_prefab_apply(LxEntity e) {
     LxEntity root = ed_prefab_root(e);
     if (!root) return;
@@ -82,7 +88,11 @@ void ed_prefab_apply(LxEntity e) {
     int count = lx_scene_entity_count(ED.scene);
     for (int i = 0; i < count && n < 512; i++) {
         LxEntity x = lx_scene_entity_at(ED.scene, i);
-        if (x != root && !strcmp(lx_entity_prefab(ED.scene, x), ref)) others[n++] = x;
+        if (x == root || strcmp(lx_entity_prefab(ED.scene, x), ref)) continue;
+        /* copies nested inside the one being applied are part of it now; a copy that contains it is left alone
+           (rebuilding it would delete the object you're editing) */
+        if (is_within(x, root) || is_within(root, x)) continue;
+        others[n++] = x;
     }
     for (int i = 0; i < n; i++) {
         LxEntity x = others[i];
@@ -91,7 +101,7 @@ void ed_prefab_apply(LxEntity e) {
         LxVec3 pos = lx_entity_position(ED.scene, x), rot = lx_entity_euler(ED.scene, x), scl = lx_entity_scale(ED.scene, x);
         char name[LX_NAME_MAX];
         lx_strcpy(name, sizeof name, lx_entity_name(ED.scene, x));
-        bool was_selected = ED.selected == x;
+        bool was_selected = ED.selected && is_within(ED.selected, x);   /* the copy or something inside it */
         lx_entity_destroy(ED.scene, x);
         LxEntity y = lx_prefab_instantiate(ED.scene, ref, pos, parent);
         if (!y) continue;
