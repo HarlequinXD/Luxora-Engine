@@ -863,6 +863,39 @@ static void s_ls_check(void) {
     lx_free(on);
 }
 
+/* the GPU photon tracer agrees with the CPU one: same scene, both solutions summed over 4x4x4 blocks of cells
+ * (each tracer's noise averages out there) must match in total light and in where it falls */
+static void s_gi_compare(void) {
+    int gr[3], cr[3];
+    float *gpu = lx_renderer_gi_readback(gr);
+    if (!gpu) { LX_INFO("[smoke] photon GI runs on the CPU here - GPU comparison skipped"); return; }
+    float *cpu = lx_gi_cpu_reference(ED.scene, lx_graphics_settings(), 40, cr);
+    SMOKE_CHECK(cpu && cr[0] == gr[0] && cr[1] == gr[1] && cr[2] == gr[2], "CPU reference solution on the same grid");
+    if (cpu && cr[0] == gr[0] && cr[1] == gr[1] && cr[2] == gr[2]) {
+        int bx = (gr[0] + 3) / 4, by = (gr[1] + 3) / 4, bz = (gr[2] + 3) / 4, nb = bx * by * bz;
+        double *ga = lx_calloc((size_t)nb, sizeof(double)), *ca = lx_calloc((size_t)nb, sizeof(double));
+        double gt[3] = {0}, ct[3] = {0};
+        for (int z = 0; z < gr[2]; z++)
+            for (int y = 0; y < gr[1]; y++)
+                for (int x = 0; x < gr[0]; x++) {
+                    size_t i = ((size_t)(z * gr[1] + y) * (size_t)gr[0] + (size_t)x) * 12;
+                    int b = ((z / 4) * by + y / 4) * bx + x / 4;
+                    for (int c = 0; c < 3; c++) { gt[c] += gpu[i + c * 4]; ct[c] += cpu[i + c * 4]; ga[b] += gpu[i + c * 4]; ca[b] += cpu[i + c * 4]; }
+                }
+        double sg = 0, sc = 0, sgg = 0, scc = 0, sgc = 0;
+        for (int b = 0; b < nb; b++) { sg += ga[b]; sc += ca[b]; sgg += ga[b] * ga[b]; scc += ca[b] * ca[b]; sgc += ga[b] * ca[b]; }
+        double cov = sgc - sg * sc / nb, vg = sgg - sg * sg / nb, vc = scc - sc * sc / nb;
+        double corr = (vg > 0 && vc > 0) ? cov / sqrt(vg * vc) : 0;
+        for (int c = 0; c < 3; c++)
+            SMOKE_CHECK(ct[c] > 0 && fabs(gt[c] - ct[c]) < ct[c] * 0.1, "GPU photons carry the same light as the CPU's (channel %d: %.4g vs %.4g)", c, gt[c], ct[c]);
+        SMOKE_CHECK(corr > 0.9, "and put it in the same places (correlation %.3f over %d blocks)", corr, nb);
+        lx_free(ga);
+        lx_free(ca);
+    }
+    lx_free(gpu);
+    lx_free(cpu);
+}
+
 static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {2, s_mat_select, "select a material asset"},
     {3, s_mat_capture, "find material widgets"},
@@ -990,6 +1023,7 @@ static const struct { int frame; SmokeFn fn; const char *what; } TPL_STEPS[] = {
     {186, s_ls_on, "turn its shadows on"},
     {196, s_ls_shot_on, "picture with its shadows on"},
     {200, s_ls_check, "the floor behind each wall is in shadow"},
+    {290, s_gi_compare, "GPU photon GI matches the CPU tracer"},
 };
 static int g_tpl_base = -1;
 
@@ -1010,5 +1044,5 @@ bool ed_smoke_step(int frame) {
             LX_INFO("[smoke] %s", TPL_STEPS[i].what);
             TPL_STEPS[i].fn();
         }
-    return frame - g_tpl_base < 202;
+    return frame - g_tpl_base < 292;
 }

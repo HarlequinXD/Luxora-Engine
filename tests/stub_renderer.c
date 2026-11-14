@@ -83,6 +83,7 @@ static void sample(const SwTex *t, float u, float v, float out[4]) {
     }
     memcpy(out, acc, sizeof acc);
 }
+float *lx_renderer_gi_readback(int res[3]) { (void)res; return NULL; }   /* photon GI runs on the CPU here */
 bool lx_renderer_screenshot(const char *path) {
     int W, H;
     lx_window_size(&W, &H);

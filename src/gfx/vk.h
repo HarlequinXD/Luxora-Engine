@@ -97,6 +97,9 @@
     X(vkCmdSetScissor)                 \
     X(vkCmdPushConstants)              \
     X(vkCmdCopyBuffer)                 \
+    X(vkCmdFillBuffer)                 \
+    X(vkCmdDispatch)                   \
+    X(vkCreateComputePipelines)        \
     X(vkCmdCopyBufferToImage)          \
     X(vkCmdClearColorImage)            \
     X(vkCmdCopyImageToBuffer)          \

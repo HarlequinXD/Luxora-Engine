@@ -36,6 +36,8 @@ static struct {
     uint32_t version;
     float frame_count;
     double settled_photons;   /* photons traced since the lighting last changed */
+    bool gpu;                 /* the renderer traces (lx_gi_gpu_frame); grid arrays live on the GPU */
+    uint32_t scene_version;   /* bumps when the BVH is rebuilt */
     Emitter emitters[64];
     int emitter_count;
     float total_power;
@@ -81,7 +83,7 @@ const float *lx_gi_cell(int x, int y, int z) {
     return G.accum + ((size_t)((z * G.res[1] + y) * G.res[0] + x)) * SH_FLOATS;
 }
 
-static void setup_grid(int longest_res) {
+static void setup_grid(int longest_res, bool cpu) {
     LxAabb b = G.bvh.bounds;
     LxVec3 ext = lx_sub3(b.max, b.min);
     float pad = lx_maxf(0.5f, lx_maxf(ext.x, lx_maxf(ext.y, ext.z)) * 0.05f);
@@ -103,10 +105,13 @@ static void setup_grid(int longest_res) {
     lx_free(G.frame);
     lx_free(G.filtered);
     lx_free(G.scratch);
-    G.accum = lx_calloc((size_t)G.cells * SH_FLOATS, sizeof(float));
-    G.frame = lx_calloc((size_t)G.cells * SH_FLOATS, sizeof(float));
-    G.filtered = lx_calloc((size_t)G.cells * SH_FLOATS, sizeof(float));
-    G.scratch = lx_calloc((size_t)G.cells * SH_FLOATS, sizeof(float));
+    G.accum = G.frame = G.filtered = G.scratch = NULL;
+    if (cpu) {   /* the GPU keeps its own copies */
+        G.accum = lx_calloc((size_t)G.cells * SH_FLOATS, sizeof(float));
+        G.frame = lx_calloc((size_t)G.cells * SH_FLOATS, sizeof(float));
+        G.filtered = lx_calloc((size_t)G.cells * SH_FLOATS, sizeof(float));
+        G.scratch = lx_calloc((size_t)G.cells * SH_FLOATS, sizeof(float));
+    }
     G.frame_count = 0;
     G.settled_photons = 0;
     G.scene_bounds = b;
@@ -321,22 +326,25 @@ static void blend_job(void *user, int begin, int end, int thread) {
     for (int i = begin * SH_FLOATS; i < end * SH_FLOATS; i++) G.accum[i] += (G.frame[i] - G.accum[i]) * a;
 }
 
-void lx_gi_update(LxScene *s, const LxGraphicsSettings *g) {
+/* Everything both tracers share: the BVH and grid, the emitters, the lighting signature and convergence.
+ * Returns 0 = no GI, 1 = converged (keep showing the last solution), 2 = trace this frame. */
+static int prepare(LxScene *s, const LxGraphicsSettings *g, bool gpu) {
     G.volume.valid = false;
-    if (!g->gi_enabled) return;
-    double t0 = lx_time();
+    if (!g->gi_enabled) return 0;
+    if (G.gpu != gpu) { G.gpu = gpu; G.built_scene = NULL; }   /* switching tracer: rebuild the grid for it */
     if (G.built_scene != s || G.built_version != s->static_version) {
         lx_bvh_build_from_scene(&G.bvh, s);
         G.built_scene = s;
         G.built_version = s->static_version;
-        if (G.bvh.tri_count) setup_grid(g->gi_grid_resolution);
+        if (G.bvh.tri_count) setup_grid(g->gi_grid_resolution, !gpu);
         G.grid_setting = g->gi_grid_resolution;
         G.version++;
+        G.scene_version++;
     }
-    if (!G.bvh.tri_count) return;
+    if (!G.bvh.tri_count) return 0;
     if (g->gi_grid_resolution != G.grid_setting) {
         G.grid_setting = g->gi_grid_resolution;
-        setup_grid(g->gi_grid_resolution);
+        setup_grid(g->gi_grid_resolution, !gpu);
         G.version++;
     }
     lx_scene_update_transforms(s);
@@ -347,23 +355,48 @@ void lx_gi_update(LxScene *s, const LxGraphicsSettings *g) {
         for (size_t i = 0; i < sizeof *g; i++) h = (h ^ gb[i]) * 1099511628211ull;
         G.light_hash = h;
     }
+    G.volume.origin = G.origin;
+    G.volume.cell_size = G.cell_size;
+    G.volume.res[0] = G.res[0];
+    G.volume.res[1] = G.res[1];
+    G.volume.res[2] = G.res[2];
     /* Converged: nothing has changed since enough photons were traced, so tracing more only burns every
-     * CPU core for no visible difference. Stop until a light, the sky or the geometry changes. */
+     * core for no visible difference. Stop until a light, the sky or the geometry changes. */
     static const double SETTLED = 24e6;
-    if (G.light_hash == G.prev_light_hash && G.frame_count >= 8 && (G.settled_photons >= SETTLED || G.frame_count >= 1024.0f) && G.filtered) {
+    if (G.light_hash == G.prev_light_hash && G.frame_count >= 8 && (G.settled_photons >= SETTLED || G.frame_count >= 1024.0f) &&
+        (gpu || G.filtered)) {
         G.photons_last = 0;
-        G.ms_last = (float)((lx_time() - t0) * 1000.0);
-        G.volume.origin = G.origin;
-        G.volume.cell_size = G.cell_size;
-        G.volume.res[0] = G.res[0];
-        G.volume.res[1] = G.res[1];
-        G.volume.res[2] = G.res[2];
         G.volume.sh = G.filtered;
         G.volume.version = G.version;
         G.volume.valid = true;
-        return;
+        return 1;
     }
-    if (!G.emitter_count) return;
+    if (!G.emitter_count) return 0;
+    G.max_bounces = g->gi_max_bounces < 1 ? 1 : g->gi_max_bounces;
+    G.seed = G.seed * 6364136223846793005ull + 1442695040888963407ull;
+    return 2;
+}
+
+/* Progressive accumulation: while the lighting is unchanged every frame gets equal weight
+ * (a true running average), so noise keeps falling as 1/sqrt(frames) up to a long history.
+ * When a light, the sky or the geometry changes, the history is shortened to 1/responsiveness
+ * frames so the solution follows quickly, then it lengthens again and the noise settles. */
+static float next_blend(const LxGraphicsSettings *g) {
+    static const float MAX_HISTORY = 1024.0f;
+    if (G.light_hash != G.prev_light_hash) {
+        float fast = 1.0f / lx_clampf(g->gi_responsiveness, 0.01f, 1.0f);
+        if (G.frame_count > fast) G.frame_count = fast;
+        G.prev_light_hash = G.light_hash;
+        G.settled_photons = 0;
+    }
+    G.frame_count = lx_minf(G.frame_count + 1.0f, MAX_HISTORY);
+    return 1.0f / G.frame_count;
+}
+
+void lx_gi_update(LxScene *s, const LxGraphicsSettings *g) {
+    double t0 = lx_time();
+    int st = prepare(s, g, false);
+    if (st != 2) { G.ms_last = (float)((lx_time() - t0) * 1000.0); return; }
     if (!G.threads) {
         G.threads = lx_jobs_thread_count();
         G.thread_deps = lx_calloc((size_t)G.threads, sizeof(Deposit *));
@@ -371,8 +404,6 @@ void lx_gi_update(LxScene *s, const LxGraphicsSettings *g) {
         G.thread_dep_cap = lx_calloc((size_t)G.threads, sizeof(int));
     }
     for (int t = 0; t < G.threads; t++) G.thread_dep_count[t] = 0;
-    G.max_bounces = g->gi_max_bounces < 1 ? 1 : g->gi_max_bounces;
-    G.seed = G.seed * 6364136223846793005ull + 1442695040888963407ull;
     int photons = g->gi_photons_per_frame < 256 ? 256 : g->gi_photons_per_frame;
     TraceJob tj;
     tj.photons_per_chunk = 256;
@@ -382,19 +413,7 @@ void lx_gi_update(LxScene *s, const LxGraphicsSettings *g) {
     lx_parallel_for(chunks, 1, trace_job, &tj);
     memset(G.frame, 0, sizeof(float) * (size_t)G.cells * SH_FLOATS);
     lx_parallel_for(G.res[2], 1, splat_job, NULL);
-    /* Progressive accumulation: while the lighting is unchanged every frame gets equal weight
-     * (a true running average), so noise keeps falling as 1/sqrt(frames) up to a long history.
-     * When a light, the sky or the geometry changes, the history is shortened to 1/responsiveness
-     * frames so the solution follows quickly, then it lengthens again and the noise settles. */
-    static const float MAX_HISTORY = 1024.0f;
-    if (G.light_hash != G.prev_light_hash) {
-        float fast = 1.0f / lx_clampf(g->gi_responsiveness, 0.01f, 1.0f);
-        if (G.frame_count > fast) G.frame_count = fast;
-        G.prev_light_hash = G.light_hash;
-        G.settled_photons = 0;
-    }
-    G.frame_count = lx_minf(G.frame_count + 1.0f, MAX_HISTORY);
-    BlendJob bj = {1.0f / G.frame_count};
+    BlendJob bj = {next_blend(g)};
     lx_parallel_for(G.cells, 4096, blend_job, &bj);
     BlurJob bx = {G.accum, G.scratch, 0}, by = {G.scratch, G.filtered, 1}, bz = {G.filtered, G.scratch, 2};
     lx_parallel_for(G.cells, 4096, blur_job, &bx);
@@ -413,4 +432,84 @@ void lx_gi_update(LxScene *s, const LxGraphicsSettings *g) {
     G.volume.sh = G.filtered;
     G.volume.version = G.version;
     G.volume.valid = true;
+}
+
+/* ---------------- the GPU tracer's side: the renderer runs the photons in compute shaders ---------------- */
+bool lx_gi_gpu_frame(LxScene *s, const LxGraphicsSettings *g, int photon_multiplier, LxGiGpuFrame *f) {
+    memset(f, 0, sizeof *f);
+    double t0 = lx_time();
+    int st = prepare(s, g, true);
+    if (st == 0) { G.ms_last = (float)((lx_time() - t0) * 1000.0); return false; }
+    f->bvh = &G.bvh;
+    f->scene_version = G.scene_version;
+    f->res[0] = G.res[0]; f->res[1] = G.res[1]; f->res[2] = G.res[2];
+    f->origin = G.origin;
+    f->cell = G.cell_size.x;
+    if (st == 2) {
+        int photons = g->gi_photons_per_frame < 256 ? 256 : g->gi_photons_per_frame;
+        photons *= photon_multiplier < 1 ? 1 : photon_multiplier;
+        photons = (photons + 63) / 64 * 64;
+        f->trace = true;
+        f->photons = photons;
+        f->max_bounces = G.max_bounces;
+        f->seed = (uint32_t)(G.seed >> 32) ^ (uint32_t)G.seed;
+        f->flux_scale = G.total_power / (float)photons;
+        f->total_power = G.total_power;
+        f->bounds_min = G.scene_bounds.min;
+        f->bounds_ext = lx_sub3(G.scene_bounds.max, G.scene_bounds.min);
+        /* Deposits are summed with integer atomics (every Vulkan GPU has them). The fixed-point scale is
+         * chosen so even every deposit of the frame landing in one cell can't overflow: a deposit is at
+         * most flux x chroma x 1.4 (albedo / survival over the bounces) x 0.49 (largest SH basis value). */
+        float chroma = 1.0f;
+        f->emitter_count = G.emitter_count;
+        float cum = 0;
+        for (int i = 0; i < G.emitter_count; i++) {
+            const Emitter *e = &G.emitters[i];
+            float lum = luminance(e->color);
+            LxVec3 c = lx_scale3(e->color, 1.0f / (lum > 1e-6f ? lum : 1.0f));
+            chroma = lx_maxf(chroma, lx_maxf(c.x, lx_maxf(c.y, c.z)));
+            cum += e->power;
+            float *E = f->emitters[i];
+            E[0] = e->pos.x; E[1] = e->pos.y; E[2] = e->pos.z; E[3] = (float)e->kind;
+            E[4] = e->dir.x; E[5] = e->dir.y; E[6] = e->dir.z; E[7] = e->cos_cone;
+            E[8] = c.x; E[9] = c.y; E[10] = c.z; E[11] = cum;
+        }
+        float inv_area = 1.0f / (G.cell_size.x * G.cell_size.x);
+        double worst = (double)photons * (double)(G.max_bounces + 1) * (double)f->flux_scale * inv_area * chroma * 1.4 * 0.49;
+        f->fixed_scale = (float)(2.0e9 / lx_maxf((float)worst, 1e-20f));
+        f->deposit_scale = f->fixed_scale * inv_area;
+        f->blend = next_blend(g);
+        G.version++;
+        G.photons_last = photons;
+        G.settled_photons += photons;
+    }
+    G.volume.sh = NULL;   /* the solution lives in the GPU's textures */
+    G.volume.version = G.version;
+    G.volume.valid = true;
+    G.ms_last = (float)((lx_time() - t0) * 1000.0);
+    return true;
+}
+
+/* A CPU solution of the same scene, for checking the GPU tracer: runs the CPU photons for `frames` frames on
+ * the side (the live state is kept) and returns the unblurred accumulation (cells x 12, free with lx_free). */
+float *lx_gi_cpu_reference(LxScene *s, const LxGraphicsSettings *g, int frames, int res[3]) {
+    static __typeof__(G) saved;
+    saved = G;
+    memset(&G, 0, sizeof G);
+    LxGraphicsSettings gg = *g;
+    gg.gi_enabled = true;
+    for (int i = 0; i < frames; i++) {
+        G.prev_light_hash = G.light_hash;   /* never "converged" or "changed": plain averaging */
+        G.settled_photons = 0;
+        lx_gi_update(s, &gg);
+    }
+    float *out = NULL;
+    if (G.accum) {
+        out = lx_alloc((size_t)G.cells * SH_FLOATS * sizeof(float));
+        memcpy(out, G.accum, (size_t)G.cells * SH_FLOATS * sizeof(float));
+        res[0] = G.res[0]; res[1] = G.res[1]; res[2] = G.res[2];
+    }
+    lx_gi_shutdown();
+    G = saved;
+    return out;
 }

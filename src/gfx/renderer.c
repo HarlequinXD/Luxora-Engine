@@ -124,6 +124,7 @@ static struct {
     VkPhysicalDeviceMemoryProperties mem_props;
     VkDevice device;
     uint32_t queue_family;
+    bool queue_compute;
     VkQueue queue;
     VkCommandPool pool;
     /* swapchain */
@@ -165,6 +166,17 @@ static struct {
     /* images */
     GpuImage shadow_map;
     int shadow_res, shadow_layers;
+    /* GPU photon tracing (compute): scene BVH, emitters, this frame's fixed-point deposits, the running
+     * average and blur scratch; the result goes straight into the gi[] textures */
+    bool gi_gpu;                         /* compute path available (else the CPU tracer + upload) */
+    int gi_mult;                         /* photons x this on the GPU */
+    VkDescriptorSetLayout gi_comp_layout;
+    VkPipelineLayout gi_trace_pl, gi_post_pl;
+    VkPipeline gi_trace_pipe, gi_post_pipe;
+    VkDescriptorSet gi_comp_set;
+    GpuBuffer gi_nodes, gi_tris, gi_mats, gi_emit, gi_dep, gi_accum, gi_tmp_a, gi_tmp_b;
+    uint32_t gi_scene_version;
+    bool gi_buffers_ok;
     GpuImage local_shadow;               /* atlas of point (6 cube faces) and spot (1 tile) light shadow maps */
     int local_shadow_res;
     DrawList local_lists[LOCAL_SHADOW_LIGHTS];
@@ -687,7 +699,10 @@ static bool pick_device(void) {
             vkGetPhysicalDeviceSurfaceSupportKHR(devs[i], q, R.surface, &present);
             if (!(qp[q].queueFlags & VK_QUEUE_GRAPHICS_BIT) || !present) continue;
             int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 1000 : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 500 : 10;
-            if (score > best_score) { best_score = score; R.gpu = devs[i]; R.queue_family = q; R.props = p; }
+            if (score > best_score) {
+                best_score = score; R.gpu = devs[i]; R.queue_family = q; R.props = p;
+                R.queue_compute = (qp[q].queueFlags & VK_QUEUE_COMPUTE_BIT) != 0;
+            }
             break;
         }
     }
@@ -884,7 +899,7 @@ static uint16_t f2h(float f) {
 static void create_gi_images(int rx, int ry, int rz) {
     for (int c = 0; c < 3; c++) image_destroy(&R.gi[c]);
     ImageDesc d = {(uint32_t)rx, (uint32_t)ry, (uint32_t)rz, 1, 1, VK_FORMAT_R16G16B16A16_SFLOAT,
-                   VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_3D, false};
+                   VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (R.gi_gpu ? VK_IMAGE_USAGE_STORAGE_BIT : 0), VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_3D, false};
     size_t bytes = (size_t)rx * (size_t)ry * (size_t)rz * 8;
     GpuBuffer zero;
     buffer_create(&zero, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true);
@@ -1044,12 +1059,239 @@ static void create_dummy_cube(void) {
     one_shot_end(cmd);
 }
 
+/* ------------------------------------------------------------------ GPU photons */
+static void gi_comp_write(void) {
+    if (!R.gi_gpu || !R.gi_comp_set) return;
+    GpuBuffer *bufs[8] = {&R.gi_nodes, &R.gi_tris, &R.gi_mats, &R.gi_emit, &R.gi_dep, &R.gi_accum, &R.gi_tmp_a, &R.gi_tmp_b};
+    VkDescriptorBufferInfo bi[8];
+    VkDescriptorImageInfo ii[3];
+    VkWriteDescriptorSet w[11];
+    int n = 0;
+    for (int i = 0; i < 8; i++) {
+        if (!bufs[i]->buf) continue;
+        bi[i] = (VkDescriptorBufferInfo){bufs[i]->buf, 0, VK_WHOLE_SIZE};
+        w[n] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w[n].dstSet = R.gi_comp_set;
+        w[n].dstBinding = (uint32_t)i;
+        w[n].descriptorCount = 1;
+        w[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[n].pBufferInfo = &bi[i];
+        n++;
+    }
+    for (int c = 0; c < 3; c++) {
+        if (!R.gi[c].view) continue;
+        ii[c] = (VkDescriptorImageInfo){VK_NULL_HANDLE, R.gi[c].view, VK_IMAGE_LAYOUT_GENERAL};
+        w[n] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w[n].dstSet = R.gi_comp_set;
+        w[n].dstBinding = (uint32_t)(8 + c);
+        w[n].descriptorCount = 1;
+        w[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[n].pImageInfo = &ii[c];
+        n++;
+    }
+    vkUpdateDescriptorSets(R.device, (uint32_t)n, w, 0, NULL);
+}
+
+static void gi_comp_init(void) {
+    VkFormatProperties fp;
+    vkGetPhysicalDeviceFormatProperties(R.gpu, VK_FORMAT_R16G16B16A16_SFLOAT, &fp);
+    const char *force_cpu = getenv("LUXORA_GI_CPU");
+    R.gi_gpu = R.queue_compute && (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && !(force_cpu && force_cpu[0] == '1');
+    /* a software rasterizer (lavapipe, SwiftShader) is a CPU: no point giving it eight times the photons */
+    R.gi_mult = R.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? 1 : 8;
+    if (!R.gi_gpu) { LX_INFO("Photon GI on the CPU"); return; }
+    VkDescriptorSetLayoutBinding b[11];
+    for (uint32_t i = 0; i < 11; i++)
+        b[i] = (VkDescriptorSetLayoutBinding){i, i < 8 ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL};
+    R.gi_comp_layout = set_layout(b, 11);
+    R.gi_trace_pl = pipe_layout(&R.gi_comp_layout, 1, 96, VK_SHADER_STAGE_COMPUTE_BIT);
+    R.gi_post_pl = pipe_layout(&R.gi_comp_layout, 1, 32, VK_SHADER_STAGE_COMPUTE_BIT);
+    struct { const uint32_t *code; size_t size; VkPipelineLayout pl; VkPipeline *out; } ps[2] = {
+        {lx_spv_gi_trace_comp, sizeof lx_spv_gi_trace_comp, R.gi_trace_pl, &R.gi_trace_pipe},
+        {lx_spv_gi_post_comp, sizeof lx_spv_gi_post_comp, R.gi_post_pl, &R.gi_post_pipe}};
+    for (int i = 0; i < 2; i++) {
+        VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        ci.stage.module = shader_module(ps[i].code, ps[i].size);
+        ci.stage.pName = "main";
+        ci.layout = ps[i].pl;
+        VkResult r = vkCreateComputePipelines(R.device, VK_NULL_HANDLE, 1, &ci, NULL, ps[i].out);
+        vkDestroyShaderModule(R.device, ci.stage.module, NULL);
+        if (r != VK_SUCCESS) { LX_WARN("GPU photon pipeline failed (%d): photon GI on the CPU", (int)r); R.gi_gpu = false; return; }
+    }
+    R.gi_comp_set = alloc_set(R.gi_comp_layout);
+    buffer_create(&R.gi_emit, (VkDeviceSize)FRAMES * 64 * 3 * 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
+    LX_INFO("Photon GI on the GPU (%s, %dx photons)", R.props.deviceName, R.gi_mult);
+}
+
+static void gi_comp_free(void) {
+    GpuBuffer *bufs[8] = {&R.gi_nodes, &R.gi_tris, &R.gi_mats, &R.gi_emit, &R.gi_dep, &R.gi_accum, &R.gi_tmp_a, &R.gi_tmp_b};
+    for (int i = 0; i < 8; i++) buffer_destroy(bufs[i]);
+    if (R.gi_trace_pipe) vkDestroyPipeline(R.device, R.gi_trace_pipe, NULL);
+    if (R.gi_post_pipe) vkDestroyPipeline(R.device, R.gi_post_pipe, NULL);
+    if (R.gi_trace_pl) vkDestroyPipelineLayout(R.device, R.gi_trace_pl, NULL);
+    if (R.gi_post_pl) vkDestroyPipelineLayout(R.device, R.gi_post_pl, NULL);
+    if (R.gi_comp_layout) vkDestroyDescriptorSetLayout(R.device, R.gi_comp_layout, NULL);
+}
+
+/* a device-local storage buffer filled from memory (scene data: uploaded when the static geometry changes) */
+static void gi_upload(GpuBuffer *b, const void *data, size_t bytes) {
+    buffer_destroy(b);
+    buffer_create(b, bytes ? bytes : 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false);
+    GpuBuffer st;
+    buffer_create(&st, bytes ? bytes : 16, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true);
+    if (bytes) memcpy(st.mapped, data, bytes);
+    VkCommandBuffer cmd = one_shot_begin();
+    VkBufferCopy rg = {0, 0, bytes ? bytes : 16};
+    vkCmdCopyBuffer(cmd, st.buf, b->buf, 1, &rg);
+    one_shot_end(cmd);
+    buffer_destroy(&st);
+}
+
+static void gi_upload_scene(const LxBvh *bvh) {
+    vkDeviceWaitIdle(R.device);
+    float *nodes = lx_alloc((size_t)(bvh->node_count ? bvh->node_count : 1) * 8 * sizeof(float));
+    for (int i = 0; i < bvh->node_count; i++) {
+        const LxBvhNode *n = &bvh->nodes[i];
+        float *o = nodes + i * 8;
+        o[0] = n->bounds.min.x; o[1] = n->bounds.min.y; o[2] = n->bounds.min.z; memcpy(&o[3], &n->left_or_first, 4);
+        o[4] = n->bounds.max.x; o[5] = n->bounds.max.y; o[6] = n->bounds.max.z; memcpy(&o[7], &n->count, 4);
+    }
+    /* triangles in leaf order, so a leaf's [first, first + count) indexes them directly */
+    float *tris = lx_alloc((size_t)(bvh->tri_count ? bvh->tri_count : 1) * 16 * sizeof(float));
+    for (int k = 0; k < bvh->tri_count; k++) {
+        int t = bvh->tri_index[k];
+        float *o = tris + k * 16;
+        int mat = bvh->mat_index[t];
+        o[0] = bvh->v0[t].x; o[1] = bvh->v0[t].y; o[2] = bvh->v0[t].z; memcpy(&o[3], &mat, 4);
+        o[4] = bvh->e1[t].x; o[5] = bvh->e1[t].y; o[6] = bvh->e1[t].z; o[7] = 0;
+        o[8] = bvh->e2[t].x; o[9] = bvh->e2[t].y; o[10] = bvh->e2[t].z; o[11] = 0;
+        o[12] = bvh->normals[t].x; o[13] = bvh->normals[t].y; o[14] = bvh->normals[t].z; o[15] = 0;
+    }
+    int nm = bvh->material_count ? bvh->material_count : 1;
+    float *mats = lx_calloc((size_t)nm * 4, sizeof(float));
+    for (int i = 0; i < bvh->material_count; i++) {
+        mats[i * 4] = bvh->materials[i].albedo.x; mats[i * 4 + 1] = bvh->materials[i].albedo.y; mats[i * 4 + 2] = bvh->materials[i].albedo.z;
+    }
+    gi_upload(&R.gi_nodes, nodes, (size_t)bvh->node_count * 32);
+    gi_upload(&R.gi_tris, tris, (size_t)bvh->tri_count * 64);
+    gi_upload(&R.gi_mats, mats, (size_t)nm * 16);
+    lx_free(nodes);
+    lx_free(tris);
+    lx_free(mats);
+}
+
+static void create_gi_images(int rx, int ry, int rz);
+static void write_scene_sets(void);
+/* the grid changed size: new textures and per-cell buffers (the running average starts from zero) */
+static void gi_resize(int rx, int ry, int rz) {
+    vkDeviceWaitIdle(R.device);
+    create_gi_images(rx, ry, rz);
+    write_scene_sets();
+    if (!R.gi_gpu) return;
+    VkDeviceSize bytes = (VkDeviceSize)rx * (VkDeviceSize)ry * (VkDeviceSize)rz * 12 * 4;
+    GpuBuffer *bufs[4] = {&R.gi_dep, &R.gi_accum, &R.gi_tmp_a, &R.gi_tmp_b};
+    for (int i = 0; i < 4; i++) {
+        buffer_destroy(bufs[i]);
+        buffer_create(bufs[i], bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false);
+    }
+    VkCommandBuffer cmd = one_shot_begin();
+    for (int i = 0; i < 4; i++) vkCmdFillBuffer(cmd, bufs[i]->buf, 0, VK_WHOLE_SIZE, 0);
+    one_shot_end(cmd);
+    gi_comp_write();
+}
+
+static void cmd_compute_barrier(VkCommandBuffer cmd, VkPipelineStageFlags src, VkAccessFlags src_access) {
+    VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    mb.srcAccessMask = src_access;
+    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, src, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+}
+
+/* this frame's photons: trace, resolve + blend, blur x / y / z into the GI textures */
+static void gi_gpu_run(VkCommandBuffer cmd, FrameData *fr, const LxGiGpuFrame *f) {
+    if (f->res[0] != R.gi_res[0] || f->res[1] != R.gi_res[1] || f->res[2] != R.gi_res[2] || !R.gi_accum.buf) {
+        gi_resize(f->res[0], f->res[1], f->res[2]);
+        R.gi_scene_version = 0;
+    }
+    if (f->scene_version != R.gi_scene_version) {
+        gi_upload_scene(f->bvh);
+        R.gi_scene_version = f->scene_version;
+        gi_comp_write();
+    }
+    if (!f->trace || !f->emitter_count) return;
+    int slot = (int)(fr - R.frames);
+    memcpy((uint8_t *)R.gi_emit.mapped + (size_t)slot * 64 * 3 * 16, f->emitters, (size_t)f->emitter_count * 48);
+    /* previous frame's compute is done with the deposits before they're cleared */
+    VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    mb.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    vkCmdFillBuffer(cmd, R.gi_dep.buf, 0, VK_WHOLE_SIZE, 0);
+    cmd_compute_barrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+    struct {
+        float origin_cell[4];
+        int32_t res_photons[4];
+        float bmin_seed[4];
+        float bext_power[4];
+        float scales[4];
+        int32_t misc[4];
+    } pc;
+    pc.origin_cell[0] = f->origin.x; pc.origin_cell[1] = f->origin.y; pc.origin_cell[2] = f->origin.z; pc.origin_cell[3] = f->cell;
+    pc.res_photons[0] = f->res[0]; pc.res_photons[1] = f->res[1]; pc.res_photons[2] = f->res[2]; pc.res_photons[3] = f->photons;
+    pc.bmin_seed[0] = f->bounds_min.x; pc.bmin_seed[1] = f->bounds_min.y; pc.bmin_seed[2] = f->bounds_min.z; memcpy(&pc.bmin_seed[3], &f->seed, 4);
+    pc.bext_power[0] = f->bounds_ext.x; pc.bext_power[1] = f->bounds_ext.y; pc.bext_power[2] = f->bounds_ext.z; pc.bext_power[3] = f->total_power;
+    pc.scales[0] = f->flux_scale; pc.scales[1] = f->deposit_scale; pc.scales[2] = (float)f->max_bounces; pc.scales[3] = (float)f->emitter_count;
+    pc.misc[0] = slot * 64 * 3; pc.misc[1] = pc.misc[2] = pc.misc[3] = 0;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, R.gi_trace_pipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, R.gi_trace_pl, 0, 1, &R.gi_comp_set, 0, NULL);
+    vkCmdPushConstants(cmd, R.gi_trace_pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
+    vkCmdDispatch(cmd, (uint32_t)((f->photons + 63) / 64), 1, 1);
+    int cells = f->res[0] * f->res[1] * f->res[2];
+    struct { int32_t res_mode[4]; float params[4]; } pp = {{f->res[0], f->res[1], f->res[2], 0}, {f->blend, 1.0f / f->fixed_scale, 0, 0}};
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, R.gi_post_pipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, R.gi_post_pl, 0, 1, &R.gi_comp_set, 0, NULL);
+    for (int mode = 0; mode < 4; mode++) {
+        cmd_compute_barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
+        if (mode == 3)
+            for (int c = 0; c < 3; c++)
+                image_barrier(cmd, R.gi[c].img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, 0, 1, 1);
+        pp.res_mode[3] = mode;
+        vkCmdPushConstants(cmd, R.gi_post_pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pp, &pp);
+        vkCmdDispatch(cmd, (uint32_t)((cells + 63) / 64), 1, 1);
+    }
+    for (int c = 0; c < 3; c++)
+        image_barrier(cmd, R.gi[c].img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, 0, 1, 1);
+}
+
+/* the GPU's running average (before the blur), for checking it against the CPU tracer */
+float *lx_renderer_gi_readback(int res[3]) {
+    if (!R.gi_gpu || !R.gi_accum.buf) return NULL;
+    vkDeviceWaitIdle(R.device);
+    size_t bytes = (size_t)R.gi_res[0] * (size_t)R.gi_res[1] * (size_t)R.gi_res[2] * 12 * 4;
+    GpuBuffer st;
+    buffer_create(&st, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+    VkCommandBuffer cmd = one_shot_begin();
+    VkBufferCopy rg = {0, 0, bytes};
+    vkCmdCopyBuffer(cmd, R.gi_accum.buf, st.buf, 1, &rg);
+    one_shot_end(cmd);
+    float *out = lx_alloc(bytes);
+    memcpy(out, st.mapped, bytes);
+    buffer_destroy(&st);
+    res[0] = R.gi_res[0]; res[1] = R.gi_res[1]; res[2] = R.gi_res[2];
+    return out;
+}
+
 static void create_static_resources(void) {
-    VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 16}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8192}};
+    VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 16}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8192},
+                                    {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 8}};
     VkDescriptorPoolCreateInfo pi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     pi.maxSets = 4096;
-    pi.poolSizeCount = 2;
+    pi.poolSizeCount = 4;
     pi.pPoolSizes = sizes;
     VK_CHECK(vkCreateDescriptorPool(R.device, &pi, NULL, &R.desc_pool));
 
@@ -1193,6 +1435,7 @@ static void create_static_resources(void) {
     }
     create_shadow_map(R.settings.shadow_resolution, R.settings.shadow_cascades);
     create_local_shadow(local_shadow_size(R.settings.shadow_resolution));
+    gi_comp_init();
     create_gi_images(2, 2, 2);
     write_scene_sets();
     create_dummy_cube();
@@ -1260,6 +1503,7 @@ void lx_renderer_shutdown(void) {
     }
     image_destroy(&R.shadow_map);
     image_destroy(&R.local_shadow);
+    gi_comp_free();
     for (int c = 0; c < 3; c++) image_destroy(&R.gi[c]);
     image_destroy(&R.white);
     image_destroy(&R.flat_normal);
@@ -2297,10 +2541,15 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     lx_scene_update_transforms(s);
 
     /* ---- GI ---- */
-    lx_gi_update(s, gs);
+    if (R.gi_gpu) {
+        static LxGiGpuFrame gf;
+        if (lx_gi_gpu_frame(s, gs, R.gi_mult, &gf)) gi_gpu_run(cmd, fr, &gf);
+    } else {
+        lx_gi_update(s, gs);
+        upload_gi(cmd, fr);
+    }
     R.stats.gi_ms = lx_gi_last_ms();
     R.stats.gi_photons_traced = gs->gi_enabled ? lx_gi_last_photon_count() : 0;
-    upload_gi(cmd, fr);
 
     /* ---- lights ---- */
     SceneUBO ubo;

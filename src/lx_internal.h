@@ -434,6 +434,23 @@ void lx_gi_shutdown(void);
 void lx_gi_update(LxScene *s, const LxGraphicsSettings *g);
 const LxGiVolume *lx_gi_volume(void);
 int lx_gi_last_photon_count(void);
+/* the GPU tracer: what the renderer needs to run this frame's photons in compute shaders */
+typedef struct LxGiGpuFrame {
+    const LxBvh *bvh;
+    uint32_t scene_version;        /* the BVH changed when this does: upload it again */
+    int res[3];
+    LxVec3 origin;
+    float cell;
+    bool trace;                    /* false: converged, keep the last solution */
+    int photons, max_bounces, emitter_count;
+    uint32_t seed;
+    float flux_scale, total_power, fixed_scale, deposit_scale, blend;
+    LxVec3 bounds_min, bounds_ext;
+    float emitters[64][12];        /* (pos, kind), (dir, cos cone), (colour / luminance, cumulative power) */
+} LxGiGpuFrame;
+bool lx_gi_gpu_frame(LxScene *s, const LxGraphicsSettings *g, int photon_multiplier, LxGiGpuFrame *f);
+float *lx_gi_cpu_reference(LxScene *s, const LxGraphicsSettings *g, int frames, int res[3]);
+float *lx_renderer_gi_readback(int res[3]);   /* the GPU tracer's running average (NULL when GI runs on the CPU) */
 float lx_gi_last_ms(void);
 /* CPU access for tests: SH coefficients (12 floats) of a cell */
 const float *lx_gi_cell(int x, int y, int z);

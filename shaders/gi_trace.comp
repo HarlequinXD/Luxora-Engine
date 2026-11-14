@@ -1,0 +1,164 @@
+#version 450
+// GPU photon tracing: one photon per thread, traced through the static-geometry BVH exactly like the CPU
+// tracer (src/gi/photon_gi.c). Deposits go into the cell they land in as fixed-point integers (atomicAdd
+// on int works on every Vulkan GPU); gi_post.comp turns them back into floats, blends and blurs them.
+layout(local_size_x = 64) in;
+
+struct Node { vec4 a; vec4 b; };          // a: min xyz, first/left (int bits); b: max xyz, triangle count (int bits, 0 = inner)
+struct Tri { vec4 v0; vec4 e1; vec4 e2; vec4 n; };   // v0.w = material index (int bits); in leaf order
+layout(std430, set = 0, binding = 0) readonly buffer Nodes { Node nodes[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Tris { Tri tris[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Mats { vec4 albedo[]; };
+layout(std430, set = 0, binding = 3) readonly buffer Emitters { vec4 em[]; };   // 3 per emitter
+layout(std430, set = 0, binding = 4) buffer Deposits { int dep[]; };
+
+layout(push_constant) uniform PC {
+    vec4 origin_cell;    // grid origin, cell size
+    ivec4 res_photons;   // grid resolution, photons this frame
+    vec4 bmin_seed;      // scene bounds min, seed (uint bits)
+    vec4 bext_power;     // scene bounds extent, total emitted power
+    vec4 scales;         // flux per photon, deposit fixed-point scale (x 1/cell area), max bounces, emitter count
+    ivec4 misc;          // x: this frame's first emitter vec4 (emitters are double-buffered per frame in flight)
+} pc;
+
+const float PI = 3.14159265;
+uint rng;
+float rnd() {
+    rng = rng * 747796405u + 2891336453u;
+    uint w = ((rng >> ((rng >> 28u) + 4u)) ^ rng) * 277803737u;
+    return float(((w >> 22u) ^ w) >> 8) * (1.0 / 16777216.0);
+}
+vec3 rnd_sphere() {
+    float z = 1.0 - 2.0 * rnd(), a = 2.0 * PI * rnd(), s = sqrt(max(0.0, 1.0 - z * z));
+    return vec3(s * cos(a), s * sin(a), z);
+}
+vec3 rnd_cosine(vec3 n) {
+    float u1 = rnd(), u2 = rnd();
+    float r = sqrt(u1), phi = 2.0 * PI * u2;
+    vec3 t = abs(n.x) > 0.9 ? vec3(0, 1, 0) : vec3(1, 0, 0);
+    vec3 b1 = normalize(cross(t, n)), b2 = cross(n, b1);
+    return b1 * (r * cos(phi)) + b2 * (r * sin(phi)) + n * sqrt(max(0.0, 1.0 - u1));
+}
+
+float ray_box(vec3 bmin, vec3 bmax, vec3 o, vec3 inv, float tmax) {
+    vec3 t1 = (bmin - o) * inv, t2 = (bmax - o) * inv;
+    vec3 lo = min(t1, t2), hi = max(t1, t2);
+    float tn = max(max(lo.x, lo.y), lo.z), tf = min(min(hi.x, hi.y), hi.z);
+    return (tf >= tn && tn < tmax && tf > 0.0) ? tn : 1e30;
+}
+
+// closest hit: returns the triangle (or -1) and its distance
+int trace(vec3 o, vec3 d, out float best) {
+    best = 1e30;
+    int hit = -1;
+    vec3 inv = 1.0 / mix(d, vec3(1e-9), lessThan(abs(d), vec3(1e-9)));
+    if (ray_box(nodes[0].a.xyz, nodes[0].b.xyz, o, inv, best) >= 1e30) return -1;
+    int stack[48];
+    int sp = 0, node = 0;
+    for (int guard = 0; guard < 4096; guard++) {
+        Node n = nodes[node];
+        int count = floatBitsToInt(n.b.w), first = floatBitsToInt(n.a.w);
+        if (count > 0) {
+            for (int i = 0; i < count; i++) {
+                Tri t = tris[first + i];
+                vec3 p = cross(d, t.e2.xyz);
+                float det = dot(t.e1.xyz, p);
+                if (abs(det) < 1e-12) continue;
+                float id = 1.0 / det;
+                vec3 tv = o - t.v0.xyz;
+                float u = dot(tv, p) * id;
+                if (u < 0.0 || u > 1.0) continue;
+                vec3 q = cross(tv, t.e1.xyz);
+                float v = dot(d, q) * id;
+                if (v < 0.0 || u + v > 1.0) continue;
+                float dist = dot(t.e2.xyz, q) * id;
+                if (dist > 1e-4 && dist < best) { best = dist; hit = first + i; }
+            }
+            if (sp == 0) break;
+            node = stack[--sp];
+            continue;
+        }
+        int c1 = first, c2 = first + 1;
+        float d1 = ray_box(nodes[c1].a.xyz, nodes[c1].b.xyz, o, inv, best);
+        float d2 = ray_box(nodes[c2].a.xyz, nodes[c2].b.xyz, o, inv, best);
+        if (d1 > d2) { float td = d1; d1 = d2; d2 = td; int ti = c1; c1 = c2; c2 = ti; }
+        if (d1 >= 1e30) {
+            if (sp == 0) break;
+            node = stack[--sp];
+        } else {
+            node = c1;
+            if (d2 < 1e30 && sp < 48) stack[sp++] = c2;
+        }
+    }
+    return hit;
+}
+
+void deposit(vec3 pos, vec3 dir, vec3 flux) {
+    ivec3 c = ivec3(floor((pos - pc.origin_cell.xyz) / pc.origin_cell.w));
+    if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, pc.res_photons.xyz))) return;
+    int base = ((c.z * pc.res_photons.y + c.y) * pc.res_photons.x + c.x) * 12;
+    vec3 w = -dir;   // light arrives from where the photon came
+    vec4 sh = vec4(0.282095, 0.488603 * w.y, 0.488603 * w.z, 0.488603 * w.x);
+    vec3 f = flux * pc.scales.y;
+    // random rounding: unbiased, so even deposits smaller than one unit add up to the right total
+    for (int k = 0; k < 4; k++) {
+        int ir = int(floor(f.r * sh[k] + rnd())), ig = int(floor(f.g * sh[k] + rnd())), ib = int(floor(f.b * sh[k] + rnd()));
+        if (ir != 0) atomicAdd(dep[base + k], ir);
+        if (ig != 0) atomicAdd(dep[base + 4 + k], ig);
+        if (ib != 0) atomicAdd(dep[base + 8 + k], ib);
+    }
+}
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= uint(pc.res_photons.w)) return;
+    rng = id * 1664525u + floatBitsToUint(pc.bmin_seed.w);
+    rnd(); rnd();
+    // choose an emitter in proportion to its power
+    int count = int(pc.scales.w);
+    float pick = rnd() * pc.bext_power.w;
+    int e = count - 1;
+    for (int k = 0; k < count; k++)
+        if (pick < em[pc.misc.x + k * 3 + 2].w) { e = k; break; }
+    int eb = pc.misc.x + e * 3;
+    vec4 e0 = em[eb], e1 = em[eb + 1], e2 = em[eb + 2];
+    int kind = int(e0.w + 0.5);
+    vec3 bmin = pc.bmin_seed.xyz, ext = pc.bext_power.xyz;
+    vec3 o, d;
+    if (kind == 0) {          // directional: a random point in the scene, stepped back against the light
+        vec3 p = bmin + vec3(rnd(), rnd(), rnd()) * ext;
+        d = e1.xyz;
+        o = p - d * (length(ext) * 1.5);
+    } else if (kind == 1) {   // point
+        o = e0.xyz;
+        d = rnd_sphere();
+    } else if (kind == 2) {   // spot: uniform in the cone
+        float z = 1.0 - rnd() * (1.0 - e1.w);
+        float a = rnd() * 2.0 * PI, r = sqrt(max(0.0, 1.0 - z * z));
+        vec3 t = abs(e1.y) < 0.9 ? vec3(0, 1, 0) : vec3(1, 0, 0);
+        vec3 bx = normalize(cross(t, e1.xyz)), by = cross(e1.xyz, bx);
+        o = e0.xyz;
+        d = bx * (r * cos(a)) + by * (r * sin(a)) + e1.xyz * z;
+    } else {                  // sky: a plane over the scene shining down
+        o = vec3(bmin.x + rnd() * ext.x, bmin.y + ext.y, bmin.z + rnd() * ext.z);
+        d = rnd_cosine(vec3(0, -1, 0));
+    }
+    vec3 flux = e2.xyz * pc.scales.x;
+    bool sky = kind == 3;
+    int bounces = int(pc.scales.z);
+    for (int b = 0; b <= bounces; b++) {
+        float t;
+        int tri = trace(o, d, t);
+        if (tri < 0) break;
+        vec3 pos = o + d * t;
+        vec3 n = tris[tri].n.xyz;
+        if (dot(n, d) > 0.0) n = -n;
+        if (b > 0 || sky) deposit(pos + n * (pc.origin_cell.w * 0.5), d, flux);
+        vec3 alb = albedo[floatBitsToInt(tris[tri].v0.w)].xyz;
+        float survive = clamp(max(alb.x, max(alb.y, alb.z)), 0.0, 0.95);
+        if (rnd() >= survive) break;
+        flux = flux * alb / survive;
+        o = pos + n * 1e-3;
+        d = rnd_cosine(n);
+    }
+}
