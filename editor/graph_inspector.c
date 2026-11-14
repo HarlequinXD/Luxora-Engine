@@ -15,6 +15,12 @@
 #define COL_OK UI_HEX(0x7cc24e)
 #define COL_RUN UI_HEX(0xffb03a)
 
+/* text fields also report a change when they lose focus (clicking elsewhere): "add" fields act on Enter only */
+static bool enter_pressed(void) { return lx_key_pressed(LX_KEY_ENTER); }
+static void quick_add_enter(UiNode *n);
+static void add_on_enter(UiNode *n);
+static void add_var_enter(UiNode *n);
+
 static int lx_strcasecmp_ascii(const char *a, const char *b) {
     for (;; a++, b++) {
         int x = tolower((unsigned char)*a), y = tolower((unsigned char)*b);
@@ -918,7 +924,7 @@ static void build_state_tab(UiNode *body) {
     ui_pad(add, 0, 6, 0, 0);
     PB *qb = pb_new(PB_MISC);
     UiNode *q = ui_textfield(ui, add, qb->s, 64);
-    q->grow = 1; q->h = 24; q->user = qb; q->on_change = quick_add; q->icon = UI_ICON_SEARCH;
+    q->grow = 1; q->h = 24; q->user = qb; q->on_change = quick_add_enter; q->icon = UI_ICON_SEARCH;
     lx_strcpy(q->hint, sizeof q->hint, "Add action: type a name, Enter");
     UiNode *ab = ui_button(ui, add, "Browse...", open_ab);
     ab->w = 90;
@@ -1090,7 +1096,7 @@ static void add_row(UiNode *body, const char *hint_text, void (*cb)(UiNode *)) {
     row->cross_align = UI_ALIGN_CENTER;
     PB *b = pb_new(PB_MISC);
     UiNode *tf = ui_textfield(ED.ui, row, b->s, LX_FSM_NAME);
-    tf->grow = 1; tf->h = 24; tf->user = b; tf->on_change = cb;
+    tf->grow = 1; tf->h = 24; tf->user = b; tf->on_change = add_on_enter;   /* Enter: the Add button next to it */
     lx_strcpy(tf->hint, sizeof tf->hint, hint_text);
     UiNode *bt = ui_button(ED.ui, row, "Add", cb);
     bt->w = 56; bt->h = 24; bt->user = b;
@@ -1302,7 +1308,7 @@ static void build_vars_tab(UiNode *body) {
     PB *nb = pb_new(PB_MISC);
     g_new_var_pb = nb;
     UiNode *tf = ui_textfield(ui, row, nb->s, LX_FSM_NAME);
-    tf->grow = 1; tf->h = 24; tf->on_change = add_var_click;
+    tf->grow = 1; tf->h = 24; tf->on_change = add_var_enter;
     lx_strcpy(tf->hint, sizeof tf->hint, "New variable name");
     UiNode *dd = ui_dropdown(ui, row, &g_new_var_type, VAR_TYPES, 8);
     dd->w = 90; dd->h = 24;
@@ -1458,6 +1464,7 @@ static void ab_item(UiNode *list, const LxFsmActionDesc *d, int indent) {
     ui_pad(it, (float)indent, 0, 4, 0);
     bool sel = !strcmp(GE.ab_sel, d->name);
     it->bg = sel ? UI_HEX(0x7a2412) : 0;
+    if (sel) { it->bg_hover = UI_HEX(0x9a3018); it->bg_active = UI_HEX(0x9a3018); }
     it->fg = sel ? UI_HEX(0xfff6ef) : COL_TEXT;
     it->drag_type = NULL;
     lx_strcpy(it->path, sizeof it->path, d->name);
@@ -1617,7 +1624,7 @@ static void ab_frame(UiNode *n) {
     ab_build_list();
     ab_build_details();
 }
-static void ab_search_enter(UiNode *n) { LX_UNUSED(n); if (GE.ab_sel[0]) ge_add_action(GE.ab_sel); }
+static void ab_search_enter(UiNode *n) { LX_UNUSED(n); if (enter_pressed() && GE.ab_sel[0]) ge_add_action(GE.ab_sel); }
 static void ab_closed(UiNode *win) { LX_UNUSED(win); GE.ab_win = NULL; GE.ab_list = NULL; GE.ab_details = NULL; }
 
 static void load_all_graphs(void) {
@@ -1953,3 +1960,7 @@ void ed_graph_asset_inspector(UiNode *body, const char *ref) {
     int np = lx_graph_problems(g, probs, 16);
     for (int i = 0; i < np && i < 16; i++) { UiNode *p = label(wrap, probs[i], UI_FONT_SMALL, UI_HEX(0xffb03a)); p->icon = UI_ICON_WARNING; p->icon_color = UI_HEX(0xffb03a); }
 }
+
+static void quick_add_enter(UiNode *n) { if (enter_pressed()) quick_add(n); }
+static void add_on_enter(UiNode *n) { if (enter_pressed() && n->next && n->next->on_click) n->next->on_click(n->next); }
+static void add_var_enter(UiNode *n) { if (enter_pressed()) add_var_click(n); }

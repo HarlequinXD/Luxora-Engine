@@ -326,6 +326,8 @@ static void s_model_stopped(void) {
 static char g_big_dir[LX_PATH_MAX];
 static double g_big_last, g_big_worst;
 static bool g_big_skip;
+static double g_frame_times[32], g_frame_prev, g_big_limit = 0.4;
+static int g_frame_n;
 static bool g_big_done;
 static void s_big_make(void) {
     lx_path_join(g_big_dir, sizeof g_big_dir, ED.project.assets, "Textures/Big 4K Textures With Long Names");
@@ -352,6 +354,14 @@ static void s_big_make(void) {
     lx_free(px);
 }
 static void s_big_open(void) {
+    /* a software GPU (CI's lavapipe) draws every frame slowly: allow a few normal frames' worth */
+    int n = g_frame_n < 32 ? g_frame_n : 32;
+    double t[32];
+    memcpy(t, g_frame_times, sizeof t);
+    for (int i = 0; i < n; i++)
+        for (int j = i + 1; j < n; j++) if (t[j] < t[i]) { double x = t[i]; t[i] = t[j]; t[j] = x; }
+    double typical = n ? t[n / 2] : 0;   /* median: the 4K files being written aren't a normal frame */
+    g_big_limit = typical * 4 > 0.4 ? typical * 4 : 0.4;
     ED.content_list_view = false;   /* tiles */
     ed_content_open_dir(g_big_dir);
     g_big_last = lx_time();
@@ -392,7 +402,7 @@ static void s_big_check(void) {
     }
     lx_free(e);
     SMOKE_CHECK(n == 4 && ready == n, "4K texture thumbnails made in the background (%d of %d)", ready, n);
-    SMOKE_CHECK(g_big_worst < 0.4, "the editor kept running while they loaded (slowest frame %.0f ms)", g_big_worst * 1000);
+    SMOKE_CHECK(g_big_worst < g_big_limit, "the editor kept running while they loaded (slowest frame %.0f ms, limit %.0f ms)", g_big_worst * 1000, g_big_limit * 1000);
     /* names fit their tiles */
     bool fit = true;
     for (UiNode *tl = ED.content_grid ? ED.content_grid->first : NULL; tl; tl = tl->next)
@@ -611,9 +621,28 @@ static void s_sg_search(void) {
     SMOKE_CHECK(f != NULL, "Action Browser search field");
     if (f) ui_test_type(ED.ui, f, "rotate");
 }
-static void s_sg_shot(void) {
+static void s_sg_clear(void) {
     SMOKE_CHECK(!strcmp(GE.ab_sel, "Rotate"), "searching picks the first match (%s)", GE.ab_sel);
-    sg_shot("state_graph.ppm");
+    UiNode *w[8];
+    int n = ui_window_nodes(ED.ui, w, 8);
+    UiNode *f = n ? find_hint(w[0], "Search actions") : NULL;
+    if (f) ui_test_type(ED.ui, f, "");   /* leaving the field must not add anything */
+    SMOKE_CHECK(sg_action_count() == g_sg_actions, "clearing the search adds nothing");
+}
+static void s_sg_shot(void) { sg_shot("state_graph.ppm"); }
+static void s_sg_pick(void) {
+    UiNode *w[8];
+    int n = ui_window_nodes(ED.ui, w, 8);
+    UiNode *it = n ? find_node(w[0], NULL, "Translate") : NULL;
+    SMOKE_CHECK(it != NULL, "Translate is listed");
+    if (it) ui_test_click(ED.ui, it, false);
+    SMOKE_CHECK(!strcmp(GE.ab_sel, "Translate") && sg_action_count() == g_sg_actions, "clicking an action selects it (%s), nothing added", GE.ab_sel);
+}
+static void s_sg_picked(void) {
+    UiNode *w[8];
+    int n = ui_window_nodes(ED.ui, w, 8);
+    UiNode *it = n ? find_node(w[0], NULL, "Translate") : NULL;
+    SMOKE_CHECK(it && it->bg == UI_HEX(0x7a2412) && it->bg_hover != 0, "the clicked action is highlighted, also under the mouse");
 }
 static void s_sg_add(void) {
     UiNode *w[8];
@@ -627,7 +656,7 @@ static void s_sg_saved(void) {
     char path[LX_PATH_MAX];
     lx_asset_path(path, sizeof path, "Graphs/Patroller.lxgraph");
     char *t = lx_file_read(path, NULL);
-    SMOKE_CHECK(t && strstr(t, "type = Rotate"), "the graph asset was saved");
+    SMOKE_CHECK(t && strstr(t, "type = Translate"), "the clicked action was added and saved");
     lx_free(t);
     ge_undo();
     SMOKE_CHECK(sg_action_count() == g_sg_actions, "graph undo removes it again");
@@ -740,9 +769,12 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {300, s_sg_open, "open the State Graph editor"},
     {303, s_sg_browser, "open the Action Browser"},
     {305, s_sg_search, "search for an action"},
-    {308, s_sg_shot, "screenshot of the State Graph editor"},
-    {309, s_sg_add, "add the action to the selected state"},
-    {312, s_sg_saved, "saved; undo; close the browser"},
+    {307, s_sg_clear, "clear the search"},
+    {309, s_sg_shot, "screenshot of the State Graph editor"},
+    {310, s_sg_pick, "click an action in the list"},
+    {311, s_sg_picked, "it's highlighted"},
+    {311, s_sg_add, "add the action to the selected state"},
+    {313, s_sg_saved, "saved; undo; close the browser"},
     {314, s_sg_play, "play"},
     {330, s_sg_playing, "the State Graph runs"},
     {332, s_sg_stop, "stop"},
@@ -750,6 +782,9 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
 };
 
 bool ed_smoke_step(int frame) {
+    double now = lx_time();
+    if (g_frame_prev > 0 && frame > 5) g_frame_times[g_frame_n++ % 32] = now - g_frame_prev;
+    g_frame_prev = now;
     big_watch();
     for (size_t i = 0; i < sizeof STEPS / sizeof STEPS[0]; i++)
         if (STEPS[i].frame == frame) {
