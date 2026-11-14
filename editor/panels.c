@@ -71,7 +71,7 @@ UiIcon ed_icon_for_file(const char *name, bool dir) {
     if (ext_is(name, ".lxmat")) return UI_ICON_MATERIAL;
     if (ext_is(name, ".obj")) return UI_ICON_MESH;
     if (ext_is(name, ".fbx")) return UI_ICON_MODEL;
-    if (ext_is(name, ".png") || ext_is(name, ".tga") || ext_is(name, ".bmp")) return UI_ICON_TEXTURE;
+    if (ext_is(name, ".png") || ext_is(name, ".jpg") || ext_is(name, ".jpeg") || ext_is(name, ".tga") || ext_is(name, ".bmp")) return UI_ICON_TEXTURE;
     if (ext_is(name, ".wav")) return UI_ICON_SOUND;
     if (ext_is(name, ".c") || ext_is(name, ".h")) return UI_ICON_SCRIPT;
     if (ext_is(name, ".lxprefab")) return UI_ICON_PREFAB;
@@ -532,8 +532,8 @@ static void browse_assets(UiNode *n) {
         if (!count) { UiNode *it = ui_menu_item(ED.ui, p, "Add .wav files to Assets/Sounds", NULL, NULL); it->disabled = true; }
     } else if (!strcmp(kind, "texture")) {
         ui_menu_item(ED.ui, p, "(none)", NULL, pick_asset);
-        static const char *ext[] = {".png", ".tga", ".bmp"};
-        collect_assets(p, ED.project.assets, "", ext, 3, &count);
+        static const char *ext[] = {".png", ".jpg", ".jpeg", ".tga", ".bmp"};
+        collect_assets(p, ED.project.assets, "", ext, 5, &count);
     }
 }
 

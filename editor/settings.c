@@ -901,7 +901,7 @@ static void collect_images(UiNode *menu, const char *dir, const char *rel, int *
         else lx_strcpy(ref, sizeof ref, e[i].name);
         if (e[i].is_dir) { collect_images(menu, full, ref, count); continue; }
         const char *x = lx_path_ext(e[i].name);
-        if (strcmp(x, ".png") && strcmp(x, ".PNG") && strcmp(x, ".tga") && strcmp(x, ".bmp")) continue;
+        if (strcmp(x, ".png") && strcmp(x, ".PNG") && strcmp(x, ".jpg") && strcmp(x, ".jpeg") && strcmp(x, ".tga") && strcmp(x, ".bmp")) continue;
         UiNode *it = ui_menu_item(ED.ui, menu, ref, NULL, icon_pick);
         it->icon = UI_ICON_TEXTURE;
         it->icon_color = ed_color_for_icon(UI_ICON_TEXTURE);

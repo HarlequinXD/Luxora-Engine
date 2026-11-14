@@ -1067,6 +1067,30 @@ static char *unreal_rig_fbx(void) {
     return sb.data;
 }
 
+#include "test_jpeg_data.h"
+static void test_jpeg(void) {
+    const unsigned char *files[2] = {JPG_BASE, JPG_PROG};
+    size_t sizes[2] = {sizeof JPG_BASE, sizeof JPG_PROG};
+    const int (*pix[2])[5] = {JPG_BASE_PIX, JPG_PROG_PIX};
+    for (int f = 0; f < 2; f++) {
+        int w = 0, h = 0;
+        uint8_t *px = lx_jpeg_decode(files[f], sizes[f], &w, &h);
+        CHECK(px && w == 16 && h == 12, "%s JPEG decodes (%dx%d)", f ? "progressive" : "baseline", w, h);
+        int worst = 0;
+        for (int i = 0; px && i < 5; i++) {
+            const uint8_t *p = px + ((size_t)pix[f][i][1] * 16 + (size_t)pix[f][i][0]) * 4;
+            for (int c = 0; c < 3; c++) { int d = abs(p[c] - pix[f][i][2 + c]); if (d > worst) worst = d; }
+        }
+        CHECK(px && worst <= 3, "%s JPEG matches the reference decoder (worst difference %d)", f ? "progressive" : "baseline", worst);
+        lx_free(px);
+    }
+    /* broken data is refused, not crashed on */
+    int w, h;
+    uint8_t *junk = lx_jpeg_decode(JPG_BASE, 40, &w, &h);
+    CHECK(junk == NULL, "truncated JPEG is refused");
+    lx_free(junk);
+}
+
 static void test_models(void) {
     printf("models\n");
     char dir[LX_PATH_MAX], path[LX_PATH_MAX];
@@ -1241,6 +1265,7 @@ int main(void) {
     test_physics();
     test_game_ui();
     test_gameplay();
+    test_jpeg();
     test_models();
 #if LUXORA_SCRIPT_COMPILER
     test_scripts();

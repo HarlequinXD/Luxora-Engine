@@ -1,4 +1,4 @@
-/* Image loading: PNG (own inflate implementation), TGA and BMP -> RGBA8. */
+/* Image loading: PNG (own inflate implementation), JPEG (jpeg.c), TGA and BMP -> RGBA8. */
 #include "../lx_internal.h"
 
 /* ---------------- inflate (RFC 1951) ----------------
@@ -449,6 +449,7 @@ uint8_t *lx_image_load(const char *path, int *w, int *h) {
     uint8_t *data = (uint8_t *)lx_file_read(path, &n);
     if (!data) return NULL;
     uint8_t *img = lx_png_decode(data, n, w, h);
+    if (!img) img = lx_jpeg_decode(data, n, w, h);
     if (!img) img = decode_bmp(data, n, w, h);
     if (!img) img = decode_tga(data, n, w, h);
     lx_free(data);

@@ -230,7 +230,8 @@ struct LxTexture {
     uint8_t *pixels; /* RGBA8 */
     void *gpu;
 };
-uint8_t *lx_image_load(const char *path, int *w, int *h); /* RGBA8; PNG, TGA, BMP */
+uint8_t *lx_image_load(const char *path, int *w, int *h); /* RGBA8; PNG, JPEG, TGA, BMP */
+uint8_t *lx_jpeg_decode(const uint8_t *data, size_t size, int *w, int *h);
 uint8_t *lx_png_decode(const uint8_t *data, size_t size, int *w, int *h);
 uint8_t *lx_png_encode(const uint8_t *rgba, int w, int h, size_t *out_size);
 uint8_t *lx_zlib_inflate(const uint8_t *data, size_t size, size_t *out_len);   /* zlib stream (2-byte header) */

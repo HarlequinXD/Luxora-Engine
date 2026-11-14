@@ -29,7 +29,7 @@ endif()
 # ------------------------------------------------------------------ engine library
 set(LUXORA_SOURCES
   src/core/core.c src/core/math.c src/core/jobs.c src/core/kv.c
-  src/gfx/mesh.c src/gfx/image.c src/gfx/assets.c
+  src/gfx/mesh.c src/gfx/image.c src/gfx/jpeg.c src/gfx/assets.c
   src/gi/bvh.c src/gi/photon_gi.c
   src/audio/audio.c
   src/crowd/crowd.c
