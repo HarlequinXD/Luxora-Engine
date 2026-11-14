@@ -1225,6 +1225,107 @@ static void test_models(void) {
     lx_path_remove(dir);
 }
 
+
+static const char TEST_GRAPH[] =
+    "[graph]\nname = Door\nstart = Closed\n"
+    "[event]\nname = OPEN\n"
+    "[event]\nname = RESET\nglobal = 1\n"
+    "[variable]\nname = count\ntype = int\nvalue = 0\ninspector = 1\n"
+    "[variable]\nname = speed\ntype = vector3\nvalue = 2 0 0\ninspector = 1\n"
+    "[global]\nevent = RESET\nto = Closed\n"
+    "[state]\nname = Closed\npos = 0 0 0\ntransition = OPEN > Opening\n"
+    "[action]\ntype = Int Add\nupdate = once\np0 = $count\np1 = 1\n"
+    "[state]\nname = Opening\npos = 200 0 0\ntransition = FINISHED > Open\n"
+    "[action]\ntype = Wait\nupdate = every_frame\np0 = 0.5\n"
+    "[action]\ntype = Set Position\nupdate = once\np0 = Owner\np1 = 0 3 0\np2 = World\n"
+    "[state]\nname = Open\npos = 400 0 0\ntransition = TICK > Open\n"
+    "[action]\ntype = Translate\nupdate = every_frame\np0 = Owner\np1 = $speed\np2 = World\np3 = true\n";
+
+static void test_state_graph(void) {
+    printf("state graph\n");
+    CHECK(lx_fsm_action_count() > 80, "built-in actions registered (%d)", lx_fsm_action_count());
+    CHECK(lx_fsm_action_find("Send Event") && lx_fsm_action_find("Move Towards") && lx_fsm_action_find("Raycast"), "action lookup");
+
+    LxGraph *g = lx_graph_from_text(TEST_GRAPH);
+    CHECK(g && g->state_count == 3 && g->var_count == 2 && g->global_count == 1, "graph parses");
+    if (!g) return;
+    char *t1 = lx_graph_to_text(g);
+    LxGraph *g2 = lx_graph_from_text(t1);
+    char *t2 = g2 ? lx_graph_to_text(g2) : NULL;
+    CHECK(t2 && !strcmp(t1, t2), "graph text round-trips");
+    lx_free(t1); lx_free(t2);
+    lx_graph_free(g2);
+    lx_graph_free(g);
+
+    char dir[LX_PATH_MAX], path[LX_PATH_MAX];
+    lx_path_join(dir, sizeof dir, tmpdir(), "luxora_test_graph");
+    lx_path_remove(dir);
+    lx_mkdir_p(dir);
+    lx_assets_set_root(dir);
+    lx_path_join(path, sizeof path, dir, "Door.lxgraph");
+    lx_file_write(path, TEST_GRAPH, strlen(TEST_GRAPH));
+
+    LxScene *s = lx_scene_create("Graphs");
+    LxEntity e = lx_entity_create(s, "Door");
+    lx_add_state_graph(s, e, "Door.lxgraph");
+    LxStateGraph *sg = lx_get_state_graph(s, e);
+    lx_strcpy(sg->slots[0].overrides[0].var, sizeof sg->slots[0].overrides[0].var, "speed");
+    lx_strcpy(sg->slots[0].overrides[0].value, sizeof sg->slots[0].overrides[0].value, "4 0 0");
+    sg->slots[0].override_count = 1;
+
+    lx_scene_simulate(s, 0.1f);
+    CHECK(!strcmp(lx_fsm_current_state(s, e, 0), "Closed"), "starts in the START state (%s)", lx_fsm_current_state(s, e, 0));
+    CHECK(NEAR(lx_fsm_get_var_float(s, e, 0, "count"), 1, 1e-5f), "entering ran the action (count %g)", lx_fsm_get_var_float(s, e, 0, "count"));
+    lx_fsm_send_event(s, e, "OPEN", 0, 0);
+    lx_scene_simulate(s, 0.1f);
+    CHECK(!strcmp(lx_fsm_current_state(s, e, 0), "Opening"), "event follows the transition (%s)", lx_fsm_current_state(s, e, 0));
+    for (int i = 0; i < 6; i++) lx_scene_simulate(s, 0.1f);
+    CHECK(!strcmp(lx_fsm_current_state(s, e, 0), "Open"), "FINISHED once Wait is done (%s)", lx_fsm_current_state(s, e, 0));
+    LxVec3 p0 = lx_entity_world_position(s, e);
+    CHECK(NEAR(p0.y, 3, 1e-4f), "Set Position ran (y %g)", p0.y);
+    lx_scene_simulate(s, 0.5f);
+    LxVec3 p1 = lx_entity_world_position(s, e);
+    CHECK(NEAR(p1.x - p0.x, 2, 0.05f), "Translate every frame with the overridden variable (moved %g)", p1.x - p0.x);
+    lx_fsm_send_event(s, e, "TICK", 0, 0);   /* self transition re-enters */
+    lx_scene_simulate(s, 0.1f);
+    CHECK(!strcmp(lx_fsm_current_state(s, e, 0), "Open"), "self transition");
+    lx_fsm_send_event(s, e, "RESET", 0, 0);
+    lx_scene_simulate(s, 0.1f);
+    CHECK(!strcmp(lx_fsm_current_state(s, e, 0), "Closed") && NEAR(lx_fsm_get_var_float(s, e, 0, "count"), 2, 1e-5f), "global transition (%s)", lx_fsm_current_state(s, e, 0));
+    lx_send_message(s, e, "OPEN", 0, 0);
+    lx_scene_simulate(s, 0.1f);
+    CHECK(!strcmp(lx_fsm_current_state(s, e, 0), "Opening"), "messages reach graphs");
+
+    /* graph edited while running: reload keeps the state */
+    LxGraph *live = lx_asset_graph("Door.lxgraph");
+    lx_graph_touch(live);
+    lx_scene_simulate(s, 0.1f);
+    CHECK(!strcmp(lx_fsm_current_state(s, e, 0), "Opening"), "re-bind keeps the current state");
+
+    /* serialization keeps the slot and overrides */
+    char *text = lx_scene_serialize(s);
+    lx_scene_stop_simulation(s);
+    LxScene *s2 = lx_scene_deserialize(text);
+    lx_free(text);
+    LxEntity e2 = lx_entity_find(s2, "Door");
+    LxStateGraph *sg2 = e2 ? lx_get_state_graph(s2, e2) : NULL;
+    CHECK(sg2 && sg2->count == 1 && !strcmp(sg2->slots[0].graph, "Door.lxgraph") && sg2->slots[0].override_count == 1 &&
+              !strcmp(sg2->slots[0].overrides[0].value, "4 0 0"), "state graph saved with the scene");
+    lx_scene_destroy(s2);
+
+    /* a runaway loop is stopped, not hung */
+    const char *loop = "[graph]\nstart = A\n[state]\nname = A\ntransition = FINISHED > B\n[state]\nname = B\ntransition = FINISHED > A\n";
+    lx_path_join(path, sizeof path, dir, "Loop.lxgraph");
+    lx_file_write(path, loop, strlen(loop));
+    LxEntity l = lx_entity_create(s, "Loop");
+    lx_add_state_graph(s, l, "Loop.lxgraph");
+    lx_scene_simulate(s, 0.1f);
+    CHECK(lx_fsm_current_state(s, l, 0)[0] != 0 && lx_fsm_run_of(s, l, 0)->error, "infinite FINISHED loop is caught");
+    lx_scene_stop_simulation(s);
+    lx_scene_destroy(s);
+    lx_assets_clear();
+}
+
 int main(void) {
     lx_jobs_init(0);
     lx_register_builtin_behaviours();
@@ -1267,6 +1368,7 @@ int main(void) {
     test_gameplay();
     test_jpeg();
     test_models();
+    test_state_graph();
 #if LUXORA_SCRIPT_COMPILER
     test_scripts();
 #endif

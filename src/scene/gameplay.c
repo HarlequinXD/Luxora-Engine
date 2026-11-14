@@ -116,24 +116,32 @@ LxEntity lx_entity_find_child(const LxScene *s, LxEntity parent, const char *nam
 /* ======================================================================
  *  messages and events
  * ====================================================================== */
+/* A message reaches the object's behaviour (on_message) and its State Graphs (as an event of the same name). */
 bool lx_send_message(LxScene *s, LxEntity target, const char *message, float value, LxEntity sender) {
     LxEntityData *d = lx_entity_data(s, target);
-    if (!d || !usable(d) || !(d->comps & LX_COMP_BEHAVIOUR) || !message) return false;
-    const LxBehaviourDesc *desc = d->binst.desc ? d->binst.desc : lx_behaviour_find(d->behaviour.name);
-    if (!desc || !desc->on_message) return false;
-    if (desc->state_size && !d->binst.state) {   /* not started yet: give it its state now */
-        d->binst.desc = desc;
-        d->binst.state = lx_calloc(1, desc->state_size);
+    if (!d || !usable(d) || !message) return false;
+    bool got = false;
+    if (d->comps & LX_COMP_BEHAVIOUR) {
+        const LxBehaviourDesc *desc = d->binst.desc ? d->binst.desc : lx_behaviour_find(d->behaviour.name);
+        if (desc && desc->on_message) {
+            if (desc->state_size && !d->binst.state) {   /* not started yet: give it its state now */
+                d->binst.desc = desc;
+                d->binst.state = lx_calloc(1, desc->state_size);
+            }
+            LxBehaviourCtx ctx = {s, target, d->binst.state, d->behaviour.params};
+            desc->on_message(&ctx, message, value, sender);
+            got = true;
+        }
     }
-    LxBehaviourCtx ctx = {s, target, d->binst.state, d->behaviour.params};
-    desc->on_message(&ctx, message, value, sender);
-    return true;
+    d = lx_entity_data(s, target);
+    if (d && (d->comps & LX_COMP_STATE_GRAPH)) got |= lx_fsm_send_event(s, target, message, value, sender) > 0;
+    return got;
 }
 
 int lx_broadcast(LxScene *s, const char *message, float value, LxEntity sender) {
     int n = 0, count = s->count;
     for (int i = 1; i < count; i++)
-        if (usable(&s->entities[i]) && (s->entities[i].comps & LX_COMP_BEHAVIOUR)) n += lx_send_message(s, handle(s, i), message, value, sender);
+        if (usable(&s->entities[i]) && (s->entities[i].comps & (LX_COMP_BEHAVIOUR | LX_COMP_STATE_GRAPH))) n += lx_send_message(s, handle(s, i), message, value, sender);
     return n;
 }
 

@@ -297,6 +297,7 @@ typedef enum LxComponentBits {
     LX_COMP_RIGIDBODY = 1 << 9,
     LX_COMP_CHARACTER = 1 << 10,
     LX_COMP_ANIMATOR = 1 << 11,
+    LX_COMP_STATE_GRAPH = 1 << 12,
 } LxComponentBits;
 
 typedef struct LxCamera {
@@ -555,6 +556,113 @@ void lx_register_builtin_behaviours(void);
 /* Runs behaviours (start on first tick), physics and crowds for a scene. */
 void lx_scene_simulate(LxScene *s, float dt);
 void lx_scene_stop_simulation(LxScene *s);
+
+/* ===================================================================
+ *  State Graphs: visual state machines (.lxgraph assets) in the spirit of PlayMaker.
+ *  A graph has states; a state runs a list of actions; events move it to another state.
+ *  Objects run graphs through the State Graph component (several per object).
+ * =================================================================== */
+typedef enum LxFsmType {
+    LX_FSM_FLOAT, LX_FSM_INT, LX_FSM_BOOL, LX_FSM_STRING, LX_FSM_VEC3, LX_FSM_COLOR, LX_FSM_OBJECT,
+    LX_FSM_ASSET,      /* a reference to an asset ("Prefabs/Coin.lxprefab") */
+    LX_FSM_EVENT,      /* an event name (parameters only) */
+    LX_FSM_ENUM,       /* one of the options in the parameter's options ("A|B|C"), stored as its index */
+    LX_FSM_TYPE_COUNT
+} LxFsmType;
+
+#define LX_FSM_MAX_PARAMS 12
+#define LX_FSM_GRAPHS_PER_OBJECT 4
+#define LX_FSM_P_OUT 1u        /* the parameter receives a result: it must be a variable */
+#define LX_FSM_P_OPTIONAL 2u   /* may be left as None */
+
+typedef struct LxFsmParamDesc {
+    const char *name;
+    LxFsmType type;
+    const char *def;          /* default value as text ("1.5", "Owner", "true", "0 1 0") */
+    unsigned flags;
+    const char *options;      /* ENUM: "Linear|Ease In|..."; ASSET: kind ("prefab", "sound", "material", "scene", "texture", "model") */
+    const char *tooltip;
+} LxFsmParamDesc;
+
+typedef enum LxFsmUpdate { LX_FSM_ONCE, LX_FSM_EVERY_FRAME, LX_FSM_FIXED, LX_FSM_LATE } LxFsmUpdate;
+#define LX_FSM_A_CONTINUOUS 1u   /* runs until it calls lx_fsm_finish (Wait, Move Object...): update mode doesn't apply */
+
+struct LxFsmCtx;
+typedef struct LxFsmActionDesc {
+    const char *name;
+    const char *category;     /* "Transform/Movement": a slash makes sub-categories */
+    const char *description;
+    const char *summary;      /* plain-English line with {0}..{11} for parameter values */
+    LxFsmParamDesc params[LX_FSM_MAX_PARAMS];
+    size_t state_size;        /* zeroed every time the state is entered */
+    unsigned flags;
+    LxFsmUpdate default_update;
+    void (*on_enter)(struct LxFsmCtx *c);
+    void (*on_update)(struct LxFsmCtx *c);   /* EVERY_FRAME / FIXED / LATE, or continuous actions */
+    void (*on_exit)(struct LxFsmCtx *c);
+} LxFsmActionDesc;
+
+typedef struct LxFsmCtx {
+    LxScene *scene;
+    LxEntity self;
+    float dt;
+    void *state;
+    struct LxFsmRun *run;
+    int action;
+} LxFsmCtx;
+
+void lx_fsm_register_action(const LxFsmActionDesc *desc);   /* also from scripts: your own actions */
+int lx_fsm_action_count(void);
+const LxFsmActionDesc *lx_fsm_action_at(int i);
+const LxFsmActionDesc *lx_fsm_action_find(const char *name);
+void lx_fsm_register_builtin_actions(void);
+
+/* parameter values inside an action */
+float lx_fsm_float(struct LxFsmCtx *c, int p);
+int lx_fsm_int(struct LxFsmCtx *c, int p);
+bool lx_fsm_bool(struct LxFsmCtx *c, int p);
+const char *lx_fsm_string(struct LxFsmCtx *c, int p);
+LxVec3 lx_fsm_vec3(struct LxFsmCtx *c, int p);
+LxVec4 lx_fsm_color(struct LxFsmCtx *c, int p);
+LxEntity lx_fsm_object(struct LxFsmCtx *c, int p);   /* 0 = None */
+const char *lx_fsm_asset(struct LxFsmCtx *c, int p);
+const char *lx_fsm_event(struct LxFsmCtx *c, int p); /* "" = None */
+bool lx_fsm_is_none(struct LxFsmCtx *c, int p);      /* left empty (None) */
+void lx_fsm_set_float(struct LxFsmCtx *c, int p, float v);   /* parameter bound to a variable */
+void lx_fsm_set_int(struct LxFsmCtx *c, int p, int v);
+void lx_fsm_set_bool(struct LxFsmCtx *c, int p, bool v);
+void lx_fsm_set_string(struct LxFsmCtx *c, int p, const char *v);
+void lx_fsm_set_vec3(struct LxFsmCtx *c, int p, LxVec3 v);
+void lx_fsm_set_color(struct LxFsmCtx *c, int p, LxVec4 v);
+void lx_fsm_set_object(struct LxFsmCtx *c, int p, LxEntity v);
+void lx_fsm_finish(struct LxFsmCtx *c);                       /* this action is done */
+void lx_fsm_send(struct LxFsmCtx *c, const char *event);      /* to this graph (changes state) */
+float lx_fsm_state_time(struct LxFsmCtx *c);                  /* seconds in the current state */
+/* the event that entered this state: its value, who sent it, and the other object (collisions, triggers) */
+float lx_fsm_event_value(struct LxFsmCtx *c);
+LxEntity lx_fsm_event_sender(struct LxFsmCtx *c);
+LxEntity lx_fsm_event_other(struct LxFsmCtx *c);
+
+/* the State Graph component */
+typedef struct LxStateGraphOverride { char var[LX_NAME_MAX]; char value[LX_REF_MAX]; } LxStateGraphOverride;
+typedef struct LxStateGraphSlot {
+    char graph[LX_REF_MAX];               /* "Graphs/Enemy.lxgraph" */
+    int override_count;
+    LxStateGraphOverride overrides[16];   /* per-object values of the graph's Inspector variables */
+} LxStateGraphSlot;
+typedef struct LxStateGraph { int count; LxStateGraphSlot slots[LX_FSM_GRAPHS_PER_OBJECT]; } LxStateGraph;
+LxStateGraph *lx_add_state_graph(LxScene *s, LxEntity e, const char *graph_ref);   /* adds a slot if it has one */
+LxStateGraph *lx_get_state_graph(LxScene *s, LxEntity e);
+
+/* talking to graphs from code */
+int lx_fsm_send_event(LxScene *s, LxEntity target, const char *event, float value, LxEntity sender);   /* returns graphs that reacted */
+int lx_fsm_broadcast_event(LxScene *s, const char *event, float value, LxEntity sender);
+const char *lx_fsm_current_state(LxScene *s, LxEntity e, int slot);   /* "" when not running */
+float lx_fsm_get_var_float(LxScene *s, LxEntity e, int slot, const char *var);
+bool lx_fsm_set_var_float(LxScene *s, LxEntity e, int slot, const char *var, float v);
+/* global variables (Assets/Globals.lxglobals) */
+float lx_fsm_global_float(const char *name);
+void lx_fsm_set_global_float(const char *name, float v);
 
 /* ===================================================================
  *  Models (FBX), skinned meshes, animation and humanoid avatars

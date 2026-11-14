@@ -67,6 +67,12 @@ void lx_scene_destroy(LxScene *s) {
     lx_physics_world_free(s);
     lx_gameplay_free(s);
     for (int i = 1; i < s->count; i++) lx_anim_release(&s->entities[i]);
+    for (int i = 1; i < s->count; i++) {
+        LxEntityData *d = &s->entities[i];
+        lx_fsm_entity_free(d);
+        lx_free(d->sgraph);
+        d->sgraph = NULL;
+    }
     for (int i = 1; i < s->count; i++)
         if (s->entities[i].crowd_sim) lx_crowd_destroy(s->entities[i].crowd_sim);
     lx_free(s->entities);
@@ -148,6 +154,9 @@ void lx_entity_destroy(LxScene *s, LxEntity e) {
     }
     lx_free(d->binst.state);
     lx_anim_release(d);
+    lx_fsm_entity_free(d);
+    lx_free(d->sgraph);
+    d->sgraph = NULL;
     if (d->audio_voice >= 0) lx_audio_stop(s, e);
     if (d->crowd_sim) lx_crowd_destroy(d->crowd_sim);
     if ((d->comps & LX_COMP_MESH) && d->mesh.static_geometry) s->static_version++;
@@ -178,6 +187,10 @@ static void copy_components(LxEntityData *dst, const LxEntityData *src) {
     dst->body = src->body;
     dst->character = src->character;
     dst->animator = src->animator;
+    if (src->sgraph) {   /* the State Graph component lives on the heap */
+        if (!dst->sgraph) dst->sgraph = lx_state_graph_alloc();
+        *dst->sgraph = *src->sgraph;
+    }
     memcpy(dst->tag, src->tag, sizeof dst->tag);
     memcpy(dst->prefab, src->prefab, sizeof dst->prefab);
 }
@@ -594,6 +607,7 @@ void lx_remove_component(LxScene *s, LxEntity e, LxComponentBits c) {
     if (c & LX_COMP_BEHAVIOUR) { lx_free(d->binst.state); memset(&d->binst, 0, sizeof d->binst); }
     d->comps &= ~(uint32_t)c;
     if (c & (LX_COMP_ANIMATOR | LX_COMP_MESH)) lx_anim_free_entity(d);
+    if (c & LX_COMP_STATE_GRAPH) lx_fsm_entity_free(d);
 }
 
 LxEntity lx_spawn_primitive(LxScene *s, LxPrimitive p, const char *name, LxVec3 pos) {

@@ -101,6 +101,7 @@ static void flicker_update(LxBehaviourCtx *c, float dt) {
 }
 
 void lx_register_builtin_behaviours(void) {
+    lx_fsm_register_builtin_actions();
     LxBehaviourDesc d;
     memset(&d, 0, sizeof d);
     d.name = "Rotator";
@@ -173,20 +174,23 @@ void lx_behaviour_collision_enter(LxScene *s, LxEntity self, const LxCollision *
     LxBehaviourCtx ctx;
     const LxBehaviourDesc *d = started_desc(s, self, &ctx);
     if (d && d->on_collision_enter) d->on_collision_enter(&ctx, c);
+    lx_fsm_system_event(s, self, "COLLISION_ENTER", c->other, c->impulse);
 }
 void lx_behaviour_collision_exit(LxScene *s, LxEntity self, LxEntity other) {
     LxBehaviourCtx ctx;
     const LxBehaviourDesc *d = started_desc(s, self, &ctx);
     if (d && d->on_collision_exit) d->on_collision_exit(&ctx, other);
+    lx_fsm_system_event(s, self, "COLLISION_EXIT", other, 0);
 }
 void lx_behaviour_trigger(LxScene *s, LxEntity self, LxEntity other, bool enter) {
     LxBehaviourCtx ctx;
     const LxBehaviourDesc *d = started_desc(s, self, &ctx);
-    if (!d) return;
-    if (enter && d->on_trigger_enter) d->on_trigger_enter(&ctx, other);
-    if (!enter && d->on_trigger_exit) d->on_trigger_exit(&ctx, other);
+    if (d && enter && d->on_trigger_enter) d->on_trigger_enter(&ctx, other);
+    if (d && !enter && d->on_trigger_exit) d->on_trigger_exit(&ctx, other);
+    lx_fsm_system_event(s, self, enter ? "TRIGGER_ENTER" : "TRIGGER_EXIT", other, 0);
 }
 void lx_behaviour_fixed_update(LxScene *s, float fixed_dt) {
+    lx_fsm_scene_update(s, fixed_dt, LX_FSM_FIXED);
     for (int i = 1; i < s->count; i++) {
         LxEntityData *d = &s->entities[i];
         if (!d->alive || !d->active || !(d->comps & LX_COMP_BEHAVIOUR) || !d->binst.started || !d->binst.desc ||
@@ -197,6 +201,7 @@ void lx_behaviour_fixed_update(LxScene *s, float fixed_dt) {
 }
 
 static void late_update(LxScene *s, float dt) {
+    lx_fsm_scene_update(s, dt, LX_FSM_LATE);
     for (int i = 1; i < s->count; i++) {
         LxEntityData *d = &s->entities[i];
         if (!d->alive || !d->active || !(d->comps & LX_COMP_BEHAVIOUR) || !d->binst.started || !d->binst.desc ||
@@ -208,7 +213,7 @@ static void late_update(LxScene *s, float dt) {
 
 void lx_scene_simulate(LxScene *s, float real_dt) {
     float dt = lx_gameplay_scale_dt(real_dt);   /* time scale: pause, slow motion */
-    if (!s->simulating) lx_scene_animation_begin(s);
+    if (!s->simulating) { lx_scene_animation_begin(s); lx_fsm_globals_reset_values(); }
     s->simulating = true;
     s->last_dt = dt;
     s->in_update = true;
@@ -255,6 +260,7 @@ void lx_scene_simulate(LxScene *s, float real_dt) {
             lx_crowd_update(c, dt);
         }
     }
+    lx_fsm_scene_update(s, dt, LX_FSM_EVERY_FRAME);   /* state graphs, after behaviours */
     lx_gameplay_after_update(s, dt);
     lx_scene_update_animation(s, dt);   /* animators pose their skeletons */
     lx_scene_update_transforms(s);
@@ -279,6 +285,7 @@ void lx_scene_stop_simulation(LxScene *s) {
     }
     lx_physics_world_free(s);
     lx_gameplay_free(s);
+    lx_fsm_scene_stop(s);
     lx_scene_animation_begin(s);
     lx_time_set_scale(1.0f);
     s->simulating = false;

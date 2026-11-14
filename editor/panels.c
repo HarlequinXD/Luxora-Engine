@@ -660,6 +660,7 @@ static void add_component(UiNode *n) {
     case LX_COMP_RIGIDBODY: lx_add_rigidbody(s, e); break;
     case LX_COMP_CHARACTER: lx_add_character(s, e); break;
     case LX_COMP_ANIMATOR: lx_add_animator(s, e, ""); break;
+    case LX_COMP_STATE_GRAPH: lx_add_state_graph(s, e, ""); break;
     }
     ED.inspector_dirty = true;
     ED.hierarchy_hash = 0;
@@ -676,7 +677,7 @@ static void add_component_menu(UiNode *b) {
         {LX_COMP_BEHAVIOUR, "Behaviour (Script)", UI_ICON_BEHAVIOUR}, {LX_COMP_CROWD, "Crowd", UI_ICON_CROWD},
         {LX_COMP_REFLECTION_PROBE, "Reflection Probe", UI_ICON_PROBE}, {LX_COMP_COLLIDER, "Collider", UI_ICON_COLLIDER},
         {LX_COMP_RIGIDBODY, "Rigidbody", UI_ICON_RIGIDBODY}, {LX_COMP_CHARACTER, "Character Controller", UI_ICON_CHARACTER},
-        {LX_COMP_ANIMATOR, "Animator", UI_ICON_ANIMATOR}};
+        {LX_COMP_ANIMATOR, "Animator", UI_ICON_ANIMATOR}, {LX_COMP_STATE_GRAPH, "State Graph", UI_ICON_BEHAVIOUR}};
     for (int i = 0; i < (int)(sizeof comps / sizeof comps[0]); i++) {
         UiNode *it = ui_menu_item(ED.ui, p, comps[i].name, NULL, add_component);
         it->icon = comps[i].icon;

@@ -286,6 +286,8 @@ typedef struct LxEntityData {
     LxAnimator animator;
     struct LxAnimState *anim;     /* runtime: clip playback (src/model/anim.c) */
     struct LxSkinState *skin;     /* runtime: this object's deformed copy of a skinned mesh */
+    LxStateGraph *sgraph;         /* State Graph component (heap: several slots with overrides) */
+    struct LxFsmInstance *fsm;    /* runtime: running graphs */
     LxPhysState phys;
     LxBehaviourInstance binst;
     LxCrowd *crowd_sim;
@@ -438,6 +440,8 @@ int lx_kv_next(const char **cursor, char *key, size_t kcap, char *val, size_t vc
 LxVec3 lx_parse_vec3(const char *s);
 LxVec4 lx_parse_vec4(const char *s);
 bool lx_parse_bool(const char *s);
+
+#include "fsm/fsm.h"
 
 /* ---------- engine state ---------- */
 void lx_engine_set_project(const LxProject *p);

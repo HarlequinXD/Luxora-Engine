@@ -251,6 +251,8 @@ void lx_assets_reload(const char *ref) {
 void lx_assets_clear(void) {
     lx_renderer_wait_idle();
     lx_models_clear();
+    lx_graphs_clear();
+    lx_fsm_globals_reload();
     for (int i = 0; i < g_asset_count; i++) free_entry(&g_assets[i]);
     g_asset_count = 0;
 }

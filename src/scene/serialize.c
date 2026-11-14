@@ -96,6 +96,13 @@ static void write_entity(LxStrBuf *sb, const LxScene *s, LxEntity e, int id_of_p
                          "animator.root_motion = %d\n",
                      a->model, a->clip, a->speed, a->loop, a->play_on_start, a->root_motion);
     }
+    if ((d->comps & LX_COMP_STATE_GRAPH) && d->sgraph) {
+        for (int i = 0; i < d->sgraph->count; i++) {
+            const LxStateGraphSlot *sl = &d->sgraph->slots[i];
+            lx_sb_printf(sb, "graph.%d = %s\n", i, sl->graph);
+            for (int o = 0; o < sl->override_count; o++) lx_sb_printf(sb, "graph.%d.var.%s = %s\n", i, sl->overrides[o].var, sl->overrides[o].value);
+        }
+    }
     if (d->comps & LX_COMP_REFLECTION_PROBE) {
         const LxReflectionProbe *p = &d->probe;
         lx_sb_printf(sb, "probe.size = %g %g %g\nprobe.intensity = %g\nprobe.blend = %g\nprobe.box = %d\nprobe.realtime = %d\n", p->size.x,
@@ -285,6 +292,23 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
             else if (!strcmp(f, "loop")) a->loop = lx_parse_bool(v);
             else if (!strcmp(f, "play_on_start")) a->play_on_start = lx_parse_bool(v);
             else if (!strcmp(f, "root_motion")) a->root_motion = lx_parse_bool(v);
+        } else if (!strncmp(k, "graph.", 6)) {
+            int idx = atoi(k + 6);
+            const char *rest = strchr(k + 6, '.');
+            LxEntityData *gd = lx_entity_data(s, cur_e);
+            if (gd && idx >= 0 && idx < LX_FSM_GRAPHS_PER_OBJECT) {
+                lx_add_state_graph(s, cur_e, NULL);
+                gd = lx_entity_data(s, cur_e);
+                LxStateGraph *sg = gd->sgraph;
+                if (sg->count < idx + 1) sg->count = idx + 1;
+                LxStateGraphSlot *sl = &sg->slots[idx];
+                if (!rest) lx_strcpy(sl->graph, sizeof sl->graph, v);
+                else if (!strncmp(rest, ".var.", 5) && sl->override_count < 16) {
+                    lx_strcpy(sl->overrides[sl->override_count].var, LX_NAME_MAX, rest + 5);
+                    lx_strcpy(sl->overrides[sl->override_count].value, LX_REF_MAX, v);
+                    sl->override_count++;
+                }
+            }
         } else if (!strncmp(k, "probe.", 6)) {
             const char *f = k + 6;
             LxReflectionProbe *p = lx_add_reflection_probe(s, cur_e);
