@@ -547,6 +547,77 @@ static float leak_ratio(bool walls, float *lit_out) {
     if (lit_out) *lit_out = lit;
     return lit > 0 ? dark / lit : 1.0f;
 }
+/* moving things can't be static geometry: GI and sound would keep a frozen copy where they started */
+static void test_static_safeguard(void) {
+    printf("static geometry safeguard\n");
+    LxScene *s = lx_scene_create("Static");
+    LxEntity wall = lx_spawn_primitive(s, LX_PRIM_CUBE, "Wall", lx_v3(0, 1, 0));
+    LxEntity ball = lx_spawn_primitive(s, LX_PRIM_SPHERE, "Ball", lx_v3(3, 1, 0));
+    lx_add_rigidbody(s, ball);
+    LxEntity hero = lx_entity_create(s, "Hero");
+    lx_add_character(s, hero);
+    LxEntity sword = lx_spawn_primitive(s, LX_PRIM_CUBE, "Sword", lx_v3(0, 1, 3));
+    lx_entity_set_parent(s, sword, hero);
+    const char *why = NULL;
+    CHECK(lx_entity_can_be_static(s, wall, &why) && !why, "a wall can be static");
+    CHECK(!lx_entity_can_be_static(s, ball, &why) && why && strstr(why, "Rigidbody"), "a Rigidbody can't (%s)", why ? why : "");
+    CHECK(!lx_entity_can_be_static(s, sword, &why) && why && strstr(why, "Character Controller"), "nor what a character carries (%s)", why ? why : "");
+    /* even with the flag set (older scenes), GI and sound leave them out */
+    lx_get_mesh(s, ball)->static_geometry = true;
+    lx_get_mesh(s, sword)->static_geometry = true;
+    LxBvh only_wall, all;
+    memset(&only_wall, 0, sizeof only_wall);
+    memset(&all, 0, sizeof all);
+    lx_bvh_build_from_scene(&all, s);
+    lx_entity_destroy(s, ball);
+    lx_entity_destroy(s, hero);
+    lx_scene_update_transforms(s);
+    lx_bvh_build_from_scene(&only_wall, s);
+    CHECK(all.tri_count == only_wall.tri_count && all.tri_count > 0, "GI and sound use only the wall (%d vs %d triangles)", all.tri_count, only_wall.tri_count);
+    lx_bvh_free(&all);
+    lx_bvh_free(&only_wall);
+    lx_scene_destroy(s);
+}
+
+/* moving things bounce light through their box stand-ins: a red cube with a Rigidbody, lit by a lamp, tints the
+ * surface facing it red; moved away, the tint goes with it */
+static LxVec3 bleed_at(LxScene *s, const LxGraphicsSettings *g, int frames) {
+    for (int f = 0; f < frames; f++) lx_gi_update(s, g);
+    LxVec3 e = lx_v3(0, 0, 0);
+    for (int k = 0; k < 3; k++) {   /* surfaces facing the cube's lit side, just in front of it */
+        LxVec3 v = lx_gi_irradiance(lx_v3(-0.9f, 0.3f + 0.4f * k, 0), lx_v3(-1, 0, 0), true);
+        e = lx_add3(e, v);
+    }
+    return e;
+}
+static void test_gi_moving(void) {
+    printf("photon gi: moving objects\n");
+    LxScene *s = lx_scene_create("Moving");
+    LxEntity floor = lx_spawn_primitive(s, LX_PRIM_CUBE, "Floor", lx_v3(0, -0.5f, 0));
+    lx_entity_set_scale(s, floor, lx_v3(20, 1, 20));
+    LxEntity lamp = lx_entity_create(s, "Lamp");
+    lx_entity_set_position(s, lamp, lx_v3(0.5f, 1.2f, 0));
+    lx_add_light(s, lamp, LX_LIGHT_POINT)->intensity = 120;
+    s->env.ambient_intensity = 0;
+    LxEntity cube = lx_spawn_primitive(s, LX_PRIM_CUBE, "Cart", lx_v3(-2, 0.75f, 0));
+    lx_entity_set_scale(s, cube, lx_v3(1.5f, 1.5f, 3));
+    lx_strcpy(lx_get_mesh(s, cube)->material, LX_REF_MAX, "builtin:red");
+    lx_get_mesh(s, cube)->static_geometry = true;   /* ignored: it has a Rigidbody */
+    lx_add_rigidbody(s, cube);
+    LxGraphicsSettings g = lx_graphics_defaults(1);
+    g.gi_photons_per_frame = 40000;
+    LxVec3 near_e = bleed_at(s, &g, 60);
+    const LxGiProxy *px;
+    int np = lx_gi_proxies(&px);
+    CHECK(np == 1, "the moving cube has a stand-in (%d)", np);
+    CHECK(near_e.x > near_e.y * 1.3f && near_e.x > 0, "it bounces red light onto what faces it (r %g g %g)", near_e.x, near_e.y);
+    lx_entity_set_position(s, cube, lx_v3(-8, 0.75f, 8));   /* moved by the game (Rigidbody): GI follows */
+    LxVec3 far_e = bleed_at(s, &g, 60);
+    CHECK(far_e.x < near_e.x * 0.25f, "moved away, the red goes with it (red %g -> %g)", near_e.x, far_e.x);
+    lx_gi_shutdown();
+    lx_scene_destroy(s);
+}
+
 static void test_gi_leaks(void) {
     printf("photon gi light leaks\n");
     float lit_old, lit_new;
@@ -1502,6 +1573,8 @@ int main(void) {
     test_gi();
     test_gi_convergence();
     test_gi_leaks();
+    test_static_safeguard();
+    test_gi_moving();
     test_acoustics();
     test_crowd();
     test_project();

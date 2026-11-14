@@ -12,6 +12,7 @@ layout(std430, set = 0, binding = 2) readonly buffer Mats { vec4 albedo[]; };
 layout(std430, set = 0, binding = 3) readonly buffer Emitters { vec4 em[]; };   // 3 per emitter
 layout(std430, set = 0, binding = 4) buffer Deposits { int dep[]; };
 layout(std430, set = 0, binding = 11) buffer Vis { float vis[]; };   // per cell: distance to the first surface +x -x +y -y +z -z (cells)
+layout(std430, set = 0, binding = 15) readonly buffer Proxies { vec4 px[]; };   // moving objects' boxes: 5 per box
 layout(set = 0, binding = 13, rgba8) uniform writeonly image3D vis_a;   // the same for shading: (+x -x +y -y) / 1.5
 layout(set = 0, binding = 14, rgba8) uniform writeonly image3D vis_b;   //   (+z -z) / 1.5
 
@@ -23,6 +24,7 @@ layout(push_constant) uniform PC {
     vec4 scales;         // flux per photon, deposit fixed-point scale (x 1/cell area), max bounces, emitter count
     ivec4 misc;          // x: this frame's first emitter vec4 (emitters are double-buffered per frame in flight)
                          // y: 0 trace photons, 1 find each cell's walls; z: sun step-back distance (float bits); w: texture z offset
+    ivec4 misc2;         // x: this frame's first box vec4, y: how many boxes
 } pc;
 
 const float PI = 3.14159265;
@@ -110,6 +112,29 @@ bool sees(ivec3 c, vec3 g) {
 
 // The deposit goes to one of the 8 cells around it, picked in proportion to its trilinear weight among the
 // cells on the photon's side of any wall (the CPU spreads it over them; same result on average).
+// a moving object's box stand-in (as lx_gi_proxy_hit): rays starting inside a box ignore it
+bool proxy_hit(int b, vec3 o, vec3 d, float tmax, out float t, out vec3 n) {
+    vec4 p0 = px[b], p1 = px[b + 1], p2 = px[b + 2], p3 = px[b + 3];
+    vec3 ax[3] = vec3[3](p1.xyz, p2.xyz, p3.xyz);
+    vec3 h = vec3(p0.w, p1.w, p2.w);
+    vec3 r = o - p0.xyz;
+    vec3 lo = vec3(dot(r, ax[0]), dot(r, ax[1]), dot(r, ax[2])), ld = vec3(dot(d, ax[0]), dot(d, ax[1]), dot(d, ax[2]));
+    if (all(lessThanEqual(abs(lo), h))) return false;
+    float tn = -1e30, tf = 1e30;
+    int axis = 0;
+    for (int a = 0; a < 3; a++) {
+        if (abs(ld[a]) < 1e-9) { if (abs(lo[a]) > h[a]) return false; continue; }
+        float t1 = (-h[a] - lo[a]) / ld[a], t2 = (h[a] - lo[a]) / ld[a];
+        float a1 = min(t1, t2), a2 = max(t1, t2);
+        if (a1 > tn) { tn = a1; axis = a; }
+        tf = min(tf, a2);
+    }
+    if (tf < tn || tn <= 1e-4 || tn >= tmax) return false;
+    t = tn;
+    n = ax[axis] * (ld[axis] > 0.0 ? -1.0 : 1.0);
+    return true;
+}
+
 void deposit(vec3 pos, vec3 dir, vec3 flux) {
     ivec3 res = pc.res_photons.xyz;
     vec3 g = (pos - pc.origin_cell.xyz) / pc.origin_cell.w;
@@ -208,12 +233,19 @@ void main() {
     for (int b = 0; b <= bounces; b++) {
         float t;
         int tri = trace(o, d, 1e30, t);
-        if (tri < 0) break;
+        vec3 n = vec3(0, 1, 0), alb = vec3(0.0);
+        if (tri >= 0) { n = tris[tri].n.xyz; alb = albedo[floatBitsToInt(tris[tri].v0.w)].xyz; }
+        bool got = tri >= 0;
+        for (int k = 0; k < pc.misc2.y; k++) {   // moving objects' stand-ins
+            float tp;
+            vec3 np;
+            int base = pc.misc2.x + k * 5;
+            if (proxy_hit(base, o, d, t, tp, np)) { t = tp; n = np; alb = px[base + 4].xyz; got = true; }
+        }
+        if (!got) break;
         vec3 pos = o + d * t;
-        vec3 n = tris[tri].n.xyz;
         if (dot(n, d) > 0.0) n = -n;
         if (b > 0 || sky) deposit(pos + n * (pc.origin_cell.w * 0.5), d, flux);
-        vec3 alb = albedo[floatBitsToInt(tris[tri].v0.w)].xyz;
         float survive = clamp(max(alb.x, max(alb.y, alb.z)), 0.0, 0.95);
         if (rnd() >= survive) break;
         flux = flux * alb / survive;

@@ -445,6 +445,7 @@ LxEntity lx_entity_find(const LxScene *s, const char *name);
 const char *lx_entity_name(const LxScene *s, LxEntity e);
 void lx_entity_set_name(LxScene *s, LxEntity e, const char *name);
 bool lx_entity_active(const LxScene *s, LxEntity e);
+bool lx_entity_can_be_static(const LxScene *s, LxEntity e, const char **why);   /* false (and why) for things that move or bend */
 void lx_entity_set_active(LxScene *s, LxEntity e, bool active);
 uint32_t lx_entity_components(const LxScene *s, LxEntity e);
 

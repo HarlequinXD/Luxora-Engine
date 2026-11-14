@@ -1441,7 +1441,8 @@ static UiNode *hit(UiNode *n, LxVec2 p) {
         UiNode *h = hit(c, p);
         if (h) return h;
     }
-    return interactive(n) ? n : NULL;
+    /* a disabled control is still found under the mouse when it has a tooltip: hovering says why it's off */
+    return (interactive(n) || (n->disabled && n->tooltip[0])) ? n : NULL;
 }
 
 static bool split_divider_hit(UiCtx *ui, UiNode *n, LxVec2 p) {
@@ -1877,6 +1878,7 @@ static void process_input(UiCtx *ui, float dt) {
         ui->hover_time = 0;
         ui->hover_pos = m;
     } else ui->hover_time += dt;
+    if (h && h->disabled) h = NULL;   /* ...but it can't be clicked */
 
     int cursor = 0;
     if (h && (h->type == UI_TEXTFIELD || (h->type == UI_NUMBER && h->editing))) cursor = 1;
@@ -2200,9 +2202,11 @@ static void draw_node(UiCtx *ui, UiNode *n) {
     case UI_CHECKBOX: {
         float bs = S(ui, 16), by = n->y + (n->ch - bs) * 0.5f;
         bool on = n->b && *n->b;
-        ui_draw_rect(ui, n->x, by, bs, bs, on ? (n->hover ? t->accent_hover : t->accent) : (n->hover ? t->field_hover : t->field), S(ui, 3));
-        if (!on) ui_draw_border(ui, n->x, by, bs, bs, n->hover ? t->border_light : t->border, S(ui, 3), lx_maxf(1, S(ui, 1)));
-        if (on) ui_draw_icon(ui, UI_ICON_CHECK, n->x, by, bs, t->accent_text);
+        float fade = n->disabled ? 0.35f : 1.0f;   /* disabled: faded, and no hover highlight */
+        bool hov = n->hover && !n->disabled;
+        ui_draw_rect(ui, n->x, by, bs, bs, ui_alpha(on ? (hov ? t->accent_hover : t->accent) : (hov ? t->field_hover : t->field), fade), S(ui, 3));
+        if (!on) ui_draw_border(ui, n->x, by, bs, bs, ui_alpha(hov ? t->border_light : t->border, fade), S(ui, 3), lx_maxf(1, S(ui, 1)));
+        if (on) ui_draw_icon(ui, UI_ICON_CHECK, n->x, by, bs, ui_alpha(t->accent_text, fade));
         if (n->text[0]) ui_draw_text(ui, n->font, n->x + bs + S(ui, 8), text_y(ui, n, n->font), n->text, n->disabled ? t->text_disabled : n->fg);
         break;
     }

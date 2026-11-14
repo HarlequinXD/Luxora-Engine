@@ -436,6 +436,12 @@ void lx_gi_shutdown(void);
 void lx_gi_update(LxScene *s, const LxGraphicsSettings *g);
 const LxGiVolume *lx_gi_volume(void);
 int lx_gi_last_photon_count(void);
+/* a moving object's stand-in for GI: an oriented box (centre, unit axes, half sizes) and its bounce colour */
+#define LX_GI_MAX_PROXIES 64
+typedef struct LxGiProxy { LxVec3 c, ax[3]; float h[3]; LxVec3 albedo; } LxGiProxy;
+bool lx_gi_proxy_hit(const LxGiProxy *p, LxVec3 o, LxVec3 d, float tmax, float *t_out, LxVec3 *n_out);
+int lx_gi_proxies(const LxGiProxy **out);   /* this frame's stand-ins (tests, the GPU tracer) */
+
 /* the GPU tracer: what the renderer needs to run this frame's photons in compute shaders */
 typedef struct LxGiTrace {         /* one photon dispatch into one grid */
     bool trace;                    /* false: converged, keep the last solution */
@@ -464,6 +470,8 @@ typedef struct LxGiGpuFrame {
     float cell;
     LxGiTrace t;                   /* the whole-scene grid */
     LxGiCascadeFrame casc[LX_GI_CASCADES];
+    int proxy_count;               /* moving objects' box stand-ins: (centre, half x), (axis x, half y), (axis y, half z), (axis z), (albedo) */
+    float proxies[LX_GI_MAX_PROXIES][20];
 } LxGiGpuFrame;
 bool lx_gi_gpu_frame(LxScene *s, const LxGraphicsSettings *g, int photon_multiplier, LxVec3 eye, LxGiGpuFrame *f);
 float *lx_gi_cpu_reference(LxScene *s, const LxGraphicsSettings *g, int frames, int res[3]);

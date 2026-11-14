@@ -233,6 +233,27 @@ void lx_entity_set_name(LxScene *s, LxEntity e, const char *n) {
     LxEntityData *d = lx_entity_data(s, e);
     if (d) lx_strcpy(d->name, sizeof d->name, n);
 }
+/* Static geometry (GI photons + sound) must never move or bend: the photon and sound data is built once from
+ * the mesh as it is. Skinned meshes and anything moved by physics, a character controller or an animator
+ * (on itself or a parent) can't be static: GI and sound would keep a frozen copy where it started. */
+bool lx_entity_can_be_static(const LxScene *s, LxEntity e, const char **why) {
+    const char *r = NULL;
+    LxEntityData *d = lx_entity_data(s, e);
+    if (!d) r = "No such object";
+    else if (d->comps & LX_COMP_MESH) {
+        const LxMesh *m = lx_asset_mesh(d->mesh.mesh);
+        if (m && m->skin) r = "Animated meshes bend and move, so they can't be static. Bounce light still uses a box that follows it.";
+    }
+    for (LxEntityData *p = d; p && !r;) {
+        if (p->comps & LX_COMP_RIGIDBODY) r = "Moved by a Rigidbody (here or on a parent), so it can't be static. Bounce light still uses a box that follows it.";
+        else if (p->comps & LX_COMP_CHARACTER) r = "Moved by a Character Controller (here or on a parent), so it can't be static. Bounce light still uses a box that follows it.";
+        else if (p->comps & LX_COMP_ANIMATOR) r = "Moved by an Animator (here or on a parent), so it can't be static. Bounce light still uses a box that follows it.";
+        p = p->parent ? lx_entity_data(s, p->parent) : NULL;
+    }
+    if (why) *why = r;
+    return r == NULL;
+}
+
 bool lx_entity_active(const LxScene *s, LxEntity e) {
     LxEntityData *d = lx_entity_data(s, e);
     return d && d->active;

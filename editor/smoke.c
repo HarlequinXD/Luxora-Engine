@@ -1117,6 +1117,31 @@ static void s_casc_compare(void) {
     lx_free(scene);
 }
 
+/* safeguards are shown, faded and off, never hidden: an enemy's body (moved by a Character Controller) */
+static void s_static_select(void) {
+    LxEntity enemy = lx_entity_find(ED.scene, "Enemy 1");
+    LxEntity body = enemy ? lx_entity_find_child(ED.scene, enemy, "Body") : 0;
+    SMOKE_CHECK(body != 0, "the template's enemy has a body");
+    if (body) ed_select(body);
+}
+static UiNode *find_checkbox_after(UiNode *n, const char *label, bool *seen) {
+    if (!n) return NULL;
+    if (n->type == UI_LABEL && !strcmp(n->text, label)) *seen = true;
+    else if (*seen && n->type == UI_CHECKBOX) return n;
+    for (UiNode *c = n->first; c; c = c->next) {
+        UiNode *r = find_checkbox_after(c, label, seen);
+        if (r) return r;
+    }
+    return NULL;
+}
+static void s_static_check(void) {
+    bool seen = false;
+    UiNode *cb = find_checkbox_after(ui_root(ED.ui), "Static (GI + Sound)", &seen);
+    SMOKE_CHECK(cb && cb->disabled && cb->b && !*cb->b && strstr(cb->tooltip, "Character Controller"),
+                "a moving object's Static switch is shown faded, off, with the reason (%s)", cb ? cb->tooltip : "missing");
+    ED.selected = 0;
+}
+
 static const struct { int frame; SmokeFn fn; const char *what; } TPL_STEPS[] = {
     {0, s_tpl_close, "close the project"},
     {4, s_tpl_dialog, "New Project"},
@@ -1132,7 +1157,9 @@ static const struct { int frame; SmokeFn fn; const char *what; } TPL_STEPS[] = {
     {164, s_tpl_tps_playing, "the Third Person template runs"},
     {166, s_tpl_stop, "stop"},
     {170, s_tpl_stopped, "edit mode, mouse free"},
-    {172, s_gi_view, "look over the arena and let the GI settle"},
+    {171, s_static_select, "select an enemy's body"},
+    {173, s_static_check, "its Static switch is faded and off"},
+    {174, s_gi_view, "look over the arena and let the GI settle"},
     {240, s_gi_compare, "GPU photon GI matches the CPU tracer"},
     {241, s_casc_compare, "the camera grids agree with the scene grid"},
     {242, s_ls_setup, "a point light between two walls"},

@@ -108,7 +108,8 @@ void lx_bvh_build_from_scene(LxBvh *b, LxScene *s) {
     int tris = 0;
     for (int i = 1; i < s->count; i++) {
         LxEntityData *d = &s->entities[i];
-        if (!d->alive || !d->active || !(d->comps & LX_COMP_MESH) || !d->mesh.static_geometry) continue;
+        if (!d->alive || !d->active || !(d->comps & LX_COMP_MESH) || !d->mesh.static_geometry ||
+            !lx_entity_can_be_static(s, lx_entity_make((uint32_t)i, d->generation & 0xfffu), NULL)) continue;
         tris += lx_asset_mesh(d->mesh.mesh)->lods[0].index_count / 3;
     }
     b->bounds = lx_aabb_empty();
@@ -126,7 +127,8 @@ void lx_bvh_build_from_scene(LxBvh *b, LxScene *s) {
     int t = 0;
     for (int i = 1; i < s->count; i++) {
         LxEntityData *d = &s->entities[i];
-        if (!d->alive || !d->active || !(d->comps & LX_COMP_MESH) || !d->mesh.static_geometry) continue;
+        if (!d->alive || !d->active || !(d->comps & LX_COMP_MESH) || !d->mesh.static_geometry ||
+            !lx_entity_can_be_static(s, lx_entity_make((uint32_t)i, d->generation & 0xfffu), NULL)) continue;
         const LxMesh *m = lx_asset_mesh(d->mesh.mesh);
         const LxMaterial *mat = lx_asset_material(d->mesh.material);
         int mi = -1;

@@ -38,6 +38,8 @@ static struct {
     double settled_photons;   /* photons traced since the lighting last changed */
     bool gpu;                 /* the renderer traces (lx_gi_gpu_frame); grid arrays live on the GPU */
     float *vis;               /* per cell: distance to the first surface along +x -x +y -y +z -z, in cells (max VIS_MAX) */
+    LxGiProxy proxies[LX_GI_MAX_PROXIES];   /* moving objects: box stand-ins photons bounce off */
+    int proxy_count;
     uint32_t vis_version;
     uint32_t scene_version;   /* bumps when the BVH is rebuilt */
     Emitter emitters[64];
@@ -117,6 +119,85 @@ static bool vis_weights(LxVec3 g, int base[3], float w[8]) {
     for (int k = 0; k < 8; k++) w[k] /= sum;
     return true;
 }
+/* ---- moving objects: box stand-ins ----
+ * Things that can't be static (skinned characters, Rigidbodies, Character Controllers, Animators and what they
+ * carry) still block and bounce light: each gets an oriented box from its current bounds, refreshed every frame.
+ * Bounce light is soft and stored in cells of a third of a metre or more, so a box is as good as the real mesh
+ * there, at a tiny fraction of the cost (sharp shadows already use the real mesh through the shadow maps). */
+static void gather_proxies(LxScene *s) {
+    G.proxy_count = 0;
+    for (int i = 1; i < s->count && G.proxy_count < LX_GI_MAX_PROXIES; i++) {
+        LxEntityData *d = &s->entities[i];
+        if (!d->alive || !d->active || !(d->comps & LX_COMP_MESH)) continue;
+        bool hidden = false;
+        for (LxEntity p = d->parent; p; p = lx_entity_data(s, p)->parent)
+            if (!lx_entity_data(s, p)->active) { hidden = true; break; }
+        if (hidden) continue;
+        LxEntity e = lx_entity_make((uint32_t)i, d->generation & 0xfffu);
+        if (lx_entity_can_be_static(s, e, NULL)) continue;   /* not a moving thing */
+        const LxMesh *m = lx_skin_mesh_of(d);
+        if (!m) continue;
+        LxVec3 lc = lx_aabb_center(m->bounds), he = lx_aabb_extent(m->bounds);
+        LxGiProxy *p = &G.proxies[G.proxy_count];
+        p->c = lx_mat4_point(d->world, lc);
+        float h[3];
+        for (int a = 0; a < 3; a++) {
+            LxVec3 col = lx_v3(d->world.m[a * 4], d->world.m[a * 4 + 1], d->world.m[a * 4 + 2]);
+            float len = lx_len3(col);
+            p->ax[a] = len > 1e-6f ? lx_scale3(col, 1.0f / len) : lx_v3(a == 0, a == 1, a == 2);
+            h[a] = lx_comp3(he, a) * len * 0.95f;
+        }
+        if (m->skin) {   /* a body, not its arm span: the most upright axis is height, the others at most a quarter of it */
+            int up = 0;
+            for (int a = 1; a < 3; a++) if (fabsf(p->ax[a].y) > fabsf(p->ax[up].y)) up = a;
+            for (int a = 0; a < 3; a++) if (a != up) h[a] = lx_minf(h[a] * 0.6f, h[up] * 0.25f);
+        }
+        if (h[0] < 0.01f && h[1] < 0.01f && h[2] < 0.01f) continue;
+        for (int a = 0; a < 3; a++) p->h[a] = lx_maxf(h[a], 0.005f);
+        const LxMaterial *mat = lx_asset_material(d->mesh.material);
+        float diffuse = mat ? 1.0f - mat->metallic * 0.9f : 1.0f;   /* as the static geometry's bounce colour */
+        p->albedo = mat ? lx_scale3(lx_v3(mat->albedo.x, mat->albedo.y, mat->albedo.z), diffuse) : lx_v3(0.7f, 0.7f, 0.7f);
+        G.proxy_count++;
+    }
+}
+/* the stand-ins are part of the lighting: when one moves (by more than ~5 cm), GI refreshes like for a moved light */
+static uint64_t hash_proxies(uint64_t h) {
+    for (int i = 0; i < G.proxy_count; i++) {
+        const LxGiProxy *p = &G.proxies[i];
+        int32_t q[12] = {(int32_t)lroundf(p->c.x * 20), (int32_t)lroundf(p->c.y * 20), (int32_t)lroundf(p->c.z * 20),
+                         (int32_t)lroundf(p->h[0] * 20), (int32_t)lroundf(p->h[1] * 20), (int32_t)lroundf(p->h[2] * 20),
+                         (int32_t)lroundf(p->ax[0].x * 20), (int32_t)lroundf(p->ax[0].y * 20), (int32_t)lroundf(p->ax[0].z * 20),
+                         (int32_t)lroundf(p->ax[1].x * 20), (int32_t)lroundf(p->ax[1].y * 20), (int32_t)lroundf(p->ax[1].z * 20)};
+        for (int k = 0; k < 12; k++) h = (h ^ (uint32_t)q[k]) * 1099511628211ull;
+    }
+    return (h ^ (uint64_t)G.proxy_count) * 1099511628211ull;
+}
+/* ray vs a stand-in box (rays starting inside one ignore it: a lamp a character carries isn't blocked by them) */
+bool lx_gi_proxy_hit(const LxGiProxy *p, LxVec3 o, LxVec3 d, float tmax, float *t_out, LxVec3 *n_out) {
+    LxVec3 r = lx_sub3(o, p->c);
+    float lo[3], ld[3];
+    bool inside = true;
+    for (int a = 0; a < 3; a++) {
+        lo[a] = lx_dot3(r, p->ax[a]);
+        ld[a] = lx_dot3(d, p->ax[a]);
+        if (fabsf(lo[a]) > p->h[a]) inside = false;
+    }
+    if (inside) return false;
+    float tn = -1e30f, tf = 1e30f;
+    int axis = 0;
+    for (int a = 0; a < 3; a++) {
+        if (fabsf(ld[a]) < 1e-9f) { if (fabsf(lo[a]) > p->h[a]) return false; continue; }
+        float t1 = (-p->h[a] - lo[a]) / ld[a], t2 = (p->h[a] - lo[a]) / ld[a];
+        float a1 = lx_minf(t1, t2), a2 = lx_maxf(t1, t2);
+        if (a1 > tn) { tn = a1; axis = a; }
+        if (a2 < tf) tf = a2;
+    }
+    if (tf < tn || tn <= 1e-4f || tn >= tmax) return false;
+    *t_out = tn;
+    *n_out = lx_scale3(p->ax[axis], ld[axis] > 0 ? -1.0f : 1.0f);
+    return true;
+}
+
 /* blur neighbours: no wall between the two centres */
 static bool vis_open(int i, int axis, int dir) {
     if (!G.vis) return true;
@@ -308,15 +389,26 @@ static void trace_job(void *user, int begin, int end, int thread) {
             bool is_sky = e->kind == 3;
             for (int bounce = 0; bounce <= G.max_bounces; bounce++) {
                 LxHit hit;
-                if (!lx_bvh_intersect(&G.bvh, (LxRay){o, d}, 1e30f, &hit)) break;
-                LxVec3 pos = lx_madd3(o, d, hit.t);
-                LxVec3 n = G.bvh.normals[hit.tri];
+                float best = 1e30f;
+                LxVec3 n = lx_v3(0, 1, 0), alb = lx_v3(0, 0, 0);
+                bool got = lx_bvh_intersect(&G.bvh, (LxRay){o, d}, 1e30f, &hit);
+                if (got) {
+                    best = hit.t;
+                    n = G.bvh.normals[hit.tri];
+                    alb = G.bvh.materials[G.bvh.mat_index[hit.tri]].albedo;
+                }
+                for (int pi = 0; pi < G.proxy_count; pi++) {   /* moving objects' stand-ins */
+                    float tp;
+                    LxVec3 np;
+                    if (lx_gi_proxy_hit(&G.proxies[pi], o, d, best, &tp, &np)) { best = tp; n = np; alb = G.proxies[pi].albedo; got = true; }
+                }
+                if (!got) break;
+                LxVec3 pos = lx_madd3(o, d, best);
                 if (lx_dot3(n, d) > 0) n = lx_neg3(n);
                 if (bounce > 0 || is_sky) push_dep(thread, lx_madd3(pos, n, G.cell_size.x * 0.5f), d, flux);
-                const LxTriMaterial *m = &G.bvh.materials[G.bvh.mat_index[hit.tri]];
-                float survive = lx_clampf(lx_maxf(m->albedo.x, lx_maxf(m->albedo.y, m->albedo.z)), 0.0f, 0.95f);
+                float survive = lx_clampf(lx_maxf(alb.x, lx_maxf(alb.y, alb.z)), 0.0f, 0.95f);
                 if (lx_rng_f(&rng) >= survive) break;
-                flux = lx_scale3(lx_mul3(flux, m->albedo), 1.0f / survive);
+                flux = lx_scale3(lx_mul3(flux, alb), 1.0f / survive);
                 o = lx_madd3(pos, n, 1e-3f);
                 d = lx_rng_cosine(&rng, n);
             }
@@ -410,6 +502,8 @@ static int prepare(LxScene *s, const LxGraphicsSettings *g, bool gpu) {
     }
     lx_scene_update_transforms(s);
     gather_emitters(s);
+    gather_proxies(s);
+    G.light_hash = hash_proxies(G.light_hash);
     {   /* graphics settings changes (bounces, intensity...) count as a lighting change too */
         const uint8_t *gb = (const uint8_t *)g;
         uint64_t h = G.light_hash;
@@ -564,6 +658,16 @@ bool lx_gi_gpu_frame(LxScene *s, const LxGraphicsSettings *g, int photon_multipl
     f->origin = G.origin;
     f->cell = G.cell_size.x;
     f->max_bounces = G.max_bounces;
+    f->proxy_count = G.proxy_count;
+    for (int i = 0; i < G.proxy_count; i++) {
+        const LxGiProxy *p = &G.proxies[i];
+        float *o = f->proxies[i];
+        o[0] = p->c.x; o[1] = p->c.y; o[2] = p->c.z; o[3] = p->h[0];
+        o[4] = p->ax[0].x; o[5] = p->ax[0].y; o[6] = p->ax[0].z; o[7] = p->h[1];
+        o[8] = p->ax[1].x; o[9] = p->ax[1].y; o[10] = p->ax[1].z; o[11] = p->h[2];
+        o[12] = p->ax[2].x; o[13] = p->ax[2].y; o[14] = p->ax[2].z; o[15] = 0;
+        o[16] = p->albedo.x; o[17] = p->albedo.y; o[18] = p->albedo.z; o[19] = 0;
+    }
     int photons = g->gi_photons_per_frame < 256 ? 256 : g->gi_photons_per_frame;
     photons *= photon_multiplier < 1 ? 1 : photon_multiplier;
     photons = (photons + 63) / 64 * 64;
@@ -692,3 +796,5 @@ LxVec3 lx_gi_irradiance(LxVec3 p, LxVec3 n, bool walls) {
     }
     return lx_v3(e[0], e[1], e[2]);
 }
+
+int lx_gi_proxies(const LxGiProxy **out) { if (out) *out = G.proxies; return G.proxy_count; }

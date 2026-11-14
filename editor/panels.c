@@ -797,8 +797,22 @@ static void build_entity_inspector(UiNode *body) {
         asset_field(sec, "Mesh", d->mesh.mesh, sizeof d->mesh.mesh, "mesh");
         asset_field(sec, "Material", d->mesh.material, sizeof d->mesh.material, "material");
         bool_row(sec, "Cast Shadows", &d->mesh.cast_shadows);
-        UiNode *st = bool_row(sec, "Static (GI + Sound)", &d->mesh.static_geometry);
-        lx_strcpy(st->tooltip, sizeof st->tooltip, "Static geometry bounces virtual photons and reflects/blocks sound");
+        const char *why = NULL;
+        if (lx_entity_can_be_static(s, e, &why)) {
+            UiNode *st = bool_row(sec, "Static (GI + Sound)", &d->mesh.static_geometry);
+            lx_strcpy(st->tooltip, sizeof st->tooltip, "Static geometry bounces virtual photons and reflects/blocks sound");
+        } else {   /* safeguard: still shown, faded and off, and hovering says why */
+            static bool off = false;
+            off = false;
+            UiNode *st = bool_row(sec, "Static (GI + Sound)", &off);
+            st->disabled = true;
+            lx_strcpy(st->tooltip, sizeof st->tooltip, why);
+            if (st->parent && st->parent->first && st->parent->first != st) {
+                st->parent->first->fg = ui_theme(ui)->text_disabled;
+                lx_strcpy(st->parent->first->tooltip, sizeof st->parent->first->tooltip, why);
+                st->parent->first->disabled = true;
+            }
+        }
         LxMesh *m = lx_asset_mesh(d->mesh.mesh);
         UiNode *info = ui_label(ui, sec, "");
         ui_set_text(info, "%d triangles · %d LOD%s", lx_mesh_triangle_count(m), lx_mesh_lod_count(m), lx_mesh_lod_count(m) == 1 ? "" : "s");
