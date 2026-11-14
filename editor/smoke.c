@@ -1058,9 +1058,9 @@ static void s_leak_check(void) {
     lx_free(px);
 }
 
-/* the camera grids carry the same light as the scene grid around the camera: both summed over 4 m blocks of the
- * fine grid's area, as irradiance x cell area (a grid's cells hold irradiance, so finer cells hold the same values
- * over more cells), must match in total and in where it falls */
+/* the camera grids carry the same light as the scene grid around the camera: both summed over 4x4x4 blocks of the
+ * camera grid, as light x cell volume (cells hold the light passing through them per volume), over the region both
+ * grids cover, must match in total and in where it falls */
 static void s_gi_view(void) {
     ED.game_view = false;
     ED.cam_pos = lx_v3(0, 8, 12);
@@ -1087,9 +1087,12 @@ static void s_casc_compare(void) {
         for (int z = 0; z < cr[2]; z++)
             for (int y = 0; y < cr[1]; y++)
                 for (int x = 0; x < cr[0]; x++) {
+                    LxVec3 c = lx_v3(co.x + (x + 0.5f) * ccell, co.y + (y + 0.5f) * ccell, co.z + (z + 0.5f) * ccell);
+                    LxVec3 gs = lx_scale3(lx_sub3(c, so), 1.0f / scell);   /* only where the scene grid is too */
+                    if (gs.x < 0 || gs.y < 0 || gs.z < 0 || gs.x >= sr[0] || gs.y >= sr[1] || gs.z >= sr[2]) continue;
                     size_t i = ((size_t)(z * cr[1] + y) * (size_t)cr[0] + (size_t)x) * 12;
                     int b = ((z * B / cr[2]) * B + y * B / cr[1]) * B + x * B / cr[0];
-                    double v = (casc[i] + casc[i + 4] + casc[i + 8]) * (double)ccell * ccell;
+                    double v = (casc[i] + casc[i + 4] + casc[i + 8]) * (double)ccell * ccell * ccell;
                     cs[b] += v; ct += v;
                 }
         for (int z = 0; z < sr[2]; z++)
@@ -1100,7 +1103,7 @@ static void s_casc_compare(void) {
                     if (g.x < 0 || g.y < 0 || g.z < 0 || g.x >= 1 || g.y >= 1 || g.z >= 1) continue;
                     size_t i = ((size_t)(z * sr[1] + y) * (size_t)sr[0] + (size_t)x) * 12;
                     int b = ((int)(g.z * B) * B + (int)(g.y * B)) * B + (int)(g.x * B);
-                    double v = (scene[i] + scene[i + 4] + scene[i + 8]) * (double)scell * scell;
+                    double v = (scene[i] + scene[i + 4] + scene[i + 8]) * (double)scell * scell * scell;
                     ss[b] += v; st += v;
                 }
         double sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
