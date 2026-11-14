@@ -1211,25 +1211,29 @@ static void build_asset_inspector(UiNode *body) {
         hint->icon_size = 12;
         ui_pad(hint, 12, 4, 0, 0);
     } else if (icon == UI_ICON_TEXTURE) {
-        LxTexture *tex = lx_asset_texture(ref);
-        if (tex) {
-            static uint32_t preview;
-            static char preview_path[LX_PATH_MAX];
-            if (strcmp(preview_path, path)) {
-                if (preview) lx_ui_texture_free(preview);
-                preview = lx_ui_texture_from_rgba(tex->pixels, tex->width, tex->height);
-                lx_strcpy(preview_path, sizeof preview_path, path);
-            }
+        /* a 512 px preview made in the background: a 4K texture doesn't hold up the editor */
+        float aspect = 1;
+        int sw = 0, sh = 0;
+        uint32_t preview = ed_thumb_get(path, lx_file_size(path), 512, &aspect, &sw, &sh);
+        if (preview) {
             UiNode *img = ui_image(ui, body, preview);
             img->h = 240;
-            img->tex_aspect = (float)tex->width / (float)tex->height;
+            img->tex_aspect = aspect;
             ui_pad(img, 12, 8, 12, 8);
-            UiNode *info = ui_label(ui, body, "");
-            ui_set_text(info, "%d x %d · RGBA8 · mipmapped on upload", tex->width, tex->height);
-            info->font = UI_FONT_SMALL;
-            info->fg = t->text_dim;
-            ui_pad(info, 12, 0, 0, 0);
+        } else {
+            UiNode *wait = ui_label(ui, body, "Loading preview...");
+            wait->h = 240;
+            wait->center_text = true;
+            wait->fg = t->text_dim;
+            wait->icon = UI_ICON_TEXTURE;
+            wait->icon_color = ed_color_for_icon(UI_ICON_TEXTURE);
         }
+        UiNode *info = ui_label(ui, body, "");
+        if (sw) ui_set_text(info, "%d x %d · RGBA8 · mipmapped on upload", sw, sh);
+        else ui_set_text(info, "%.1f MB", (double)lx_file_size(path) / 1048576.0);
+        info->font = UI_FONT_SMALL;
+        info->fg = t->text_dim;
+        ui_pad(info, 12, 0, 0, 0);
     } else if (icon == UI_ICON_MESH) {
         LxMesh *m = lx_asset_mesh(ref);
         UiNode *info = ui_label(ui, body, "");
@@ -1269,8 +1273,35 @@ static void build_asset_inspector(UiNode *body) {
     }
 }
 
+static UiNode *g_inspector_body, *g_lighting_body, *g_mixer_sources;
+static uint64_t g_mixer_hash;
+static const void *g_mixer_storage;
+static uint32_t g_inspector_gen = ~0u, g_lighting_gen = ~0u;
+void ed_panels_forget(void) { g_inspector_body = g_lighting_body = g_mixer_sources = NULL; }   /* the window was rebuilt */
+void ed_panels_unbind_scene(void) {
+    ui_unbind_children(ED.ui, g_inspector_body);
+    ui_unbind_children(ED.ui, g_lighting_body);
+    ui_unbind_children(ED.ui, g_mixer_sources);
+    g_mixer_hash = 0;
+    g_inspector_gen = g_lighting_gen = ~0u;
+}
+/* after clicks were handled this frame: the objects' storage may have moved (objects were created) */
+static void after_input(UiCtx *ui) {
+    LX_UNUSED(ui);
+    if (ED.scene && g_inspector_body && g_inspector_body->first && ED.inspector_entity && ED.inspector_storage != (const void *)ED.scene->entities) {
+        ui_unbind_children(ED.ui, g_inspector_body);
+        ED.inspector_dirty = true;
+    }
+    if (ED.scene && g_mixer_sources && g_mixer_sources->first && g_mixer_storage != (const void *)ED.scene->entities) {
+        ui_unbind_children(ED.ui, g_mixer_sources);
+        g_mixer_hash = 0;
+    }
+}
+
 static void inspector_frame(UiNode *body) {
-    if (!ED.scene) return;
+    ui_set_after_input(ED.ui, after_input);
+    if (!ED.scene) { if (body->first) ui_clear(ED.ui, body); return; }
+    if (g_inspector_gen != ED.scene_gen) { g_inspector_gen = ED.scene_gen; ED.inspector_dirty = true; }
     material_flush();
     preview_button_sync();   /* flips back to "Preview" when the sound ends */
     LxEntityData *d = lx_entity_data(ED.scene, ED.selected);
@@ -1322,6 +1353,7 @@ UiNode *ed_inspector_panel(UiNode *parent) {
     body->scroll = true;
     body->gap = 2;
     body->on_frame = inspector_frame;
+    g_inspector_body = body;
     return p;
 }
 
@@ -1358,8 +1390,10 @@ static void reset_gi(UiNode *n) { LX_UNUSED(n); lx_gi_reset(); ui_notify(ED.ui, 
 static void env_changed(UiNode *n) { LX_UNUSED(n); ed_mark_changed(); }
 
 static void lighting_frame(UiNode *body) {
-    if (g_lighting_scene == ED.scene && body->first) return;
+    g_lighting_body = body;
+    if (g_lighting_gen == ED.scene_gen && g_lighting_scene == ED.scene && body->first) return;
     g_lighting_scene = ED.scene;
+    g_lighting_gen = ED.scene_gen;
     UiCtx *ui = ED.ui;
     ui_clear(ui, body);
     if (!ED.scene) return;
@@ -1505,59 +1539,10 @@ UiNode *ed_stats_panel(UiNode *parent) {
 /* ======================================================================
  *  CONTENT BROWSER
  * ====================================================================== */
-/* Thumbnails: cached per file (path + size, so a re-exported image refreshes), least recently used
- * evicted - never one shown in the current frame, so a tile can't end up drawing someone else's. */
-#define THUMB_MAX 192
-typedef struct Thumb { char path[LX_PATH_MAX]; uint64_t size; uint32_t tex; float aspect; uint64_t used; } Thumb;
-static Thumb g_thumbs[THUMB_MAX];
-static uint64_t g_thumb_clock, g_thumb_rebuild;
 static char g_ctx_path[LX_PATH_MAX];
 
-static uint32_t thumbnail(const char *path, uint64_t file_size, float *aspect) {
-    uint64_t now = ++g_thumb_clock;
-    for (int i = 0; i < THUMB_MAX; i++)
-        if (g_thumbs[i].tex && g_thumbs[i].size == file_size && !strcmp(g_thumbs[i].path, path)) {
-            g_thumbs[i].used = now;
-            *aspect = g_thumbs[i].aspect;
-            return g_thumbs[i].tex;
-        }
-    int w, h;
-    uint8_t *px = lx_image_load(path, &w, &h);
-    if (!px || w <= 0 || h <= 0) { lx_free(px); return 0; }
-    /* area-averaged downscale to fit 128x128, keeping the aspect ratio */
-    float k = 128.0f / (float)(w > h ? w : h);
-    int tw = w, th = h;
-    uint8_t *small = px;
-    if (k < 1.0f) {
-        tw = (int)((float)w * k + 0.5f); th = (int)((float)h * k + 0.5f);
-        if (tw < 1) tw = 1;
-        if (th < 1) th = 1;
-        small = lx_image_resize(px, w, h, tw, th);
-        lx_free(px);
-        if (!small) return 0;
-    }
-    /* reuse: the same file's old entry, else an empty slot, else the least recently used */
-    int slot = -1;
-    for (int i = 0; i < THUMB_MAX && slot < 0; i++) if (g_thumbs[i].tex && !strcmp(g_thumbs[i].path, path)) slot = i;
-    for (int i = 0; i < THUMB_MAX && slot < 0; i++) if (!g_thumbs[i].tex) slot = i;
-    if (slot < 0) {
-        for (int i = 0; i < THUMB_MAX; i++)
-            if (g_thumbs[i].used < g_thumb_rebuild && (slot < 0 || g_thumbs[i].used < g_thumbs[slot].used)) slot = i;
-        if (slot < 0) { lx_free(small); return 0; }   /* every cached thumbnail is on screen: show the icon */
-    }
-    Thumb *t = &g_thumbs[slot];
-    if (t->tex) lx_ui_texture_free(t->tex);
-    t->tex = lx_ui_texture_from_rgba(small, tw, th);
-    lx_strcpy(t->path, sizeof t->path, path);
-    t->size = file_size;
-    t->aspect = (float)tw / (float)th;
-    t->used = now;
-    lx_free(small);
-    *aspect = t->aspect;
-    return t->tex;
-}
-
 void ed_content_open_dir(const char *dir) {
+    if (strcmp(ED.content_dir, dir)) ed_thumbs_cancel_queued();   /* the old folder's pictures aren't needed now */
     lx_strcpy(ED.content_dir, sizeof ED.content_dir, dir);
     ED.content_dirty = true;
 }
@@ -1845,7 +1830,7 @@ static void content_frame(UiNode *panel) {
     /* grid */
     UiNode *grid = ED.content_grid;
     ui_clear(ui, grid);
-    g_thumb_rebuild = g_thumb_clock + 1;   /* thumbnails used from here on are on screen: keep them */
+    ed_thumbs_mark_visible();   /* thumbnails used from here on are on screen: keep them */
     grid->wrap = !ED.content_list_view;
     grid->scroll = true;
     grid->dir = ED.content_list_view ? UI_COL : UI_ROW;
@@ -1873,7 +1858,7 @@ static void content_frame(UiNode *panel) {
         lx_strcpy(tl->tooltip, sizeof tl->tooltip, ref);
         if (e[i].is_dir) { tl->accept = "mesh,material,texture,sound,scene,script,file,folder,prefab,entity,model"; tl->on_drop = folder_drop; }
         float thumb_aspect = 1.0f;
-        uint32_t thumb = icon == UI_ICON_TEXTURE ? thumbnail(full, e[i].size, &thumb_aspect) : 0;
+        uint32_t thumb = icon == UI_ICON_TEXTURE ? ed_thumb_get(full, e[i].size, 128, &thumb_aspect, NULL, NULL) : 0;
         if (ED.content_list_view) {
             tl->h = 26;
             ui_pad(tl, 8, 0, 8, 0);
@@ -1909,6 +1894,9 @@ static void content_frame(UiNode *panel) {
             nm->font = UI_FONT_SMALL;
             nm->center_text = true;
             nm->h = 18;
+            nm->w = tile - 12;   /* the tile's width: long names end in "…" instead of running into the next tile */
+            nm->clip = true;
+            if (!tl->tooltip[0]) lx_strcpy(tl->tooltip, sizeof tl->tooltip, e[i].name);
         }
         shown++;
     }
@@ -2084,8 +2072,6 @@ UiNode *ed_console_panel(UiNode *parent) {
 /* ======================================================================
  *  AUDIO MIXER
  * ====================================================================== */
-static UiNode *g_mixer_sources;
-static uint64_t g_mixer_hash;
 static void audio_changed(UiNode *n) {
     LX_UNUSED(n);
     ED.project.audio = *lx_audio_settings();
@@ -2099,8 +2085,10 @@ static void stop_all(UiNode *n) { LX_UNUSED(n); lx_audio_stop_all(); }
 static void mixer_frame(UiNode *panel) {
     LX_UNUSED(panel);
     if (!ED.scene || !g_mixer_sources) return;
-    uint64_t h = (uint64_t)(uintptr_t)ED.scene ^ ED.hierarchy_hash;
+    /* rebuilt when the objects change, the scene is replaced, or the objects' storage moves (the sliders point into it) */
+    uint64_t h = ((uint64_t)(uintptr_t)ED.scene ^ ED.hierarchy_hash ^ ((uint64_t)ED.scene_gen << 32) ^ (uint64_t)(uintptr_t)ED.scene->entities) + 1;
     if (h == g_mixer_hash) return;
+    g_mixer_storage = ED.scene->entities;
     g_mixer_hash = h;
     UiCtx *ui = ED.ui;
     const UiTheme *t = ui_theme(ui);

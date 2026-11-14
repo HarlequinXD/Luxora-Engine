@@ -151,6 +151,20 @@ bool lx_file_write(const char *path, const void *data, size_t size) {
     return ok;
 }
 
+uint64_t lx_file_size(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+#ifdef _WIN32
+    _fseeki64(f, 0, SEEK_END);
+    long long n = _ftelli64(f);
+#else
+    fseeko(f, 0, SEEK_END);
+    long long n = (long long)ftello(f);
+#endif
+    fclose(f);
+    return n > 0 ? (uint64_t)n : 0;
+}
+
 bool lx_file_exists(const char *path) {
 #if LX_OS_ANDROID
     if (strncmp(path, "apk:/", 5) == 0) {

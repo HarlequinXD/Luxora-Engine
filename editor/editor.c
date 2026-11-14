@@ -254,6 +254,7 @@ void ed_open_project(const char *root) {
     ed_add_recent(p.root);
     lx_strcpy(ED.content_dir, sizeof ED.content_dir, p.assets);
     ED.scene = NULL;
+    ed_scene_replaced();
     ED.selected = 0;
     ED.selected_asset[0] = 0;
     ED.play = ED_EDIT;
@@ -327,8 +328,10 @@ void ed_close_project(void) {
     lx_audio_stop_all();
     if (ED.scene) lx_scene_destroy(ED.scene);
     ED.scene = NULL;
+    ed_scene_replaced();
     ed_reset_history();
     if (ED.viewport_rt) { lx_render_target_destroy(ED.viewport_rt); ED.viewport_rt = NULL; }
+    ed_thumbs_shutdown();
     lx_assets_clear();
     lx_gi_reset();
     ed_scripts_close();
@@ -338,12 +341,21 @@ void ed_close_project(void) {
 /* ======================================================================
  *  scenes
  * ====================================================================== */
+/* The scene in memory was swapped (open, new, undo, Stop) or freed: fields still bound to the old one
+ * are switched off right now - even mid-frame, before anything draws or clicks them - and rebuilt. */
+void ed_scene_replaced(void) {
+    ED.scene_gen++;
+    ED.inspector_dirty = true;
+    ED.hierarchy_hash = 0;
+    ed_panels_unbind_scene();
+}
 void ed_set_scene(LxScene *s, const char *ref) {
     if (ED.scene && ED.scene != s) {
         lx_audio_stop_all();
         lx_scene_destroy(ED.scene);
     }
     ED.scene = s;
+    ed_scene_replaced();
     lx_strcpy(ED.scene_ref, sizeof ED.scene_ref, ref ? ref : "");
     ED.selected = 0;
     ED.dirty = false;
@@ -542,6 +554,7 @@ static void restore(char *text) {
     lx_audio_stop_all();
     lx_scene_destroy(ED.scene);
     ED.scene = s;
+    ed_scene_replaced();
     lx_strcpy(ED.scene_ref, sizeof ED.scene_ref, ref);
     ED.selected = sel[0] ? lx_entity_find(s, sel) : 0;
     lx_free(sel);
@@ -747,6 +760,7 @@ void ed_stop(void) {
     LxScene *s = lx_scene_deserialize(ED.play_snapshot);
     lx_scene_destroy(ED.scene);
     ED.scene = s;
+    ed_scene_replaced();
     lx_strcpy(ED.scene_ref, sizeof ED.scene_ref, ref);
     lx_free(ED.play_snapshot);
     ED.play_snapshot = NULL;
@@ -1127,6 +1141,17 @@ void ed_shortcuts(void) {
 }
 
 void ed_update(float dt) {
+    {   /* thumbnails finished in the background: show them (the Content Browser redraws at most 5 times a second) */
+        static double last_refresh;
+        static bool waiting;
+        if (ed_thumbs_poll()) waiting = true;
+        if (waiting && lx_time() - last_refresh > 0.2) {
+            waiting = false;
+            last_refresh = lx_time();
+            ED.content_dirty = true;
+            if (ED.selected_asset[0] && ed_icon_for_file(ED.selected_asset, false) == UI_ICON_TEXTURE) ED.inspector_dirty = true;
+        }
+    }
     ed_build_poll();
     if (ED.play == ED_EDIT) ed_scripts_poll();
     ed_materials_flush(false);

@@ -48,6 +48,7 @@ typedef struct LxDirEntry { char name[256]; bool is_dir; uint64_t size; } LxDirE
 char *lx_file_read(const char *path, size_t *out_size); /* NUL-terminated, free with lx_free */
 bool lx_file_write(const char *path, const void *data, size_t size);
 bool lx_file_exists(const char *path);
+uint64_t lx_file_size(const char *path);   /* 0 if missing */
 bool lx_dir_exists(const char *path);
 bool lx_mkdir_p(const char *path);
 bool lx_path_remove(const char *path); /* file or directory (recursive) */

@@ -75,6 +75,7 @@ void ed_set_mode(EdMode mode) {
     ui_close_popups(ED.ui);
     ui_close_modal(ED.ui);
     ui_clear(ED.ui, ui_root(ED.ui));
+    ed_panels_forget();
     ED.hierarchy = ED.inspector = ED.viewport = NULL;
     ED.hierarchy_list = ED.content_grid = ED.content_tree = NULL;
     if (mode == ED_MODE_PROJECT_MANAGER) ed_project_manager_build();
@@ -96,12 +97,15 @@ int main(int argc, char **argv) {
     const char *open_dir = NULL, *new_parent = NULL, *new_name = NULL, *shot = NULL;
     int shot_frames = 60;
     bool auto_play = false, smoke = false, build_game = false;
+    int stress_frames = 0;
+    extern bool ed_stress;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--new") && i + 2 < argc) { new_parent = argv[++i]; new_name = argv[++i]; }
         else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc) shot = argv[++i];
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) shot_frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--play")) auto_play = true;
         else if (!strcmp(argv[i], "--smoke")) smoke = true;
+        else if (!strcmp(argv[i], "--stress") && i + 1 < argc) { stress_frames = atoi(argv[++i]); ed_stress = true; }
         else if (!strcmp(argv[i], "--build")) build_game = true;
         else if (argv[i][0] != '-') open_dir = argv[i];
     }
@@ -165,7 +169,7 @@ int main(int argc, char **argv) {
             break;
         }
         double now = lx_time();
-        if (smoke && now - last > 0.15) LX_WARN("[smoke] slow frame: %.0f ms", (now - last) * 1000);
+        if ((smoke || stress_frames) && now - last > 0.5) LX_WARN("[smoke] slow frame: %.0f ms", (now - last) * 1000);
         ED.dt = (float)(now - last);
         if (ED.dt > 0.1f) ED.dt = 0.1f;
         last = now;
@@ -180,7 +184,8 @@ int main(int argc, char **argv) {
             if (ED.mode == ED_MODE_EDITOR) ed_render();
             ed_chrome_frame_before_ui();
             ui_frame(ED.ui, ED.dt, lx_v4(0.1f, 0.1f, 0.11f, 1));
-            if (smoke) { extern void ed_smoke_in_frame(void); ed_smoke_in_frame(); }   /* like a button clicked mid-frame */
+            if (smoke) { extern void ed_smoke_in_frame(void); ed_smoke_in_frame(); }
+            if (stress_frames) { extern void ed_stress_in_frame(void); ed_stress_in_frame(); }   /* like a button clicked mid-frame */
             ed_chrome_frame_after_ui();
             if (shot && frame == shot_frames) lx_renderer_screenshot(shot);
             lx_renderer_end_frame();
@@ -199,6 +204,11 @@ int main(int argc, char **argv) {
             if (!started && frame > 2) { started = true; ed_build(lx_platform_current(), false); }
             if (started && ed_last_build_result) { ED.quit = true; build_exit = ed_last_build_result == 1 ? 0 : 4; }
         }
+        if (stress_frames) {
+            extern bool ed_stress_step(int frame, int frames);
+            static int stress_frame;
+            if (!ed_stress_step(stress_frame++, stress_frames)) ED.quit = true;
+        }
         if (smoke) {
             extern bool ed_smoke_step(int frame);
             static int smoke_frame;
@@ -216,5 +226,7 @@ int main(int argc, char **argv) {
     if (errors) fprintf(stderr, "Vulkan validation reported %d errors\n", errors);
     extern int ed_smoke_failures;
     if (ed_smoke_failures) fprintf(stderr, "%d smoke checks failed\n", ed_smoke_failures);
-    return errors ? 3 : ed_smoke_failures ? 5 : build_exit;
+    extern int ed_stress_failures;
+    if (ed_stress_failures) fprintf(stderr, "%d stress rules broken\n", ed_stress_failures);
+    return errors ? 3 : ed_smoke_failures ? 5 : ed_stress_failures ? 6 : build_exit;
 }

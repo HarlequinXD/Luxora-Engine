@@ -436,6 +436,8 @@ void ed_build_plan(LxPlatform target, EdBuildPlan *plan) {
 }
 
 void ed_build(LxPlatform target, bool run_after) {
+    extern bool ed_stress;
+    if (ed_stress) { LX_INFO("[stress] (build skipped)"); return; }
     if (lx_atomic_load(&ED.building)) { ui_notify(ED.ui, "A build is already running"); return; }
     if (ED.play != ED_EDIT) ed_stop();
     if (ED.dirty && ED.scene_ref[0]) ed_save_scene();

@@ -8,8 +8,26 @@ static LxLightType light_type_parse(const char *s) {
     return !strcmp(s, "point") ? LX_LIGHT_POINT : !strcmp(s, "spot") ? LX_LIGHT_SPOT : LX_LIGHT_DIRECTIONAL;
 }
 
+/* A value is one line with no spaces at the ends (the reader trims them), so names and references are
+ * tidied before they're written: what's in memory then matches what loads back. */
+static void clean_value(char *v) {
+    for (char *p = v; *p; p++) if ((unsigned char)*p < 0x20) *p = ' ';
+    char *a = v;
+    while (*a == ' ') a++;
+    size_t n = strlen(a);
+    while (n && a[n - 1] == ' ') n--;
+    memmove(v, a, n);
+    v[n] = 0;
+}
+
 static void write_entity(LxStrBuf *sb, const LxScene *s, LxEntity e, int id_of_parent, int *next_id, bool prefab_root) {
-    const LxEntityData *d = lx_entity_data(s, e);
+    LxEntityData *dm = lx_entity_data(s, e);
+    if (dm) {
+        clean_value(dm->name); clean_value(dm->tag); clean_value(dm->prefab); clean_value(dm->mesh.mesh); clean_value(dm->mesh.material);
+        clean_value(dm->audio.clip); clean_value(dm->behaviour.name); clean_value(dm->crowd.mesh); clean_value(dm->crowd.material);
+        clean_value(dm->animator.model); clean_value(dm->animator.clip);
+    }
+    const LxEntityData *d = dm;
     int id = (*next_id)++;
     lx_sb_printf(sb, "\n[entity]\nid = %d\nparent = %d\nname = %s\nactive = %d\n", id, id_of_parent, d->name, d->active);
     if (d->tag[0]) lx_sb_printf(sb, "tag = %s\n", d->tag);
@@ -89,6 +107,7 @@ static void write_entity(LxStrBuf *sb, const LxScene *s, LxEntity e, int id_of_p
 char *lx_scene_serialize(const LxScene *s) {
     LxStrBuf sb = {0};
     const LxEnvironment *e = &s->env;
+    clean_value(((LxScene *)s)->name);
     lx_sb_printf(&sb, "# Luxora scene v1\n[scene]\nname = %s\n", s->name);
     lx_sb_printf(&sb, "sky_zenith = %g %g %g\nsky_horizon = %g %g %g\nground = %g %g %g\n", e->sky_zenith.x, e->sky_zenith.y,
                  e->sky_zenith.z, e->sky_horizon.x, e->sky_horizon.y, e->sky_horizon.z, e->ground_color.x, e->ground_color.y,

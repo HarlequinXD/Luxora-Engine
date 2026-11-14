@@ -109,6 +109,8 @@ struct UiNode {
     float tex_aspect;      /* 0 = stretch */
     /* state */
     bool hover, active, focus, disabled, selected, expanded;
+    bool menu_item;        /* a popup menu entry: clicking it closes the popups */
+    UiNode *owner;         /* popup opened by a field (dropdown list, colour picker): closed when the field is freed */
     float split;           /* UI_SPLIT ratio of the first child */
     float split_min;       /* minimum px per side (logical) */
     int tab_index;
@@ -191,6 +193,16 @@ UiNode *ui_active(UiCtx *ui);
 void ui_focus(UiCtx *ui, UiNode *n);
 const char *ui_dragging(UiCtx *ui, const char **payload); /* active drag type or NULL */
 void ui_notify(UiCtx *ui, const char *fmt, ...);          /* toast notification */
+
+void ui_unbind_children(UiCtx *ui, UiNode *n);
+void ui_set_after_input(UiCtx *ui, void (*fn)(UiCtx *ui));   /* runs after clicks are handled, before drawing */   /* hide + disconnect n's children (their data is gone) */
+/* test hooks (stress tester) */
+int ui_popup_nodes(UiCtx *ui, UiNode **out, int max);
+UiNode *ui_modal_node(UiCtx *ui);
+void ui_test_click(UiCtx *ui, UiNode *n, bool dbl);
+void ui_test_right_click(UiCtx *ui, UiNode *n);
+void ui_test_type(UiCtx *ui, UiNode *n, const char *text);
+bool ui_test_drop(UiCtx *ui, UiNode *n, const char *type, const char *payload);
 
 /* drawing helpers for custom nodes (physical pixels) */
 float ui_text_width(UiCtx *ui, UiFont font, const char *text);

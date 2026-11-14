@@ -35,6 +35,7 @@ typedef struct Editor {
 
     /* scene */
     LxScene *scene;
+    uint32_t scene_gen;              /* +1 whenever ED.scene is replaced: panels bound to the old one rebuild */
     char scene_ref[LX_REF_MAX];      /* relative to Assets, "" = unsaved */
     bool dirty;
     bool save_prompt_open;
@@ -123,6 +124,9 @@ bool ed_save_scene(void);
 void ed_save_scene_as_dialog(void);
 void ed_new_scene_dialog(void);
 void ed_set_scene(LxScene *s, const char *ref);
+void ed_scene_replaced(void);         /* call after changing ED.scene */
+void ed_panels_unbind_scene(void);
+void ed_panels_forget(void);     /* panels.c: switch off widgets bound to scene memory */
 bool ed_confirm_discard(void (*then)(void));
 /* "Save changes to <scene> before <action>?" with Save / Don't Save / Cancel; then() runs after Save or Don't Save */
 void ed_save_prompt(const char *action, void (*then)(void));
@@ -232,6 +236,13 @@ void ed_animator_section(UiNode *sec, LxEntity e);
 void ed_avatar_window(const char *ref);
 void ed_avatar_refresh_dots(void);
 void ed_remember_scene(void);           /* editor.c: reopen this scene next time */   /* panels.c: write edited materials */
+
+/* thumbs.c: image thumbnails made in the background, cached in Library/Thumbnails */
+uint32_t ed_thumb_get(const char *path, uint64_t size, int dim, float *aspect, int *src_w, int *src_h);   /* 0 = not ready yet */
+void ed_thumbs_mark_visible(void);
+bool ed_thumbs_poll(void);
+void ed_thumbs_cancel_queued(void);
+void ed_thumbs_shutdown(void);
 
 /* scripts.c: compiling Assets/Scripts with the built-in compiler */
 bool ed_scripts_compile(const char *out_path, bool *had_scripts);

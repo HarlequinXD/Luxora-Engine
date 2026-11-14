@@ -20,6 +20,7 @@ typedef struct Toast { char text[160]; float time; } Toast;
 
 struct UiCtx {
     UiNode *root;
+    void (*after_input)(UiCtx *ui);
     uint32_t app_icon;
     UiNode *popups[MAX_POPUPS];
     int popup_count;
@@ -407,6 +408,25 @@ void ui_draw_text(UiCtx *ui, UiFont f, float x, float y, const char *t, uint32_t
 }
 
 /* draws text clipped with an ellipsis when it exceeds max_w */
+/* the width draw_text_fit ends up drawing (the text, or its start plus "…") */
+static float fit_width(UiCtx *ui, UiFont f, const char *t, float max_w) {
+    if (!t || !t[0]) return 0;
+    float full = ui_text_width(ui, f, t);
+    if (full <= max_w + 1.0f) return full;
+    float ell = ui_text_width(ui, f, "…"), w = 0;
+    const char *p = t;
+    int n = 0;
+    while (*p && n < 250) {
+        const char *q = p;
+        float a = glyph(ui, f, utf8_next(&q))->adv;
+        if (w + a + ell > max_w) break;
+        n += (int)(q - p);
+        w += a;
+        p = q;
+    }
+    return w + ell;
+}
+
 static void draw_text_fit(UiCtx *ui, UiFont f, float x, float y, const char *t, uint32_t col, float max_w) {
     if (!t || !t[0]) return;
     if (ui_text_width(ui, f, t) <= max_w + 1.0f) { ui_draw_text(ui, f, x, y, t, col); return; }
@@ -998,6 +1018,7 @@ UiNode *ui_new(UiCtx *ui, UiNode *parent, UiType type) {
     return n;
 }
 
+static void free_tree(UiCtx *ui, UiNode *n);
 static void forget(UiCtx *ui, UiNode *n) {
     if (ui->hot == n) ui->hot = NULL;
     if (ui->active == n) ui->active = NULL;
@@ -1005,6 +1026,15 @@ static void forget(UiCtx *ui, UiNode *n) {
     if (ui->last_click_node == n) ui->last_click_node = NULL;
     if (ui->tooltip_node == n) ui->tooltip_node = NULL;
     if (ui->dnd_source == n) ui->dnd_source = NULL;
+    /* a dropdown list or colour picker whose field is going away goes with it: its items point at the field */
+    for (int i = 0; i < ui->popup_count; i++)
+        if (ui->popups[i] != n && ui->popups[i]->owner == n) {
+            UiNode *p = ui->popups[i];
+            ui->popups[i] = ui->popups[--ui->popup_count];
+            p->owner = NULL;
+            free_tree(ui, p);
+            i = -1;   /* the list changed */
+        }
 }
 
 static void free_tree(UiCtx *ui, UiNode *n) {
@@ -1397,7 +1427,7 @@ UiNode *ui_menu_item(UiCtx *ui, UiNode *popup, const char *text, const char *sho
     b->on_click = cb;
     b->radius = 4;
     b->h = 26;
-    b->tag = 0x6d656e75; /* menu item: closes popups when clicked */
+    b->menu_item = true; /* closes popups when clicked (tag stays free for the caller) */
     return b;
 }
 
@@ -1511,6 +1541,7 @@ static void commit_number(UiNode *n) {
     char *end;
     float v = strtof(n->edit_backup, &end);
     if (end == n->edit_backup) return;
+    if (!isfinite(v)) return;   /* "nan" / "inf" would break whatever the field drives */
     v = lx_clampf(v, n->minv, n->maxv);
     if (n->i) *n->i = (int)lroundf(v);
     else if (n->f) *n->f = v;
@@ -1802,21 +1833,20 @@ static void process_input(UiCtx *ui, float dt) {
             bool dbl = ui->last_click_node == a && now - ui->last_click_time < 0.35;
             ui->last_click_time = now;
             ui->last_click_node = a;
+            bool menu = a->menu_item;   /* read now: handlers below may free a */
             switch (a->type) {
             case UI_CHECKBOX:
                 if (a->b) *a->b = !*a->b;
-                if (a->on_change) a->on_change(a);
+                if (a->on_change) { a->on_change(a); a = NULL; }   /* the change may rebuild (free) the checkbox */
                 break;
             case UI_NUMBER: begin_edit(ui, a); break;
             case UI_DROPDOWN: open_dropdown(ui, a); break;
             case UI_COLOR: open_color(ui, a); break;
             default: break;
             }
-            bool menu = a->tag == 0x6d656e75;
-            if (dbl && a->on_double_click) a->on_double_click(a);
-            else if (a->on_click) a->on_click(a);
-            if (menu && ui->hot != NULL) ui_close_popups(ui);
-            else if (menu) ui_close_popups(ui);
+            if (a && dbl && a->on_double_click) a->on_double_click(a);
+            else if (a && a->on_click) a->on_click(a);
+            if (menu) ui_close_popups(ui);
         }
         if (ui->active) ui->active->active = false;
         ui->active = NULL;
@@ -1843,6 +1873,7 @@ static void dropdown_pick(UiNode *item) {
 static void open_dropdown(UiCtx *ui, UiNode *n) {
     UiNode *p = ui_popup(ui, n->x, n->y + n->ch + S(ui, 2), n->cw / ui->scale);
     if (!p) return;
+    p->owner = n;
     for (int i = 0; i < n->option_count; i++) {
         UiNode *it = ui_menu_item(ui, p, n->options[i], NULL, dropdown_pick);
         it->user = n;
@@ -1865,6 +1896,7 @@ static void color_changed(UiNode *s) {
 static void open_color(UiCtx *ui, UiNode *n) {
     UiNode *p = ui_popup(ui, n->x, n->y + n->ch + S(ui, 2), 220);
     if (!p || !n->f) return;
+    p->owner = n;
     ui_pad(p, 10, 10, 10, 10);
     p->gap = 6;
     static const char *labels[4] = {"R", "G", "B", "A"};
@@ -1966,7 +1998,16 @@ static void draw_node(UiCtx *ui, UiNode *n) {
         float is = S(ui, n->icon_size > 0 ? n->icon_size : 16);
         float tw = ui_text_width(ui, n->font, n->text);
         float content = tw + (n->icon ? is + S(ui, 6) : 0);
-        if (n->center_text) x = n->x + (n->cw - content) * 0.5f;
+        float room = n->cw - S(ui, n->pad[0]) - S(ui, n->pad[2]);
+        if (n->center_text) {
+            /* a text too long for the box is shortened to "…" first, then the shortened text is centred */
+            float fit = content > room ? room : content;
+            if (content > room) {
+                float tw_fit = fit_width(ui, n->font, n->text, room - (n->icon ? is + S(ui, 6) : 0));
+                fit = tw_fit + (n->icon ? is + S(ui, 6) : 0);
+            }
+            x = n->x + (n->cw - fit) * 0.5f;
+        }
         if (n->icon) {
             ui_draw_icon(ui, n->icon, x, n->y + (n->ch - is) * 0.5f, is, n->icon_color ? n->icon_color : n->fg);
             x += is + S(ui, 6);
@@ -1976,7 +2017,7 @@ static void draw_node(UiCtx *ui, UiNode *n) {
         break;
     }
     case UI_BUTTON: {
-        bool menu = n->tag == 0x6d656e75;
+        bool menu = n->menu_item;
         uint32_t bg = n->bg;
         if (n->selected && !menu) bg = n->bg_active ? n->bg_active : t->accent;
         if (!n->disabled) {
@@ -2212,6 +2253,7 @@ void ui_frame(UiCtx *ui, float dt, LxVec4 clear) {
     }
     for (int i = 0; i < ui->popup_count; i++) layout_popup(ui, ui->popups[i]);
     process_input(ui, dt);
+    if (ui->after_input) ui->after_input(ui);
     /* input handlers may have rebuilt parts of the tree: lay out again before drawing */
     layout(ui, ui->root, 0, 0, (float)sw, (float)sh);
     if (ui->modal) {
@@ -2270,3 +2312,71 @@ void ui_destroy(UiCtx *ui) {
     lx_free(ui->cmds);
     lx_free(ui);
 }
+
+/* ======================================================================
+ *  test hooks: the stress tester drives widgets through the same code paths as the mouse
+ * ====================================================================== */
+int ui_popup_nodes(UiCtx *ui, UiNode **out, int max) {
+    int n = 0;
+    for (int i = 0; i < ui->popup_count && n < max; i++) out[n++] = ui->popups[i];
+    return n;
+}
+void ui_test_click(UiCtx *ui, UiNode *a, bool dbl) {
+    bool menu = a->menu_item;
+    switch (a->type) {
+    case UI_CHECKBOX:
+        if (a->b) *a->b = !*a->b;
+        if (a->on_change) { a->on_change(a); a = NULL; }
+        break;
+    case UI_NUMBER: begin_edit(ui, a); break;
+    case UI_DROPDOWN: open_dropdown(ui, a); break;
+    case UI_COLOR: open_color(ui, a); break;
+    default: break;
+    }
+    if (a && dbl && a->on_double_click) a->on_double_click(a);
+    else if (a && a->on_click) a->on_click(a);   /* may free a: not touched after this */
+    if (menu) ui_close_popups(ui);
+}
+void ui_test_right_click(UiCtx *ui, UiNode *a) {
+    LX_UNUSED(ui);
+    if (a->on_right_click) a->on_right_click(a);
+}
+/* type text into a text or number field and press Enter */
+void ui_test_type(UiCtx *ui, UiNode *n, const char *text) {
+    if (n->type != UI_TEXTFIELD && n->type != UI_NUMBER) return;
+    if (n->type == UI_TEXTFIELD && !n->s) return;
+    if (!n->editing) begin_edit(ui, n);
+    int cap;
+    char *b = edit_buf(n, &cap);
+    if (b && cap > 0) lx_strcpy(b, (size_t)cap, text);
+    end_edit(ui, n, true);
+}
+/* drop a dragged item onto n (or the nearest ancestor that takes it) */
+bool ui_test_drop(UiCtx *ui, UiNode *n, const char *type, const char *payload) {
+    LX_UNUSED(ui);
+    UiNode *target = find_handler(n, 1);
+    if (!target || !accepts(target->accept, type) || !target->on_drop) return false;
+    target->on_drop(target, type, payload);
+    return true;
+}
+
+/* switches off a subtree whose bound data is gone: nothing in it is drawn, clicked or written through */
+static void unbind(UiNode *n) {
+    n->f = NULL; n->i = NULL; n->b = NULL; n->s = NULL; n->s_cap = 0;
+    n->on_change = NULL; n->on_click = NULL; n->on_double_click = NULL; n->on_right_click = NULL; n->on_drop = NULL; n->on_key = NULL;
+    n->on_frame = NULL;
+    n->editing = false;
+    for (UiNode *c = n->first; c; c = c->next) unbind(c);
+}
+void ui_unbind_children(UiCtx *ui, UiNode *n) {
+    if (!n) return;
+    for (UiNode *c = n->first; c; c = c->next) { unbind(c); c->hidden = true; }
+    if (ui->focus && ui->focus->editing) {
+        for (UiNode *p = ui->focus; p; p = p->parent) if (p == n) { ui->focus->editing = false; ui->focus = NULL; break; }
+    }
+    /* popups opened from those fields (dropdowns, colour pickers) point into the same data */
+    for (int i = 0; i < ui->popup_count; i++)
+        for (UiNode *o = ui->popups[i]->owner; o; o = o->parent)
+            if (o == n) { ui_close_popups(ui); return; }
+}
+void ui_set_after_input(UiCtx *ui, void (*fn)(UiCtx *ui)) { ui->after_input = fn; }

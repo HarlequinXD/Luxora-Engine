@@ -321,6 +321,89 @@ static void s_model_stopped(void) {
     if (!g_md_ent) return;
     SMOKE_CHECK(ED.play == ED_EDIT && lx_entity_find(ED.scene, "mixamo"), "stopped play mode, the character is back in the edit scene");
 }
+/* a folder of 4K textures: the editor keeps running while thumbnails are made, and they all arrive */
+static char g_big_dir[LX_PATH_MAX];
+static double g_big_last, g_big_worst;
+static bool g_big_done;
+static void s_big_make(void) {
+    lx_path_join(g_big_dir, sizeof g_big_dir, ED.project.assets, "Textures/Big 4K Textures With Long Names");
+    lx_mkdir_p(g_big_dir);
+    int n = 4096;
+    uint8_t *px = lx_alloc((size_t)n * n * 4);
+    uint32_t r = 12345;
+    for (int img = 0; img < 4; img++) {
+        for (size_t i = 0; i < (size_t)n * n; i++) {
+            r = r * 1664525u + 1013904223u;
+            px[i * 4] = (uint8_t)((i % (size_t)n) * 255 / (size_t)n);
+            px[i * 4 + 1] = (uint8_t)(r >> 24);
+            px[i * 4 + 2] = (uint8_t)(img * 60);
+            px[i * 4 + 3] = 255;
+        }
+        size_t sz;
+        uint8_t *png = lx_png_encode(px, n, n, &sz);
+        char path[LX_PATH_MAX], name[96];
+        snprintf(name, sizeof name, "Ch47_nonPBR_MovementAnimsetPro_Texture_Albedo_%d.png", img);
+        lx_path_join(path, sizeof path, g_big_dir, name);
+        lx_file_write(path, png, sz);
+        lx_free(png);
+    }
+    lx_free(px);
+}
+static void s_big_open(void) {
+    ED.content_list_view = false;   /* tiles */
+    ed_content_open_dir(g_big_dir);
+    g_big_last = lx_time();
+    g_big_worst = 0;
+}
+/* runs every frame while waiting */
+static double g_big_start;
+static void s_big_check(void);
+static void big_watch(void) {
+    if (g_big_done || !g_big_last) return;
+    double now = lx_time();
+    if (now - g_big_last > g_big_worst) g_big_worst = now - g_big_last;
+    g_big_last = now;
+    if (!g_big_start) g_big_start = now;
+    /* done when every picture is in, or after 60 s */
+    LxDirEntry *e;
+    int n = lx_dir_list(g_big_dir, &e), ready = 0;
+    for (int i = 0; i < n; i++) {
+        char p[LX_PATH_MAX];
+        lx_path_join(p, sizeof p, g_big_dir, e[i].name);
+        ready += ed_thumb_get(p, e[i].size, 128, NULL, NULL, NULL) != 0;
+    }
+    lx_free(e);
+    if ((n && ready == n && now - g_big_start > 0.5) || now - g_big_start > 60) {
+        LX_INFO("[smoke] thumbnails ready after %.1f s", now - g_big_start);
+        s_big_check();
+    }
+}
+static void s_big_check(void) {
+    g_big_done = true;
+    LxDirEntry *e;
+    int n = lx_dir_list(g_big_dir, &e), ready = 0;
+    for (int i = 0; i < n; i++) {
+        char p[LX_PATH_MAX];
+        lx_path_join(p, sizeof p, g_big_dir, e[i].name);
+        ready += ed_thumb_get(p, e[i].size, 128, NULL, NULL, NULL) != 0;
+    }
+    lx_free(e);
+    SMOKE_CHECK(n == 4 && ready == n, "4K texture thumbnails made in the background (%d of %d)", ready, n);
+    SMOKE_CHECK(g_big_worst < 0.4, "the editor kept running while they loaded (slowest frame %.0f ms)", g_big_worst * 1000);
+    /* names fit their tiles */
+    bool fit = true;
+    for (UiNode *tl = ED.content_grid ? ED.content_grid->first : NULL; tl; tl = tl->next)
+        for (UiNode *c = tl->first; c; c = c->next)
+            if (c->type == UI_LABEL && c->text[0] && c->w > ED.content_tile) fit = false;
+    SMOKE_CHECK(fit, "file names stay inside their tiles");
+    char lib[LX_PATH_MAX];
+    lx_path_join(lib, sizeof lib, ED.project.root, "Library/Thumbnails");
+    LxDirEntry *t;
+    int tc = lx_dir_list(lib, &t);
+    lx_free(t);
+    SMOKE_CHECK(tc >= 4, "thumbnails saved for next time (%d files)", tc);
+    smoke_shot("content_browser_4k.ppm");
+}
 static void s_quit_cancel(void) {
     UiNode *cancel = find_node(ui_root(ED.ui), NULL, "Cancel");
     extern UiNode *ui_modal_node(UiCtx *ui);
@@ -565,13 +648,16 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {283, s_model_playing, "the character animates in play mode"},
     {285, s_model_stop, "press Stop (mid-frame, like the toolbar button)"},
     {290, s_model_stopped, "edit mode again after Stop"},
+    {292, s_big_make, "make a folder of 4K textures"},
+    {294, s_big_open, "open it in the Content Browser"},
 };
 
 bool ed_smoke_step(int frame) {
+    big_watch();
     for (size_t i = 0; i < sizeof STEPS / sizeof STEPS[0]; i++)
         if (STEPS[i].frame == frame) {
             LX_INFO("[smoke] %s", STEPS[i].what);
             if (ED.mode == ED_MODE_EDITOR || frame >= 216) STEPS[i].fn(); /* the last steps run in the Project Manager */
         }
-    return frame < 293;
+    return frame < 300 || (g_big_last && !g_big_done);
 }

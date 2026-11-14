@@ -1,45 +1,85 @@
 /* Image loading: PNG (own inflate implementation), TGA and BMP -> RGBA8. */
 #include "../lx_internal.h"
 
-/* ---------------- inflate (RFC 1951) ---------------- */
+/* ---------------- inflate (RFC 1951) ----------------
+ * Table driven: a 64-bit bit buffer and a 10-bit lookup table per Huffman code, falling back to the
+ * canonical walk only for the rare longer codes. A 4K PNG inflates in a fraction of the old time. */
 typedef struct Bits {
     const uint8_t *p, *end;
-    uint32_t buf;
+    uint64_t buf;
     int count;
+    int pad;              /* zero bytes made up past the end of the data */
 } Bits;
 
-static int bits_get(Bits *b, int n) {
-    while (b->count < n) {
-        uint32_t byte = b->p < b->end ? *b->p++ : 0;
+static inline void bits_fill(Bits *b) {
+    if (b->end - b->p >= 8) {   /* branch-free refill: read 8 bytes, keep what fits */
+        uint64_t v;
+        memcpy(&v, b->p, 8);
+        b->buf |= v << b->count;
+        b->p += (63 - b->count) >> 3;
+        b->count |= 56;
+        return;
+    }
+    while (b->count <= 56) {
+        uint64_t byte;
+        if (b->p < b->end) byte = *b->p++;
+        else { byte = 0; b->pad++; }
         b->buf |= byte << b->count;
         b->count += 8;
     }
-    int v = (int)(b->buf & ((1u << n) - 1u));
+}
+static inline int bits_get(Bits *b, int n) {
+    if (!n) return 0;
+    if (b->count < n) bits_fill(b);
+    int v = (int)(b->buf & ((1ull << n) - 1u));
     b->buf >>= n;
     b->count -= n;
     return v;
 }
 
+#define FAST_BITS 10
 typedef struct Huff {
     uint16_t counts[16];
     uint16_t symbols[320];
+    uint16_t fast[1 << FAST_BITS];   /* (length << 9) | symbol, 0 = longer code */
 } Huff;
 
 static void huff_build(Huff *h, const uint8_t *lengths, int n) {
     memset(h->counts, 0, sizeof h->counts);
-    for (int i = 0; i < n; i++) h->counts[lengths[i]]++;
+    for (int i = 0; i < n; i++) h->counts[lengths[i] & 15]++;
     h->counts[0] = 0;
     uint16_t offs[16];
     offs[1] = 0;
     for (int i = 1; i < 15; i++) offs[i + 1] = (uint16_t)(offs[i] + h->counts[i]);
     for (int i = 0; i < n; i++)
         if (lengths[i]) h->symbols[offs[lengths[i]]++] = (uint16_t)i;
+    /* fast table: canonical codes, bit-reversed (deflate sends Huffman codes MSB first) */
+    memset(h->fast, 0, sizeof h->fast);
+    int code = 0, k = 0;
+    for (int len = 1; len <= FAST_BITS; len++) {
+        for (int j = 0; j < h->counts[len]; j++, k++, code++) {
+            int rev = 0;
+            for (int bit = 0; bit < len; bit++) rev |= ((code >> bit) & 1) << (len - 1 - bit);
+            for (int fill = rev; fill < (1 << FAST_BITS); fill += 1 << len) h->fast[fill] = (uint16_t)((len << 9) | h->symbols[k]);
+        }
+        code <<= 1;
+    }
 }
 
 static int huff_decode(Bits *b, const Huff *h) {
+    if (b->count < 16) bits_fill(b);
+    uint16_t e = h->fast[b->buf & ((1u << FAST_BITS) - 1)];
+    if (e) {
+        int len = e >> 9;
+        b->buf >>= len;
+        b->count -= len;
+        return e & 511;
+    }
     int code = 0, first = 0, index = 0;
     for (int len = 1; len < 16; len++) {
-        code |= bits_get(b, 1);
+        code |= (int)(b->buf & 1);
+        b->buf >>= 1;
+        b->count--;
         int count = h->counts[len];
         if (code - count < first) return h->symbols[index + (code - first)];
         index += count;
@@ -51,9 +91,12 @@ static int huff_decode(Bits *b, const Huff *h) {
 }
 
 typedef struct Out { uint8_t *data; size_t len, cap; } Out;
-static void out_push(Out *o, uint8_t c) {
-    if (o->len == o->cap) { o->cap = o->cap ? o->cap * 2 : 65536; o->data = lx_realloc(o->data, o->cap); }
-    o->data[o->len++] = c;
+static inline void out_reserve(Out *o, size_t extra) {
+    if (o->len + extra <= o->cap) return;
+    size_t cap = o->cap ? o->cap : 65536;
+    while (cap < o->len + extra) cap *= 2;
+    o->data = lx_realloc(o->data, cap);
+    o->cap = cap;
 }
 
 static const uint16_t LEN_BASE[] = {3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258};
@@ -63,10 +106,13 @@ static const uint8_t DIST_EXTRA[] = {0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6
 
 static bool inflate_block(Bits *b, Out *o, const Huff *lit, const Huff *dist) {
     for (;;) {
+        if (b->pad > 8) return false;   /* ran off the end of the data */
         int sym = huff_decode(b, lit);
         if (sym < 0) return false;
-        if (sym < 256) out_push(o, (uint8_t)sym);
-        else if (sym == 256) return true;
+        if (sym < 256) {
+            if (o->len >= o->cap) out_reserve(o, 1);
+            o->data[o->len++] = (uint8_t)sym;
+        } else if (sym == 256) return true;
         else {
             sym -= 257;
             if (sym >= 29) return false;
@@ -75,27 +121,47 @@ static bool inflate_block(Bits *b, Out *o, const Huff *lit, const Huff *dist) {
             if (ds < 0 || ds >= 30) return false;
             size_t d = (size_t)(DIST_BASE[ds] + bits_get(b, DIST_EXTRA[ds]));
             if (d > o->len) return false;
-            for (int i = 0; i < len; i++) out_push(o, o->data[o->len - d]);
+            out_reserve(o, (size_t)len);
+            uint8_t *dst = o->data + o->len;
+            const uint8_t *src = dst - d;
+            if (d >= (size_t)len) memcpy(dst, src, (size_t)len);
+            else for (int i = 0; i < len; i++) dst[i] = src[i];   /* overlapping run */
+            o->len += (size_t)len;
         }
     }
 }
 
-static uint8_t *zlib_inflate(const uint8_t *data, size_t size, size_t *out_len) {
+/* size_hint: the expected output size when known (0 = unknown) */
+static uint8_t *zlib_inflate_hint(const uint8_t *data, size_t size, size_t *out_len, size_t size_hint) {
     if (size < 2) return NULL;
-    Bits b = {data + 2, data + size, 0, 0}; /* skip zlib header */
+    Bits b = {data + 2, data + size, 0, 0, 0}; /* skip zlib header */
     Out o = {0};
+    if (size_hint) out_reserve(&o, size_hint);
+    Huff *lit = lx_alloc(sizeof(Huff) * 3), *dist = lit + 1, *clh = lit + 2;
     int final;
+    bool ok = true;
     do {
         final = bits_get(&b, 1);
         int type = bits_get(&b, 2);
         if (type == 0) {
-            b.buf = 0; b.count = 0;
-            if (b.p + 4 > b.end) break;
-            int len = b.p[0] | (b.p[1] << 8);
+            /* stored: back up to the byte boundary (whole bytes still in the buffer go back) */
+            int drop = b.count & 7;
+            b.buf >>= drop;
+            b.count -= drop;
+            int back = b.count / 8 - b.pad;
+            if (back > 0) b.p -= back;
+            b.pad = 0;
+            b.buf = 0;
+            b.count = 0;
+            if (b.p + 4 > b.end) { ok = false; break; }
+            size_t len = (size_t)(b.p[0] | (b.p[1] << 8));
             b.p += 4;
-            for (int i = 0; i < len && b.p < b.end; i++) out_push(&o, *b.p++);
+            if (len > (size_t)(b.end - b.p)) len = (size_t)(b.end - b.p);
+            out_reserve(&o, len);
+            memcpy(o.data + o.len, b.p, len);
+            o.len += len;
+            b.p += len;
         } else if (type == 1 || type == 2) {
-            Huff lit, dist;
             uint8_t lengths[320];
             if (type == 1) {
                 int i = 0;
@@ -103,74 +169,89 @@ static uint8_t *zlib_inflate(const uint8_t *data, size_t size, size_t *out_len) 
                 for (; i < 256; i++) lengths[i] = 9;
                 for (; i < 280; i++) lengths[i] = 7;
                 for (; i < 288; i++) lengths[i] = 8;
-                huff_build(&lit, lengths, 288);
+                huff_build(lit, lengths, 288);
                 for (i = 0; i < 30; i++) lengths[i] = 5;
-                huff_build(&dist, lengths, 30);
+                huff_build(dist, lengths, 30);
             } else {
                 int hlit = bits_get(&b, 5) + 257, hdist = bits_get(&b, 5) + 1, hclen = bits_get(&b, 4) + 4;
                 static const uint8_t order[19] = {16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15};
                 uint8_t cl[19] = {0};
                 for (int i = 0; i < hclen; i++) cl[order[i]] = (uint8_t)bits_get(&b, 3);
-                Huff clh;
-                huff_build(&clh, cl, 19);
+                huff_build(clh, cl, 19);
                 int n = 0;
-                while (n < hlit + hdist) {
-                    int sym = huff_decode(&b, &clh);
-                    if (sym < 0) { lx_free(o.data); return NULL; }
+                while (n < hlit + hdist && ok) {
+                    int sym = huff_decode(&b, clh);
+                    if (sym < 0) { ok = false; break; }
                     if (sym < 16) lengths[n++] = (uint8_t)sym;
                     else {
                         int rep = 0;
                         uint8_t val = 0;
-                        if (sym == 16) { if (!n) { lx_free(o.data); return NULL; } val = lengths[n - 1]; rep = 3 + bits_get(&b, 2); }
+                        if (sym == 16) { if (!n) { ok = false; break; } val = lengths[n - 1]; rep = 3 + bits_get(&b, 2); }
                         else if (sym == 17) rep = 3 + bits_get(&b, 3);
                         else rep = 11 + bits_get(&b, 7);
                         while (rep-- && n < hlit + hdist) lengths[n++] = val;
                     }
                 }
-                huff_build(&lit, lengths, hlit);
-                huff_build(&dist, lengths + hlit, hdist);
+                if (!ok) break;
+                huff_build(lit, lengths, hlit);
+                huff_build(dist, lengths + hlit, hdist);
             }
-            if (!inflate_block(&b, &o, &lit, &dist)) { lx_free(o.data); return NULL; }
-        } else { lx_free(o.data); return NULL; }
+            if (!inflate_block(&b, &o, lit, dist)) { ok = false; break; }
+        } else { ok = false; break; }
     } while (!final);
+    lx_free(lit);
+    if (!ok) { lx_free(o.data); return NULL; }
     *out_len = o.len;
+    if (!o.data) o.data = lx_alloc(1);
     return o.data;
 }
+static uint8_t *zlib_inflate(const uint8_t *data, size_t size, size_t *out_len) { return zlib_inflate_hint(data, size, out_len, 0); }
 
 uint8_t *lx_zlib_inflate(const uint8_t *data, size_t size, size_t *out_len) { return zlib_inflate(data, size, out_len); }
 
 /* ---------------- PNG ---------------- */
 static uint32_t be32(const uint8_t *p) { return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]; }
 
-static int paeth(int a, int b, int c) {
-    int p = a + b - c, pa = abs(p - a), pb = abs(p - b), pc = abs(p - c);
-    if (pa <= pb && pa <= pc) return a;
-    return pb <= pc ? b : c;
-}
 
-/* Un-filters one (sub)image of `rows` scanlines of `bytes` bytes each; bpp = bytes per pixel (>= 1). */
+/* Un-filters one (sub)image of `rows` scanlines of `bytes` bytes each; bpp = bytes per pixel (>= 1).
+ * One loop per filter type: the hot loops have no branches per byte. */
 static bool png_unfilter(const uint8_t *src, size_t avail, uint8_t *dst, size_t bytes, uint32_t rows, size_t bpp) {
     if ((bytes + 1) * rows > avail) return false;
+    uint8_t *zero = lx_calloc(1, bytes);
     for (uint32_t y = 0; y < rows; y++) {
         int filter = src[y * (bytes + 1)];
         const uint8_t *in = src + y * (bytes + 1) + 1;
         uint8_t *out = dst + y * bytes;
-        const uint8_t *prev = y ? out - bytes : NULL;
-        for (size_t x = 0; x < bytes; x++) {
-            int a = x >= bpp ? out[x - bpp] : 0;
-            int b = prev ? prev[x] : 0;
-            int c = (prev && x >= bpp) ? prev[x - bpp] : 0;
-            int v = in[x];
-            switch (filter) {
-            case 1: v += a; break;
-            case 2: v += b; break;
-            case 3: v += (a + b) / 2; break;
-            case 4: v += paeth(a, b, c); break;
-            default: break;
+        const uint8_t *prev = y ? out - bytes : zero;
+        size_t x;
+        switch (filter) {
+        case 1:
+            for (x = 0; x < bpp && x < bytes; x++) out[x] = in[x];
+            for (; x < bytes; x++) out[x] = (uint8_t)(in[x] + out[x - bpp]);
+            break;
+        case 2:
+            for (x = 0; x < bytes; x++) out[x] = (uint8_t)(in[x] + prev[x]);
+            break;
+        case 3:
+            for (x = 0; x < bpp && x < bytes; x++) out[x] = (uint8_t)(in[x] + (prev[x] >> 1));
+            for (; x < bytes; x++) out[x] = (uint8_t)(in[x] + ((out[x - bpp] + prev[x]) >> 1));
+            break;
+        case 4:
+            for (x = 0; x < bpp && x < bytes; x++) out[x] = (uint8_t)(in[x] + prev[x]);   /* paeth(0, b, 0) = b */
+            for (; x < bytes; x++) {
+                int a = out[x - bpp], b = prev[x], c = prev[x - bpp];
+                int pa = b - c, pb = a - c, pc = pa + pb;
+                pa = pa < 0 ? -pa : pa;
+                pb = pb < 0 ? -pb : pb;
+                pc = pc < 0 ? -pc : pc;
+                int p = (pa <= pb && pa <= pc) ? a : pb <= pc ? b : c;
+                out[x] = (uint8_t)(in[x] + p);
             }
-            out[x] = (uint8_t)v;
+            break;
+        default: memcpy(out, in, bytes); break;
         }
     }
+    lx_free(zero);
     return true;
 }
 
@@ -194,6 +275,15 @@ uint8_t *lx_png_decode(const uint8_t *data, size_t size, int *w, int *h) {
     uint8_t palette[256][4];
     int trns_key[3] = {-1, -1, -1};   /* gray / RGB colour that is transparent */
     memset(palette, 255, sizeof palette);
+    /* all IDAT data in one allocation (growing it chunk by chunk copies the image over and over) */
+    size_t idat_total = 0;
+    for (size_t q = 8; q + 12 <= size;) {
+        uint32_t len = be32(data + q);
+        if (len > size || q + 12 + len > size) break;
+        if (!memcmp(data + q + 4, "IDAT", 4)) idat_total += len;
+        q += 12 + len;
+    }
+    if (idat_total) idat = lx_alloc(idat_total);
     for (int i = 0; i < 256; i++) palette[i][0] = palette[i][1] = palette[i][2] = 0;
     while (pos + 12 <= size) {
         uint32_t len = be32(data + pos);
@@ -210,7 +300,7 @@ uint8_t *lx_png_decode(const uint8_t *data, size_t size, int *w, int *h) {
             else if (color == 0 && len >= 2) trns_key[0] = (body[0] << 8) | body[1];
             else if (color == 2 && len >= 6) for (int c = 0; c < 3; c++) trns_key[c] = (body[c * 2] << 8) | body[c * 2 + 1];
         } else if (!memcmp(type, "IDAT", 4)) {
-            idat = lx_realloc(idat, idat_len + len);
+            if (idat_len + len > idat_total) break;
             memcpy(idat + idat_len, body, len);
             idat_len += len;
         } else if (!memcmp(type, "IEND", 4)) break;
@@ -224,8 +314,10 @@ uint8_t *lx_png_decode(const uint8_t *data, size_t size, int *w, int *h) {
         lx_free(idat);
         return NULL;
     }
+    size_t expect = 0;
+    if (!interlace) expect = (((size_t)width * (size_t)channels * (size_t)depth + 7) / 8 + 1) * height;
     size_t raw_len = 0;
-    uint8_t *raw = zlib_inflate(idat, idat_len, &raw_len);
+    uint8_t *raw = zlib_inflate_hint(idat, idat_len, &raw_len, expect);
     lx_free(idat);
     if (!raw) return NULL;
     size_t bpp = (size_t)(channels * depth + 7) / 8;     /* bytes per pixel for filtering (>= 1) */
@@ -245,6 +337,18 @@ uint8_t *lx_png_decode(const uint8_t *data, size_t size, int *w, int *h) {
         uint8_t *img = lx_alloc(bytes * ph);
         if (at > raw_len || !png_unfilter(raw + at, raw_len - at, img, bytes, ph, bpp)) { ok = false; lx_free(img); break; }
         at += (bytes + 1) * ph;
+        if (!interlace && depth == 8 && (color == 6 || (color == 2 && trns_key[0] < 0))) {
+            /* the common cases: 8-bit RGBA is the result already, 8-bit RGB gains an opaque alpha */
+            if (color == 6) memcpy(rgba, img, (size_t)width * height * 4);
+            else {
+                size_t n = (size_t)width * height;
+                const uint8_t *src3 = img;
+                uint8_t *d4 = rgba;
+                for (size_t i = 0; i < n; i++, src3 += 3, d4 += 4) { d4[0] = src3[0]; d4[1] = src3[1]; d4[2] = src3[2]; d4[3] = 255; }
+            }
+            lx_free(img);
+            continue;
+        }
         for (uint32_t y = 0; y < ph; y++) {
             const uint8_t *row = img + (size_t)y * bytes;
             for (uint32_t x = 0; x < pw; x++) {

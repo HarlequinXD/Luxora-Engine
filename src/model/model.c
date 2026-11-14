@@ -1024,6 +1024,7 @@ LxModel *lx_asset_model(const char *ref) {
     lx_strcpy(base, sizeof base, ref);
     char *hash = strchr(base, '#');
     if (hash) *hash = 0;
+    if (!base[0]) return NULL;
     for (int i = 0; i < g_model_count; i++) if (!strcmp(g_models[i].ref, base)) return g_models[i].m;
     ModelEntry e;
     memset(&e, 0, sizeof e);
