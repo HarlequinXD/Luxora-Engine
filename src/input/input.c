@@ -692,9 +692,22 @@ void lx_input_update(float dt) {
     }
 }
 
+/* "Move X", "move_x" and "MoveX" are the same action: spaces, underscores and capitals don't matter */
+static bool loose_eq(const char *a, const char *b) {
+    for (;;) {
+        while (*a == ' ' || *a == '_' || *a == '-') a++;
+        while (*b == ' ' || *b == '_' || *b == '-') b++;
+        char ca = *a >= 'A' && *a <= 'Z' ? (char)(*a + 32) : *a, cb = *b >= 'A' && *b <= 'Z' ? (char)(*b + 32) : *b;
+        if (ca != cb) return false;
+        if (!ca) return true;
+        a++, b++;
+    }
+}
 static int action_index(const char *name) {
     LxInputMap *m = lx_input_map();
+    if (!name || !name[0]) return -1;
     for (int i = 0; i < m->action_count; i++) if (!strcmp(m->actions[i].name, name)) return i;
+    for (int i = 0; i < m->action_count; i++) if (loose_eq(m->actions[i].name, name)) return i;
     static char warned[16][32];
     static int wn;
     for (int i = 0; i < wn; i++) if (!strcmp(warned[i], name)) return -1;

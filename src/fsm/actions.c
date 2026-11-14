@@ -617,6 +617,17 @@ static void char_move(LxFsmCtx *c) {
     LxVec3 v = lx_fsm_vec3(c, 1);
     if (lx_fsm_int(c, 2) == 0) v = lx_quat_rotate(lx_entity_world_rotation(c->scene, e), v);
     v = lx_scale3(v, c->dt);
+    if (!lx_get_character(c->scene, e)) {   /* no Character Controller: still move it, just without collisions */
+        static bool warned;
+        if (!warned) {
+            warned = true;
+            LX_WARN("Character Move: '%s' has no Character Controller - moving it without collisions. Add Component > Character Controller.",
+                    lx_entity_name(c->scene, e));
+        }
+        lx_entity_set_world_pose(c->scene, e, lx_add3(lx_entity_world_position(c->scene, e), v), lx_entity_world_rotation(c->scene, e));
+        lx_fsm_set_bool(c, 3, false);
+        return;
+    }
     lx_character_move(c->scene, e, v);
     lx_fsm_set_bool(c, 3, lx_character_grounded(c->scene, e));
 }

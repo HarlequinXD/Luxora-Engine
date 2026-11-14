@@ -814,3 +814,37 @@ static void test_templates(void) {
     lx_assets_clear();
     lx_mouse_reset();
 }
+
+/* what a user built: Get Axis ("Move X" with a space) into a vector, into Character Move */
+static void test_axis_into_character_move(void) {
+    printf("get axis into character move\n");
+    const char *g = "[graph]\nname = Mover\nstart = Move\n"
+                    "[variable]\nname = PlayerMovement\ntype = vector3\nvalue = 0 0 0\n"
+                    "[state]\nname = Move\n"
+                    "[action]\ntype = Get Axis\nupdate = every_frame\np0 = Move X\np1 = Move Y\np2 = 5\np3 = $PlayerMovement\n"
+                    "[action]\ntype = Character Move\nupdate = every_frame\np0 = Owner\np1 = $PlayerMovement\np2 = World\n";
+    char dir[LX_PATH_MAX], path[LX_PATH_MAX];
+    lx_path_join(dir, sizeof dir, tmpdir(), "luxora_axis_move");
+    lx_mkdir_p(dir);
+    lx_path_join(path, sizeof path, dir, "Mover.lxgraph");
+    lx_file_write(path, g, strlen(g));
+    lx_assets_set_root(dir);
+    for (int with_cc = 0; with_cc < 2; with_cc++) {
+        LxScene *s = lx_scene_create("Axis");
+        LxEntity e = lx_entity_create(s, "Mover");
+        if (with_cc) lx_add_character(s, e);
+        lx_add_state_graph(s, e, "Mover.lxgraph");
+        lx_input_begin_frame();
+        g_lx_input.keys[LX_KEY_D] = true;   /* hold D: Move X = 1 */
+        lx_input_update(1.0f / 60);
+        for (int i = 0; i < 60; i++) lx_scene_simulate(s, 1.0f / 60);
+        g_lx_input.keys[LX_KEY_D] = false;
+        lx_input_begin_frame();
+        lx_input_update(1.0f / 60);
+        LxVec3 p = lx_entity_world_position(s, e);
+        CHECK(p.x > 4 && p.x < 6, "holding D moves it right at 5 m/s, %s a Character Controller (x %.2f)", with_cc ? "with" : "without", p.x);
+        lx_scene_stop_simulation(s);
+        lx_scene_destroy(s);
+    }
+    lx_assets_clear();
+}

@@ -1470,6 +1470,7 @@ int main(void) {
     test_fsm_fuzz();
     test_fsm_semantics();
     test_templates();
+    test_axis_into_character_move();
 #if LUXORA_SCRIPT_COMPILER
     test_scripts();
 #endif
