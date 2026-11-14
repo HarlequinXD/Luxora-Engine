@@ -765,6 +765,9 @@ static void s_tpl_stopped(void) {
  * the floor behind each wall must go dark (two different cube faces), open floor must not change */
 static LxEntity g_ls_light;
 static bool g_ls_gi, g_ls_ssr;
+static float g_ls_ambient;
+static LxEntity g_ls_suns[8];
+static int g_ls_nsun;
 static const LxVec3 LS_O = {1000, 0, 0};
 static void s_ls_setup(void) {
     LxScene *s = ED.scene;
@@ -774,6 +777,15 @@ static void s_ls_setup(void) {
     g_ls_gi = g->gi_enabled; g_ls_ssr = g->ssr_enabled;
     g->gi_enabled = false;   /* nothing that keeps changing between the two pictures */
     g->ssr_enabled = false;
+    /* only the test lamp lights the test floor: the sun and the sky go dark for the two pictures */
+    g_ls_nsun = 0;
+    for (int i = 0; i < lx_scene_entity_count(s) && g_ls_nsun < 8; i++) {
+        LxEntity e = lx_scene_entity_at(s, i);
+        LxLight *sl = e ? lx_get_light(s, e) : NULL;
+        if (sl && sl->type == LX_LIGHT_DIRECTIONAL && lx_entity_active(s, e)) { lx_entity_set_active(s, e, false); g_ls_suns[g_ls_nsun++] = e; }
+    }
+    g_ls_ambient = lx_scene_environment(s)->ambient_intensity;
+    lx_scene_environment(s)->ambient_intensity = 0.02f;
     LxEntity floor = lx_spawn_primitive(s, LX_PRIM_PLANE, "LS Floor", LS_O);
     lx_entity_set_scale(s, floor, lx_v3(4, 1, 4));
     LxEntity w1 = lx_spawn_primitive(s, LX_PRIM_CUBE, "LS Wall X", lx_add3(LS_O, lx_v3(3, 1, 0)));
@@ -784,7 +796,7 @@ static void s_ls_setup(void) {
     lx_entity_set_position(s, g_ls_light, lx_add3(LS_O, lx_v3(0, 1.5f, 0)));
     LxLight *l = lx_add_light(s, g_ls_light, LX_LIGHT_POINT);
     l->color = lx_v3(1, 1, 1);
-    l->intensity = 400;
+    l->intensity = 40;
     l->range = 25;
     l->cast_shadows = false;
     ED.cam_pos = lx_add3(LS_O, lx_v3(0, 20, 0.01f));
@@ -823,6 +835,8 @@ static float ls_lum(const unsigned char *px, int w, int h, float x, float y) {
 static void s_ls_check(void) {
     LxGraphicsSettings *g = lx_graphics_settings();
     g->gi_enabled = g_ls_gi; g->ssr_enabled = g_ls_ssr;
+    for (int i = 0; i < g_ls_nsun; i++) lx_entity_set_active(ED.scene, g_ls_suns[i], true);
+    lx_scene_environment(ED.scene)->ambient_intensity = g_ls_ambient;
     const char *shot = getenv("LUXORA_SMOKE_SHOT");
     if (!shot || !shot[0]) { LX_INFO("[smoke] no screenshots on this build - light shadow pictures skipped"); return; }
     int w0, h0, w1, h1;
@@ -840,7 +854,7 @@ static void s_ls_check(void) {
             bool vis = ed_viewport_to_screen(lx_add3(LS_O, lx_v3(P[i].x, 0, P[i].z)), &sp);
             float a = vis ? ls_lum(off, w0, h0, sp.x * k, sp.y * k) : -1, b = vis ? ls_lum(on, w0, h0, sp.x * k, sp.y * k) : -1;
             if (P[i].behind_wall)
-                SMOKE_CHECK(vis && a > 20 && b < a * 0.6f, "point light shadow %s (lit %.0f, shadowed %.0f)", P[i].what, a, b);
+                SMOKE_CHECK(vis && a > 20 && b < a * 0.5f, "point light shadow %s (lit %.0f, shadowed %.0f)", P[i].what, a, b);
             else
                 SMOKE_CHECK(vis && a > 20 && fabsf(b - a) < a * 0.12f + 3, "no shadow on the %s (%.0f vs %.0f)", P[i].what, a, b);
         }

@@ -839,7 +839,6 @@ static bool create_swapchain(void) {
 /* ------------------------------------------------------------------ resources */
 static void create_shadow_map(int res, int layers) {
     image_destroy(&R.shadow_map);
-    image_destroy(&R.local_shadow);
     ImageDesc d = {(uint32_t)res, (uint32_t)res, 1, (uint32_t)layers, 1, R.depth_format,
                    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_DEPTH_BIT,
                    VK_IMAGE_VIEW_TYPE_2D_ARRAY, true};
@@ -1260,6 +1259,7 @@ void lx_renderer_shutdown(void) {
         vkDestroySemaphore(R.device, fr->acquired, NULL);
     }
     image_destroy(&R.shadow_map);
+    image_destroy(&R.local_shadow);
     for (int c = 0; c < 3; c++) image_destroy(&R.gi[c]);
     image_destroy(&R.white);
     image_destroy(&R.flat_normal);
