@@ -7,7 +7,6 @@ layout(location = 2) in vec2 v_uv;
 layout(location = 3) in vec4 v_tangent;
 layout(location = 4) in vec4 v_tint;
 layout(location = 5) in float v_view_depth;
-layout(location = 6) flat in float v_moving;
 layout(location = 0) out vec4 o_color;
 #if LX_MRT
 layout(location = 1) out vec4 o_normal;  // world normal * 0.5 + 0.5
@@ -185,9 +184,8 @@ float gi_casc_fade(int level, vec3 q) {
 /* The GI around a surface point: the finest grid that covers it, blending into the coarser ones near its edge.
  * Within each grid, the 8 surrounding cells, trilinear, leaving out cells that can't see the point (a wall in
  * between, or buried inside solid geometry), so light doesn't leak through walls (as lx_gi_irradiance). */
-// where along the normal a surface reads the GI: a quarter cell out; a moving object reads from just outside itself,
-// since the cells inside it are kept dark by its own box stand-in (which blocks photons for everything else)
-vec3 gi_at(vec3 world, vec3 ng, float cell) { return world + ng * (v_moving > 0.5 ? cell * 0.75 + 0.35 : cell * 0.25); }
+// where along the normal a surface reads the GI: a quarter cell out
+vec3 gi_at(vec3 world, vec3 ng, float cell) { return world + ng * (cell * 0.25); }
 GiSH gi_gather(vec3 world, vec3 ng) {
     float f0 = gi_casc_fade(0, gi_at(world, ng, u.gi_casc[0].w));
     if (f0 >= 1.0) return gi_gather_level(0, gi_at(world, ng, u.gi_casc[0].w));

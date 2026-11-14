@@ -579,7 +579,7 @@ static void test_static_safeguard(void) {
     lx_scene_destroy(s);
 }
 
-/* moving things bounce light through their box stand-ins: a red cube with a Rigidbody, lit by a lamp, tints the
+/* moving things bounce light with their real triangles: a red cube with a Rigidbody, lit by a lamp, tints the
  * surface facing it red; moved away, the tint goes with it */
 static LxVec3 bleed_at(LxScene *s, const LxGraphicsSettings *g, int frames) {
     for (int f = 0; f < frames; f++) lx_gi_update(s, g);
@@ -607,9 +607,8 @@ static void test_gi_moving(void) {
     LxGraphicsSettings g = lx_graphics_defaults(1);
     g.gi_photons_per_frame = 40000;
     LxVec3 near_e = bleed_at(s, &g, 60);
-    const LxGiProxy *px;
-    int np = lx_gi_proxies(&px);
-    CHECK(np == 1, "the moving cube has a stand-in (%d)", np);
+    int np = lx_gi_moving_triangles();
+    CHECK(np == 12, "the moving cube's triangles are in GI (%d)", np);
     CHECK(near_e.x > near_e.y * 1.3f && near_e.x > 0, "it bounces red light onto what faces it (r %g g %g)", near_e.x, near_e.y);
     lx_entity_set_position(s, cube, lx_v3(-8, 0.75f, 8));   /* moved by the game (Rigidbody): GI follows */
     LxVec3 far_e = bleed_at(s, &g, 60);
@@ -618,9 +617,9 @@ static void test_gi_moving(void) {
     lx_scene_destroy(s);
 }
 
-/* a moving object's own stand-in mustn't darken it: its surfaces get bounce light like their surroundings
- * (the user's character had black patches where her face read cells inside her own box) */
-static float self_lit(bool with_object, bool moving_lookup) {
+/* a moving object doesn't darken itself: its face gets bounce light much like the open air there
+ * (the user's character had black, then patchy, faces with the box stand-ins) */
+static float self_lit(bool with_object) {
     LxScene *s = lx_scene_create("Self");
     LxEntity floor = lx_spawn_primitive(s, LX_PRIM_CUBE, "Floor", lx_v3(0, -0.5f, 0));
     lx_entity_set_scale(s, floor, lx_v3(12, 1, 12));
@@ -640,7 +639,7 @@ static float self_lit(bool with_object, bool moving_lookup) {
     for (int f = 0; f < 40; f++) lx_gi_update(s, &g);
     float sum = 0;
     for (int k = 0; k < 4; k++) {   /* the "face", towards the lamp-lit wall: what the bounce light comes from */
-        LxVec3 e = lx_gi_irradiance_ex(lx_v3(-0.15f + 0.1f * k, 1.2f + 0.1f * k, -0.18f), lx_v3(0, 0, -1), true, moving_lookup);
+        LxVec3 e = lx_gi_irradiance(lx_v3(-0.15f + 0.1f * k, 1.2f + 0.1f * k, -0.18f), lx_v3(0, 0, -1), true);
         sum += e.x + e.y + e.z;
     }
     lx_gi_shutdown();
@@ -649,10 +648,10 @@ static float self_lit(bool with_object, bool moving_lookup) {
 }
 static void test_gi_self_shadow(void) {
     printf("photon gi: moving objects don't darken themselves\n");
-    float open_air = self_lit(false, false), old_way = self_lit(true, false), fixed = self_lit(true, true);
-    printf("  bounce light on a moving body's face: %.4g in open air, %.4g reading its own cells, %.4g reading outside\n", open_air, old_way, fixed);
+    float open_air = self_lit(false), face = self_lit(true);
+    printf("  bounce light on a moving body's face: %.4g, in open air there: %.4g\n", face, open_air);
     CHECK(open_air > 0, "open air has bounce light (light is recorded along the photons' paths) (%.4g)", open_air);
-    CHECK(fixed >= old_way * 0.95f && fixed > open_air * 0.7f, "a moving body's face is lit like the air around it (%.4g vs %.4g)", fixed, open_air);
+    CHECK(face > open_air * 0.6f && face < open_air * 1.3f, "a moving body's face is lit like the air around it (%.4g vs %.4g)", face, open_air);
 }
 
 /* calibration: under an open sky of radiance L, the light arriving at an upward-facing surface is pi x L
@@ -699,6 +698,41 @@ static void test_gi_sky_calibration(void) {
     CHECK(fabsf(lo / want_lo - 1.0f) < 0.08f, "at the floor it matches the sky exactly (%.3f vs %.3f)", lo, want_lo);
     CHECK(fabsf(hi / want_hi - 1.0f) < 0.08f, "and in mid-air (%.3f vs %.3f)", hi, want_hi);
     lx_gi_shutdown();
+    lx_scene_destroy(s);
+}
+
+/* moving objects' BVH: refitting to new poses finds the same hits as building it again */
+static void test_moving_refit(void) {
+    printf("moving objects' BVH refit\n");
+    LxScene *s = lx_scene_create("Refit");
+    LxEntity balls[6];
+    for (int i = 0; i < 6; i++) {
+        balls[i] = lx_spawn_primitive(s, LX_PRIM_SPHERE, "Ball", lx_v3((float)i * 2.0f, 1, 0));
+        lx_add_rigidbody(s, balls[i]);
+    }
+    LxBvh refit, fresh;
+    memset(&refit, 0, sizeof refit);
+    memset(&fresh, 0, sizeof fresh);
+    lx_bvh_build_moving(&refit, s);
+    for (int i = 0; i < 6; i++) lx_entity_set_position(s, balls[i], lx_v3((float)i * 2.0f + 0.7f, 1.0f + 0.3f * (float)i, (float)(i % 2)));
+    CHECK(lx_bvh_refit_moving(&refit, s), "same objects: refits");
+    lx_bvh_build_moving(&fresh, s);
+    int agree = 0, total = 0;
+    LxRng rng = lx_rng_seed(7, 1);
+    for (int k = 0; k < 400; k++) {
+        LxVec3 o = lx_v3(lx_rng_f(&rng) * 14 - 2, 6, lx_rng_f(&rng) * 4 - 2);
+        LxRay r = {o, lx_norm3(lx_v3(lx_rng_f(&rng) - 0.5f, -1, lx_rng_f(&rng) - 0.5f))};
+        LxHit a, b;
+        bool ha = lx_bvh_intersect(&refit, r, 1e30f, &a), hb = lx_bvh_intersect(&fresh, r, 1e30f, &b);
+        total++;
+        if (ha == hb && (!ha || fabsf(a.t - b.t) < 1e-4f)) agree++;
+    }
+    CHECK(agree == total, "refitted and rebuilt trees find the same hits (%d / %d)", agree, total);
+    lx_entity_destroy(s, balls[5]);
+    lx_scene_update_transforms(s);
+    CHECK(!lx_bvh_refit_moving(&refit, s), "an object removed: build again");
+    lx_bvh_free(&refit);
+    lx_bvh_free(&fresh);
     lx_scene_destroy(s);
 }
 
@@ -1660,6 +1694,7 @@ int main(void) {
     test_static_safeguard();
     test_gi_moving();
     test_gi_self_shadow();
+    test_moving_refit();
     test_gi_sky_calibration();
     test_acoustics();
     test_crowd();

@@ -176,7 +176,10 @@ static struct {
     VkPipelineLayout gi_trace_pl, gi_post_pl;
     VkPipeline gi_trace_pipe, gi_post_pipe;
     GpuBuffer gi_nodes, gi_tris, gi_mats, gi_emit, gi_dep, gi_tmp_a, gi_tmp_b;   /* shared by every grid */
-    GpuBuffer gi_proxy;                  /* moving objects' box stand-ins, per frame in flight */
+    GpuBuffer gi_dyn;                    /* moving objects' BVH + triangles, one region per frame in flight (written by the CPU) */
+    GpuBuffer gi_dyn_dev;                /* ...copied each frame into GPU memory, where the photons read it */
+    size_t gi_dyn_cap;                   /* vec4s per region */
+    uint32_t gi_dyn_version[FRAMES];
     size_t gi_shared_cells;
     struct { GpuBuffer accum, count, vis; VkDescriptorSet set; size_t cells; } gl[1 + LX_GI_CASCADES];   /* 0: scene grid, 1..: camera grids */
     GpuImage gc[3], gc_vis[2];           /* camera grids for shading, stacked along z: SH r g b, walls */
@@ -1112,7 +1115,7 @@ static void gi_comp_write(void) {
     for (int l = 0; l < GI_LEVELS; l++) {
         if (!R.gl[l].set) continue;
         GpuBuffer *bufs[16] = {&R.gi_nodes, &R.gi_tris, &R.gi_mats, &R.gi_emit, &R.gi_dep, &R.gl[l].accum, &R.gi_tmp_a, &R.gi_tmp_b,
-                               NULL, NULL, NULL, &R.gl[l].vis, &R.gl[l].count, NULL, NULL, &R.gi_proxy};
+                               NULL, NULL, NULL, &R.gl[l].vis, &R.gl[l].count, NULL, NULL, &R.gi_dyn_dev};
         GpuImage *imgs[16] = {0};
         for (int c = 0; c < 3; c++) imgs[8 + c] = l == 0 ? &R.gi[c] : &R.gc[c];
         for (int c = 0; c < 2; c++) imgs[13 + c] = l == 0 ? &R.gi_vis[c] : &R.gc_vis[c];
@@ -1179,13 +1182,16 @@ static void gi_comp_init(void) {
     }
     for (int l = 0; l < GI_LEVELS; l++) R.gl[l].set = alloc_set(R.gi_comp_layout);
     buffer_create(&R.gi_emit, (VkDeviceSize)FRAMES * GI_LEVELS * 64 * 3 * 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
-    buffer_create(&R.gi_proxy, (VkDeviceSize)FRAMES * LX_GI_MAX_PROXIES * 80, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
+    R.gi_dyn_cap = 4096;
+    buffer_create(&R.gi_dyn, (VkDeviceSize)FRAMES * R.gi_dyn_cap * 16, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true);
+    buffer_create(&R.gi_dyn_dev, (VkDeviceSize)R.gi_dyn_cap * 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false);
     LX_INFO("Photon GI on the GPU (%s, %dx photons)", R.props.deviceName, R.gi_mult);
 }
 
 static void gi_comp_free(void) {
-    GpuBuffer *bufs[8] = {&R.gi_nodes, &R.gi_tris, &R.gi_mats, &R.gi_emit, &R.gi_dep, &R.gi_tmp_a, &R.gi_tmp_b, &R.gi_proxy};
+    GpuBuffer *bufs[8] = {&R.gi_nodes, &R.gi_tris, &R.gi_mats, &R.gi_emit, &R.gi_dep, &R.gi_tmp_a, &R.gi_tmp_b, &R.gi_dyn};
     for (int i = 0; i < 8; i++) buffer_destroy(bufs[i]);
+    buffer_destroy(&R.gi_dyn_dev);
     for (int l = 0; l < GI_LEVELS; l++) { buffer_destroy(&R.gl[l].accum); buffer_destroy(&R.gl[l].count); buffer_destroy(&R.gl[l].vis); }
     for (int c = 0; c < 3; c++) image_destroy(&R.gc[c]);
     for (int c = 0; c < 2; c++) image_destroy(&R.gc_vis[c]);
@@ -1387,7 +1393,53 @@ static void gi_post(VkCommandBuffer cmd, int level, const int res[3], int mode, 
     vkCmdDispatch(cmd, (uint32_t)((cells + 63) / 64), 1, 1);
 }
 
-static int g_gi_proxy_base, g_gi_proxy_count;   /* this frame's boxes in R.gi_proxy */
+static int g_gi_dyn_nodes, g_gi_dyn_node_count, g_gi_dyn_tris;   /* this frame's moving-object BVH in R.gi_dyn (vec4 indices) */
+
+/* the moving objects' BVH into this frame's region: nodes (2 vec4: min + first, max + count), then triangles in
+ * leaf order (4 vec4: v0, e1 + albedo r, e2 + albedo g, normal + albedo b) */
+static void gi_dyn_upload(VkCommandBuffer cmd, int slot, const LxBvh *b, uint32_t version) {
+    g_gi_dyn_node_count = b && b->tri_count ? b->node_count : 0;
+    size_t need = g_gi_dyn_node_count ? (size_t)b->node_count * 2 + (size_t)b->tri_count * 4 : 0;
+    if (need > R.gi_dyn_cap) {   /* grow (rare): every region, so wait for the GPU */
+        vkDeviceWaitIdle(R.device);
+        buffer_destroy(&R.gi_dyn);
+        R.gi_dyn_cap = need + need / 2;
+        buffer_create(&R.gi_dyn, (VkDeviceSize)FRAMES * R.gi_dyn_cap * 16, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true);
+        buffer_destroy(&R.gi_dyn_dev);
+        buffer_create(&R.gi_dyn_dev, (VkDeviceSize)R.gi_dyn_cap * 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false);
+        memset(R.gi_dyn_version, 0, sizeof R.gi_dyn_version);
+        gi_comp_write();
+    }
+    size_t base = (size_t)slot * R.gi_dyn_cap;
+    g_gi_dyn_nodes = 0;   /* in GPU memory the frame's copy starts at the beginning */
+    g_gi_dyn_tris = g_gi_dyn_node_count * 2;
+    if (!g_gi_dyn_node_count) return;
+    if (R.gi_dyn_version[slot] != version) {
+        float *o = (float *)R.gi_dyn.mapped + base * 4;
+    for (int i = 0; i < b->node_count; i++, o += 8) {
+        const LxBvhNode *n = &b->nodes[i];
+        o[0] = n->bounds.min.x; o[1] = n->bounds.min.y; o[2] = n->bounds.min.z; memcpy(&o[3], &n->left_or_first, 4);
+        o[4] = n->bounds.max.x; o[5] = n->bounds.max.y; o[6] = n->bounds.max.z; memcpy(&o[7], &n->count, 4);
+    }
+    for (int k = 0; k < b->tri_count; k++, o += 16) {
+        int t = b->tri_index[k];
+        LxVec3 al = b->materials[b->mat_index[t]].albedo;
+        o[0] = b->v0[t].x; o[1] = b->v0[t].y; o[2] = b->v0[t].z; o[3] = 0;
+        o[4] = b->e1[t].x; o[5] = b->e1[t].y; o[6] = b->e1[t].z; o[7] = al.x;
+        o[8] = b->e2[t].x; o[9] = b->e2[t].y; o[10] = b->e2[t].z; o[11] = al.y;
+        o[12] = b->normals[t].x; o[13] = b->normals[t].y; o[14] = b->normals[t].z; o[15] = al.z;
+    }
+        R.gi_dyn_version[slot] = version;
+    }
+    /* into GPU memory: after the previous frame's photons are done with it, before this frame's */
+    VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    mb.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    mb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    VkBufferCopy rg = {(VkDeviceSize)base * 16, 0, (VkDeviceSize)need * 16};
+    vkCmdCopyBuffer(cmd, R.gi_dyn.buf, R.gi_dyn_dev.buf, 1, &rg);
+    cmd_compute_barrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+}
 /* one grid's photons: clear the deposits, trace, resolve + blend, blur x / y / z into its textures */
 static void gi_trace_grid(VkCommandBuffer cmd, int slot, int level, const LxGiTrace *t, LxVec3 origin, float cell, const int res[3],
                           int max_bounces, int zoff) {
@@ -1408,7 +1460,7 @@ static void gi_trace_grid(VkCommandBuffer cmd, int slot, int level, const LxGiTr
     pc.bext_power[0] = t->bounds_ext.x; pc.bext_power[1] = t->bounds_ext.y; pc.bext_power[2] = t->bounds_ext.z; pc.bext_power[3] = t->total_power;
     pc.scales[0] = t->flux_scale; pc.scales[1] = t->deposit_scale; pc.scales[2] = (float)max_bounces; pc.scales[3] = (float)t->emitter_count;
     pc.misc[0] = ebase; pc.misc[1] = 0; memcpy(&pc.misc[2], &t->step_back, 4); pc.misc[3] = zoff;
-    pc.misc2[0] = g_gi_proxy_base; pc.misc2[1] = g_gi_proxy_count; pc.misc2[2] = pc.misc2[3] = 0;
+    pc.misc2[0] = g_gi_dyn_nodes; pc.misc2[1] = g_gi_dyn_node_count; pc.misc2[2] = g_gi_dyn_tris; pc.misc2[3] = 0;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, R.gi_trace_pipe);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, R.gi_trace_pl, 0, 1, &R.gl[level].set, 0, NULL);
     vkCmdPushConstants(cmd, R.gi_trace_pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
@@ -1457,9 +1509,9 @@ static void gi_gpu_run(VkCommandBuffer cmd, FrameData *fr, const LxGiGpuFrame *f
     }
     gi_sync_vis(lx_gi_volume());
     int slot = (int)(fr - R.frames);
-    g_gi_proxy_base = slot * LX_GI_MAX_PROXIES * 5;
-    g_gi_proxy_count = f->proxy_count;
-    memcpy((uint8_t *)R.gi_proxy.mapped + (size_t)g_gi_proxy_base * 16, f->proxies, (size_t)f->proxy_count * 80);
+    bool tracing = f->t.trace;
+    for (int l = 0; l < LX_GI_CASCADES; l++) tracing = tracing || f->casc[l].t.trace;
+    if (tracing) gi_dyn_upload(cmd, slot, f->moving, f->moving_version);
     if (f->t.trace && R.gl[0].vis.buf) {
         GpuImage *ims[5] = {&R.gi[0], &R.gi[1], &R.gi[2], &R.gi_vis[0], &R.gi_vis[1]};   /* the shaders name them all */
         gi_images_to(cmd, ims, 5, true);
@@ -2959,14 +3011,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
             float radius = lx_len3(lx_aabb_extent(wb));
             if (lx_frustum_test_aabb(&frustum, wb)) {
                 float dist = lx_maxf(lx_len3(lx_sub3(c, view->eye)), 1e-3f);
-                /* moving objects (GI box stand-ins) are marked in the matrix's unused corner: the shader reads their
-                 * bounce light from just outside them, not from the cells their own stand-in keeps dark */
-                LxEntity ent = lx_entity_make((uint32_t)i, d->generation & 0xfffu);
-                if (gi_on && !lx_entity_can_be_static(s, ent, NULL)) {
-                    LxMat4 mk = d->world;
-                    mk.m[15] = 2.0f;
-                    dl_add(&R.main_list, mesh, pick_lod(mesh, radius * proj_scale / dist), mat, mk.m, white);
-                } else dl_add(&R.main_list, mesh, pick_lod(mesh, radius * proj_scale / dist), mat, d->world.m, white);
+                dl_add(&R.main_list, mesh, pick_lod(mesh, radius * proj_scale / dist), mat, d->world.m, white);
             } else R.stats.instances_culled++;
             if (d->mesh.cast_shadows) {
                 for (int k = 0; k < cascades; k++)

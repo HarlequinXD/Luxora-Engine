@@ -12,7 +12,7 @@ layout(std430, set = 0, binding = 2) readonly buffer Mats { vec4 albedo[]; };
 layout(std430, set = 0, binding = 3) readonly buffer Emitters { vec4 em[]; };   // 3 per emitter
 layout(std430, set = 0, binding = 4) buffer Deposits { int dep[]; };
 layout(std430, set = 0, binding = 11) buffer Vis { float vis[]; };   // per cell: distance to the first surface +x -x +y -y +z -z (cells)
-layout(std430, set = 0, binding = 15) readonly buffer Proxies { vec4 px[]; };   // moving objects' boxes: 5 per box
+layout(std430, set = 0, binding = 15) readonly buffer Moving { vec4 mv[]; };   // moving objects' BVH this frame: nodes, then triangles
 layout(set = 0, binding = 13, rgba8) uniform writeonly image3D vis_a;   // the same for shading: (+x -x +y -y) / 1.5
 layout(set = 0, binding = 14, rgba8) uniform writeonly image3D vis_b;   //   (+z -z) / 1.5
 
@@ -24,7 +24,7 @@ layout(push_constant) uniform PC {
     vec4 scales;         // flux per photon, deposit fixed-point scale (x 1/cell area), max bounces, emitter count
     ivec4 misc;          // x: this frame's first emitter vec4 (emitters are double-buffered per frame in flight)
                          // y: 0 trace photons, 1 find each cell's walls; z: sun step-back distance (float bits); w: texture z offset
-    ivec4 misc2;         // x: this frame's first box vec4, y: how many boxes
+    ivec4 misc2;         // moving objects: x first node vec4, y node count (0 = none), z first triangle vec4
 } pc;
 
 const float PI = 3.14159265;
@@ -112,27 +112,53 @@ bool sees(ivec3 c, vec3 g) {
 
 // The deposit goes to one of the 8 cells around it, picked in proportion to its trilinear weight among the
 // cells on the photon's side of any wall (the CPU spreads it over them; same result on average).
-// a moving object's box stand-in (as lx_gi_proxy_hit): rays starting inside a box ignore it
-bool proxy_hit(int b, vec3 o, vec3 d, float tmax, out float t, out vec3 n) {
-    vec4 p0 = px[b], p1 = px[b + 1], p2 = px[b + 2], p3 = px[b + 3];
-    vec3 ax[3] = vec3[3](p1.xyz, p2.xyz, p3.xyz);
-    vec3 h = vec3(p0.w, p1.w, p2.w);
-    vec3 r = o - p0.xyz;
-    vec3 lo = vec3(dot(r, ax[0]), dot(r, ax[1]), dot(r, ax[2])), ld = vec3(dot(d, ax[0]), dot(d, ax[1]), dot(d, ax[2]));
-    if (all(lessThanEqual(abs(lo), h))) return false;
-    float tn = -1e30, tf = 1e30;
-    int axis = 0;
-    for (int a = 0; a < 3; a++) {
-        if (abs(ld[a]) < 1e-9) { if (abs(lo[a]) > h[a]) return false; continue; }
-        float t1 = (-h[a] - lo[a]) / ld[a], t2 = (h[a] - lo[a]) / ld[a];
-        float a1 = min(t1, t2), a2 = max(t1, t2);
-        if (a1 > tn) { tn = a1; axis = a; }
-        tf = min(tf, a2);
+// the moving objects' BVH (their current triangles: skinned characters in their pose), as trace() for the level;
+// triangles carry their bounce colour in the w of e1, e2, n
+int trace_moving(vec3 o, vec3 d, float tmax, out float best) {
+    best = tmax;
+    if (pc.misc2.y == 0) return -1;
+    int nb = pc.misc2.x, tb = pc.misc2.z;
+    vec3 inv = 1.0 / mix(d, vec3(1e-9), lessThan(abs(d), vec3(1e-9)));
+    if (ray_box(mv[nb].xyz, mv[nb + 1].xyz, o, inv, best) >= 1e30) return -1;
+    int stack[48];
+    int sp = 0, node = 0, hit = -1;
+    for (int guard = 0; guard < 4096; guard++) {
+        vec4 na = mv[nb + node * 2], nbx = mv[nb + node * 2 + 1];
+        int count = floatBitsToInt(nbx.w), first = floatBitsToInt(na.w);
+        if (count > 0) {
+            for (int i = 0; i < count; i++) {
+                int t = tb + (first + i) * 4;
+                vec3 v0 = mv[t].xyz, e1 = mv[t + 1].xyz, e2 = mv[t + 2].xyz;
+                vec3 p = cross(d, e2);
+                float det = dot(e1, p);
+                if (abs(det) < 1e-12) continue;
+                float id = 1.0 / det;
+                vec3 tv = o - v0;
+                float u = dot(tv, p) * id;
+                if (u < 0.0 || u > 1.0) continue;
+                vec3 q = cross(tv, e1);
+                float v = dot(d, q) * id;
+                if (v < 0.0 || u + v > 1.0) continue;
+                float dist = dot(e2, q) * id;
+                if (dist > 1e-4 && dist < best) { best = dist; hit = t; }
+            }
+            if (sp == 0) break;
+            node = stack[--sp];
+            continue;
+        }
+        int c1 = first, c2 = first + 1;
+        float d1 = ray_box(mv[nb + c1 * 2].xyz, mv[nb + c1 * 2 + 1].xyz, o, inv, best);
+        float d2 = ray_box(mv[nb + c2 * 2].xyz, mv[nb + c2 * 2 + 1].xyz, o, inv, best);
+        if (d1 > d2) { float td = d1; d1 = d2; d2 = td; int ti = c1; c1 = c2; c2 = ti; }
+        if (d1 >= 1e30) {
+            if (sp == 0) break;
+            node = stack[--sp];
+        } else {
+            node = c1;
+            if (d2 < 1e30 && sp < 48) stack[sp++] = c2;
+        }
     }
-    if (tf < tn || tn <= 1e-4 || tn >= tmax) return false;
-    t = tn;
-    n = ax[axis] * (ld[axis] > 0.0 ? -1.0 : 1.0);
-    return true;
+    return hit;
 }
 
 void deposit(vec3 pos, vec3 dir, vec3 flux) {
@@ -252,12 +278,9 @@ void main() {
         vec3 n = vec3(0, 1, 0), alb = vec3(0.0);
         if (tri >= 0) { n = tris[tri].n.xyz; alb = albedo[floatBitsToInt(tris[tri].v0.w)].xyz; }
         bool got = tri >= 0;
-        for (int k = 0; k < pc.misc2.y; k++) {   // moving objects' stand-ins
-            float tp;
-            vec3 np;
-            int base = pc.misc2.x + k * 5;
-            if (proxy_hit(base, o, d, t, tp, np)) { t = tp; n = np; alb = px[base + 4].xyz; got = true; }
-        }
+        float tm;
+        int mt = trace_moving(o, d, t, tm);   // moving objects, closer than the level?
+        if (mt >= 0) { t = tm; n = mv[mt + 3].xyz; alb = vec3(mv[mt + 1].w, mv[mt + 2].w, mv[mt + 3].w); got = true; }
         if (b > 0 || sky) deposit_path(o, d, got ? t : 1e30, flux);   // bounced light fills the air
         if (!got) break;
         vec3 pos = o + d * t;

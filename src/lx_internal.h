@@ -417,6 +417,8 @@ typedef struct LxHit {
 } LxHit;
 
 void lx_bvh_build_from_scene(LxBvh *bvh, LxScene *s);
+void lx_bvh_build_moving(LxBvh *b, LxScene *s);
+bool lx_bvh_refit_moving(LxBvh *b, LxScene *s);   /* same objects, new poses: refit (false: build again) */   /* moving objects' current triangles (GI, rebuilt as they move) */
 void lx_bvh_free(LxBvh *bvh);
 bool lx_bvh_intersect(const LxBvh *bvh, LxRay ray, float tmax, LxHit *hit);
 bool lx_bvh_occluded(const LxBvh *bvh, LxRay ray, float tmax);
@@ -436,11 +438,7 @@ void lx_gi_shutdown(void);
 void lx_gi_update(LxScene *s, const LxGraphicsSettings *g);
 const LxGiVolume *lx_gi_volume(void);
 int lx_gi_last_photon_count(void);
-/* a moving object's stand-in for GI: an oriented box (centre, unit axes, half sizes) and its bounce colour */
-#define LX_GI_MAX_PROXIES 64
-typedef struct LxGiProxy { LxVec3 c, ax[3]; float h[3]; LxVec3 albedo; } LxGiProxy;
-bool lx_gi_proxy_hit(const LxGiProxy *p, LxVec3 o, LxVec3 d, float tmax, float *t_out, LxVec3 *n_out);
-int lx_gi_proxies(const LxGiProxy **out);   /* this frame's stand-ins (tests, the GPU tracer) */
+int lx_gi_moving_triangles(void);   /* moving objects' triangles in GI this frame (tests) */
 
 /* the GPU tracer: what the renderer needs to run this frame's photons in compute shaders */
 typedef struct LxGiTrace {         /* one photon dispatch into one grid */
@@ -470,15 +468,14 @@ typedef struct LxGiGpuFrame {
     float cell;
     LxGiTrace t;                   /* the whole-scene grid */
     LxGiCascadeFrame casc[LX_GI_CASCADES];
-    int proxy_count;               /* moving objects' box stand-ins: (centre, half x), (axis x, half y), (axis y, half z), (axis z), (albedo) */
-    float proxies[LX_GI_MAX_PROXIES][20];
+    const LxBvh *moving;           /* moving objects' current triangles */
+    uint32_t moving_version;       /* changes when they moved: upload them again */
 } LxGiGpuFrame;
 bool lx_gi_gpu_frame(LxScene *s, const LxGraphicsSettings *g, int photon_multiplier, LxVec3 eye, LxGiGpuFrame *f);
 float *lx_gi_cpu_reference(LxScene *s, const LxGraphicsSettings *g, int frames, int res[3]);
 float *lx_renderer_gi_readback(int res[3]);   /* the GPU tracer's running average (NULL when GI runs on the CPU) */
 float *lx_renderer_gi_readback_level(int level, int res[3], LxVec3 *origin, float *cell);   /* 0 scene grid, 1.. camera grids */
 LxVec3 lx_gi_irradiance(LxVec3 p, LxVec3 n, bool walls);
-LxVec3 lx_gi_irradiance_ex(LxVec3 p, LxVec3 n, bool walls, bool moving);
 void lx_gi_set_walls(bool on);   /* tests: false = the old leaky grid */   /* the shader's GI lookup on the CPU (tests) */   /* the GPU tracer's running average (NULL when GI runs on the CPU) */
 float lx_gi_last_ms(void);
 /* CPU access for tests: SH coefficients (12 floats) of a cell */

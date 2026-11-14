@@ -2,7 +2,7 @@
  *
  * Every frame a budget of photons is emitted from the scene's lights (directional, point, spot)
  * and from the sky. Photons are traced through the static-geometry BVH (and moving objects' box
- * stand-ins), then bounce diffusely with Russian roulette weighted by surface albedo. Along every
+ * triangles), then bounce diffusely with Russian roulette weighted by surface albedo. Along every
  * stretch of path that carries bounced or sky light, the light is recorded in the cells it passes
  * through (a track-length estimate of the radiance field, as L1 spherical harmonics), so every
  * point in space has the right bounce light, not only surfaces. The first stretch from a light is
@@ -40,8 +40,10 @@ static struct {
     double settled_photons;   /* photons traced since the lighting last changed */
     bool gpu;                 /* the renderer traces (lx_gi_gpu_frame); grid arrays live on the GPU */
     float *vis;               /* per cell: distance to the first surface along +x -x +y -y +z -z, in cells (max VIS_MAX) */
-    LxGiProxy proxies[LX_GI_MAX_PROXIES];   /* moving objects: box stand-ins photons bounce off */
-    int proxy_count;
+    LxBvh moving;             /* moving objects' current triangles (skinned in their pose), refitted as they move */
+    uint64_t moving_hash, moving_set;   /* their poses; which objects they are (and their triangle counts) */
+    uint32_t moving_version;
+    float moving_built_area;  /* the root box's surface area when last built: refits that grow it a lot rebuild */
     uint32_t vis_version;
     uint32_t scene_version;   /* bumps when the BVH is rebuilt */
     Emitter emitters[64];
@@ -121,84 +123,54 @@ static bool vis_weights(LxVec3 g, int base[3], float w[8]) {
     for (int k = 0; k < 8; k++) w[k] /= sum;
     return true;
 }
-/* ---- moving objects: box stand-ins ----
+/* ---- moving objects ----
  * Things that can't be static (skinned characters, Rigidbodies, Character Controllers, Animators and what they
- * carry) still block and bounce light: each gets an oriented box from its current bounds, refreshed every frame.
- * Bounce light is soft and stored in cells of a third of a metre or more, so a box is as good as the real mesh
- * there, at a tiny fraction of the cost (sharp shadows already use the real mesh through the shadow maps). */
-static void gather_proxies(LxScene *s) {
-    G.proxy_count = 0;
-    for (int i = 1; i < s->count && G.proxy_count < LX_GI_MAX_PROXIES; i++) {
+ * carry) still block and bounce light with their real triangles: a second BVH of them as they are now, rebuilt
+ * when any of them moves or changes pose by more than ~2 cm. Their signature (positions, orientations, the
+ * current bounds of deformed meshes) is cheap to check every frame. */
+static uint64_t moving_signature(LxScene *s, uint64_t *set) {
+    uint64_t h = 1469598103934665603ull, hs = h;
+    for (int i = 1; i < s->count; i++) {
         LxEntityData *d = &s->entities[i];
         if (!d->alive || !d->active || !(d->comps & LX_COMP_MESH)) continue;
-        bool hidden = false;
-        for (LxEntity p = d->parent; p; p = lx_entity_data(s, p)->parent)
-            if (!lx_entity_data(s, p)->active) { hidden = true; break; }
-        if (hidden) continue;
         LxEntity e = lx_entity_make((uint32_t)i, d->generation & 0xfffu);
-        if (lx_entity_can_be_static(s, e, NULL)) continue;   /* not a moving thing */
+        if (lx_entity_can_be_static(s, e, NULL)) continue;
         const LxMesh *m = lx_skin_mesh_of(d);
         if (!m) continue;
-        LxVec3 lc = lx_aabb_center(m->bounds), he = lx_aabb_extent(m->bounds);
-        LxGiProxy *p = &G.proxies[G.proxy_count];
-        p->c = lx_mat4_point(d->world, lc);
-        float h[3];
-        for (int a = 0; a < 3; a++) {
-            LxVec3 col = lx_v3(d->world.m[a * 4], d->world.m[a * 4 + 1], d->world.m[a * 4 + 2]);
-            float len = lx_len3(col);
-            p->ax[a] = len > 1e-6f ? lx_scale3(col, 1.0f / len) : lx_v3(a == 0, a == 1, a == 2);
-            h[a] = lx_comp3(he, a) * len * 0.95f;
-        }
-        if (m->skin) {   /* a body, not its arm span: the most upright axis is height, the others at most a quarter of it */
-            int up = 0;
-            for (int a = 1; a < 3; a++) if (fabsf(p->ax[a].y) > fabsf(p->ax[up].y)) up = a;
-            for (int a = 0; a < 3; a++) if (a != up) h[a] = lx_minf(h[a] * 0.6f, h[up] * 0.25f);
-        }
-        if (h[0] < 0.01f && h[1] < 0.01f && h[2] < 0.01f) continue;
-        for (int a = 0; a < 3; a++) p->h[a] = lx_maxf(h[a], 0.005f);
-        const LxMaterial *mat = lx_asset_material(d->mesh.material);
-        float diffuse = mat ? 1.0f - mat->metallic * 0.9f : 1.0f;   /* as the static geometry's bounce colour */
-        p->albedo = mat ? lx_scale3(lx_v3(mat->albedo.x, mat->albedo.y, mat->albedo.z), diffuse) : lx_v3(0.7f, 0.7f, 0.7f);
-        G.proxy_count++;
+        int32_t q[19];
+        for (int k = 0; k < 12; k++) q[k] = (int32_t)lroundf(d->world.m[k < 9 ? k + k / 3 : 12 + (k - 9)] * 50.0f);
+        q[12] = (int32_t)lroundf(m->bounds.min.x * 50); q[13] = (int32_t)lroundf(m->bounds.min.y * 50); q[14] = (int32_t)lroundf(m->bounds.min.z * 50);
+        q[15] = (int32_t)lroundf(m->bounds.max.x * 50); q[16] = (int32_t)lroundf(m->bounds.max.y * 50); q[17] = (int32_t)lroundf(m->bounds.max.z * 50);
+        q[18] = i;
+        for (int k = 0; k < 19; k++) h = (h ^ (uint32_t)q[k]) * 1099511628211ull;
+        hs = (hs ^ (uint32_t)i) * 1099511628211ull;
+        hs = (hs ^ (uint32_t)m->lods[0].index_count ^ ((uint32_t)m->lod_count << 24)) * 1099511628211ull;
     }
+    *set = hs;
+    return h;
 }
-/* the stand-ins are part of the lighting: when one moves (by more than ~5 cm), GI refreshes like for a moved light */
-static uint64_t hash_proxies(uint64_t h) {
-    for (int i = 0; i < G.proxy_count; i++) {
-        const LxGiProxy *p = &G.proxies[i];
-        int32_t q[12] = {(int32_t)lroundf(p->c.x * 20), (int32_t)lroundf(p->c.y * 20), (int32_t)lroundf(p->c.z * 20),
-                         (int32_t)lroundf(p->h[0] * 20), (int32_t)lroundf(p->h[1] * 20), (int32_t)lroundf(p->h[2] * 20),
-                         (int32_t)lroundf(p->ax[0].x * 20), (int32_t)lroundf(p->ax[0].y * 20), (int32_t)lroundf(p->ax[0].z * 20),
-                         (int32_t)lroundf(p->ax[1].x * 20), (int32_t)lroundf(p->ax[1].y * 20), (int32_t)lroundf(p->ax[1].z * 20)};
-        for (int k = 0; k < 12; k++) h = (h ^ (uint32_t)q[k]) * 1099511628211ull;
-    }
-    return (h ^ (uint64_t)G.proxy_count) * 1099511628211ull;
+static float box_area(LxAabb b) {
+    LxVec3 e = lx_sub3(b.max, b.min);
+    return 2.0f * (e.x * e.y + e.y * e.z + e.z * e.x);
 }
-/* ray vs a stand-in box (rays starting inside one ignore it: a lamp a character carries isn't blocked by them) */
-bool lx_gi_proxy_hit(const LxGiProxy *p, LxVec3 o, LxVec3 d, float tmax, float *t_out, LxVec3 *n_out) {
-    LxVec3 r = lx_sub3(o, p->c);
-    float lo[3], ld[3];
-    bool inside = true;
-    for (int a = 0; a < 3; a++) {
-        lo[a] = lx_dot3(r, p->ax[a]);
-        ld[a] = lx_dot3(d, p->ax[a]);
-        if (fabsf(lo[a]) > p->h[a]) inside = false;
+/* build when the moving objects change (added, removed); otherwise refit to their new poses, and build again only
+ * when refits have stretched the tree a lot (objects wandered far apart) */
+static void update_moving(LxScene *s) {
+    uint64_t set;
+    uint64_t h = moving_signature(s, &set);
+    if (h == G.moving_hash && set == G.moving_set && G.moving_version) return;
+    bool built = false;
+    if (set != G.moving_set || !G.moving.tri_count || !lx_bvh_refit_moving(&G.moving, s) ||
+        box_area(G.moving.bounds) > G.moving_built_area * 2.0f) {
+        lx_bvh_build_moving(&G.moving, s);
+        built = true;
     }
-    if (inside) return false;
-    float tn = -1e30f, tf = 1e30f;
-    int axis = 0;
-    for (int a = 0; a < 3; a++) {
-        if (fabsf(ld[a]) < 1e-9f) { if (fabsf(lo[a]) > p->h[a]) return false; continue; }
-        float t1 = (-p->h[a] - lo[a]) / ld[a], t2 = (p->h[a] - lo[a]) / ld[a];
-        float a1 = lx_minf(t1, t2), a2 = lx_maxf(t1, t2);
-        if (a1 > tn) { tn = a1; axis = a; }
-        if (a2 < tf) tf = a2;
-    }
-    if (tf < tn || tn <= 1e-4f || tn >= tmax) return false;
-    *t_out = tn;
-    *n_out = lx_scale3(p->ax[axis], ld[axis] > 0 ? -1.0f : 1.0f);
-    return true;
+    if (built) G.moving_built_area = G.moving.tri_count ? box_area(G.moving.bounds) : 0;
+    G.moving_hash = h;
+    G.moving_set = set;
+    G.moving_version++;
 }
+int lx_gi_moving_triangles(void) { return G.moving.tri_count; }
 
 /* blur neighbours: no wall between the two centres */
 static bool vis_open(int i, int axis, int dir) {
@@ -208,6 +180,7 @@ static bool vis_open(int i, int axis, int dir) {
 
 void lx_gi_shutdown(void) {
     lx_bvh_free(&G.bvh);
+    lx_bvh_free(&G.moving);
     lx_free(G.vis);
     lx_free(G.accum);
     lx_free(G.frame);
@@ -439,10 +412,11 @@ static void trace_job(void *user, int begin, int end, int thread) {
                     n = G.bvh.normals[hit.tri];
                     alb = G.bvh.materials[G.bvh.mat_index[hit.tri]].albedo;
                 }
-                for (int pi = 0; pi < G.proxy_count; pi++) {   /* moving objects' stand-ins */
-                    float tp;
-                    LxVec3 np;
-                    if (lx_gi_proxy_hit(&G.proxies[pi], o, d, best, &tp, &np)) { best = tp; n = np; alb = G.proxies[pi].albedo; got = true; }
+                if (G.moving.tri_count && lx_bvh_intersect(&G.moving, (LxRay){o, d}, best, &hit)) {   /* moving objects */
+                    best = hit.t;
+                    n = G.moving.normals[hit.tri];
+                    alb = G.moving.materials[G.moving.mat_index[hit.tri]].albedo;
+                    got = true;
                 }
                 if (bounce > 0 || is_sky) push_path(thread, &rng, o, d, got ? best : 1e30f, flux);   /* bounced light fills the air */
                 if (!got) break;
@@ -547,8 +521,8 @@ static int prepare(LxScene *s, const LxGraphicsSettings *g, bool gpu) {
     }
     lx_scene_update_transforms(s);
     gather_emitters(s);
-    gather_proxies(s);
-    G.light_hash = hash_proxies(G.light_hash);
+    update_moving(s);
+    G.light_hash = (G.light_hash ^ G.moving_hash) * 1099511628211ull;   /* something moved: GI refreshes */
     {   /* graphics settings changes (bounces, intensity...) count as a lighting change too */
         const uint8_t *gb = (const uint8_t *)g;
         uint64_t h = G.light_hash;
@@ -704,16 +678,8 @@ bool lx_gi_gpu_frame(LxScene *s, const LxGraphicsSettings *g, int photon_multipl
     f->origin = G.origin;
     f->cell = G.cell_size.x;
     f->max_bounces = G.max_bounces;
-    f->proxy_count = G.proxy_count;
-    for (int i = 0; i < G.proxy_count; i++) {
-        const LxGiProxy *p = &G.proxies[i];
-        float *o = f->proxies[i];
-        o[0] = p->c.x; o[1] = p->c.y; o[2] = p->c.z; o[3] = p->h[0];
-        o[4] = p->ax[0].x; o[5] = p->ax[0].y; o[6] = p->ax[0].z; o[7] = p->h[1];
-        o[8] = p->ax[1].x; o[9] = p->ax[1].y; o[10] = p->ax[1].z; o[11] = p->h[2];
-        o[12] = p->ax[2].x; o[13] = p->ax[2].y; o[14] = p->ax[2].z; o[15] = 0;
-        o[16] = p->albedo.x; o[17] = p->albedo.y; o[18] = p->albedo.z; o[19] = 0;
-    }
+    f->moving = &G.moving;
+    f->moving_version = G.moving_version;
     int photons = g->gi_photons_per_frame < 256 ? 256 : g->gi_photons_per_frame;
     photons *= photon_multiplier < 1 ? 1 : photon_multiplier;
     photons = (photons + 63) / 64 * 64;
@@ -817,12 +783,10 @@ float *lx_gi_cpu_reference(LxScene *s, const LxGraphicsSettings *g, int frames, 
 
 /* What the PBR shader does with the GI volume, on the CPU (tests): irradiance at a surface point with normal n.
  * walls = false gives the old plain trilinear lookup, for comparison. */
-LxVec3 lx_gi_irradiance(LxVec3 p, LxVec3 n, bool walls) { return lx_gi_irradiance_ex(p, n, walls, false); }
-/* moving: a moving object's surface, which reads the GI from just outside itself (as the shader does) */
-LxVec3 lx_gi_irradiance_ex(LxVec3 p, LxVec3 n, bool walls, bool moving) {
+LxVec3 lx_gi_irradiance(LxVec3 p, LxVec3 n, bool walls) {
     const float *sh = G.filtered;
     if (!sh) return lx_v3(0, 0, 0);
-    LxVec3 q = lx_madd3(p, n, moving ? G.cell_size.x * 0.75f + 0.35f : G.cell_size.x * 0.25f);
+    LxVec3 q = lx_madd3(p, n, G.cell_size.x * 0.25f);
     LxVec3 g = lx_v3((q.x - G.origin.x) / G.cell_size.x, (q.y - G.origin.y) / G.cell_size.y, (q.z - G.origin.z) / G.cell_size.z);
     int base[3];
     float w[8];
@@ -845,4 +809,4 @@ LxVec3 lx_gi_irradiance_ex(LxVec3 p, LxVec3 n, bool walls, bool moving) {
     return lx_v3(e[0], e[1], e[2]);
 }
 
-int lx_gi_proxies(const LxGiProxy **out) { if (out) *out = G.proxies; return G.proxy_count; }
+

@@ -242,12 +242,12 @@ bool lx_entity_can_be_static(const LxScene *s, LxEntity e, const char **why) {
     if (!d) r = "No such object";
     else if (d->comps & LX_COMP_MESH) {
         const LxMesh *m = lx_asset_mesh(d->mesh.mesh);
-        if (m && m->skin) r = "Animated meshes bend and move, so they can't be static. Bounce light still uses a box that follows it.";
+        if (m && m->skin) r = "Animated meshes bend and move, so they can't be static. Its real mesh still blocks and bounces light.";
     }
     for (LxEntityData *p = d; p && !r;) {
-        if (p->comps & LX_COMP_RIGIDBODY) r = "Moved by a Rigidbody (here or on a parent), so it can't be static. Bounce light still uses a box that follows it.";
-        else if (p->comps & LX_COMP_CHARACTER) r = "Moved by a Character Controller (here or on a parent), so it can't be static. Bounce light still uses a box that follows it.";
-        else if (p->comps & LX_COMP_ANIMATOR) r = "Moved by an Animator (here or on a parent), so it can't be static. Bounce light still uses a box that follows it.";
+        if (p->comps & LX_COMP_RIGIDBODY) r = "Moved by a Rigidbody (here or on a parent), so it can't be static. Its real mesh still blocks and bounces light.";
+        else if (p->comps & LX_COMP_CHARACTER) r = "Moved by a Character Controller (here or on a parent), so it can't be static. Its real mesh still blocks and bounces light.";
+        else if (p->comps & LX_COMP_ANIMATOR) r = "Moved by an Animator (here or on a parent), so it can't be static. Its real mesh still blocks and bounces light.";
         p = p->parent ? lx_entity_data(s, p->parent) : NULL;
     }
     if (why) *why = r;

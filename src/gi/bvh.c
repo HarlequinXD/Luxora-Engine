@@ -101,16 +101,37 @@ void lx_bvh_free(LxBvh *b) {
     memset(b, 0, sizeof *b);
 }
 
-void lx_bvh_build_from_scene(LxBvh *b, LxScene *s) {
+/* which objects a build takes: the level's static geometry, or (moving) everything that moves */
+static bool takes(LxScene *s, int i, bool moving) {
+    LxEntityData *d = &s->entities[i];
+    if (!d->alive || !d->active || !(d->comps & LX_COMP_MESH)) return false;
+    bool can_be_static = lx_entity_can_be_static(s, lx_entity_make((uint32_t)i, d->generation & 0xfffu), NULL);
+    if (!moving) return d->mesh.static_geometry && can_be_static;
+    if (can_be_static) return false;
+    for (LxEntity p = d->parent; p; p = lx_entity_data(s, p)->parent)   /* hidden by an inactive parent */
+        if (!lx_entity_data(s, p)->active) return false;
+    return true;
+}
+/* the triangles it uses: static geometry its full detail; moving objects their current pose (skinned meshes are
+ * deformed on the CPU every frame) at their lowest level of detail, to keep the per-frame build cheap */
+static const LxMeshLod *build_lod(LxEntityData *d, bool moving) {
+    const LxMesh *m = moving ? lx_skin_mesh_of(d) : lx_asset_mesh(d->mesh.mesh);
+    if (!m) return NULL;
+    return moving && !m->skin && m->lod_count > 1 ? &m->lods[m->lod_count - 1] : &m->lods[0];
+}
+#define MOVING_TRI_MAX 400000   /* the most moving triangles GI takes in one frame */
+
+static void build(LxBvh *b, LxScene *s, bool moving) {
     lx_bvh_free(b);
     lx_scene_update_transforms(s);
     /* count */
     int tris = 0;
     for (int i = 1; i < s->count; i++) {
-        LxEntityData *d = &s->entities[i];
-        if (!d->alive || !d->active || !(d->comps & LX_COMP_MESH) || !d->mesh.static_geometry ||
-            !lx_entity_can_be_static(s, lx_entity_make((uint32_t)i, d->generation & 0xfffu), NULL)) continue;
-        tris += lx_asset_mesh(d->mesh.mesh)->lods[0].index_count / 3;
+        if (!takes(s, i, moving)) continue;
+        const LxMeshLod *l = build_lod(&s->entities[i], moving);
+        int n = l ? l->index_count / 3 : 0;
+        if (moving && tris + n > MOVING_TRI_MAX) continue;
+        tris += n;
     }
     b->bounds = lx_aabb_empty();
     if (!tris) return;
@@ -126,10 +147,10 @@ void lx_bvh_build_from_scene(LxBvh *b, LxScene *s) {
     int mat_cap = 0;
     int t = 0;
     for (int i = 1; i < s->count; i++) {
+        if (!takes(s, i, moving)) continue;
         LxEntityData *d = &s->entities[i];
-        if (!d->alive || !d->active || !(d->comps & LX_COMP_MESH) || !d->mesh.static_geometry ||
-            !lx_entity_can_be_static(s, lx_entity_make((uint32_t)i, d->generation & 0xfffu), NULL)) continue;
-        const LxMesh *m = lx_asset_mesh(d->mesh.mesh);
+        const LxMeshLod *l0 = build_lod(d, moving);
+        if (!l0 || t + l0->index_count / 3 > tris) continue;
         const LxMaterial *mat = lx_asset_material(d->mesh.material);
         int mi = -1;
         for (int k = 0; k < b->material_count; k++)
@@ -142,7 +163,6 @@ void lx_bvh_build_from_scene(LxBvh *b, LxScene *s) {
                 mi = b->material_count - 1;
             }
         }
-        const LxMeshLod *l0 = &m->lods[0];
         for (int k = 0; k + 2 < l0->index_count; k += 3, t++) {
             const LxVertex *va = &l0->vertices[l0->indices[k]], *vb = &l0->vertices[l0->indices[k + 1]], *vc = &l0->vertices[l0->indices[k + 2]];
             LxVec3 a = lx_mat4_point(d->world, lx_v3(va->px, va->py, va->pz));
@@ -182,6 +202,61 @@ void lx_bvh_build_from_scene(LxBvh *b, LxScene *s) {
     lx_free(c.centroids);
     lx_free(c.tri_bounds);
 }
+
+void lx_bvh_build_from_scene(LxBvh *b, LxScene *s) { build(b, s, false); }
+
+/* Moving objects keep their triangles from frame to frame (an animated character just moves its vertices), so
+ * the BVH built for them is refitted instead of rebuilt: new triangle positions, then every node's box from the
+ * bottom up. Linear and many times cheaper than a build. Returns false when the objects or their triangle
+ * counts changed (the caller builds again). */
+bool lx_bvh_refit_moving(LxBvh *b, LxScene *s) {
+    if (!b->tri_count) return false;
+    lx_scene_update_transforms(s);
+    int t = 0;
+    for (int i = 1; i < s->count; i++) {
+        if (!takes(s, i, true)) continue;
+        LxEntityData *d = &s->entities[i];
+        const LxMeshLod *l0 = build_lod(d, true);
+        if (!l0) continue;
+        if (t + l0->index_count / 3 > b->tri_count) return false;
+        for (int k = 0; k + 2 < l0->index_count; k += 3, t++) {
+            const LxVertex *va = &l0->vertices[l0->indices[k]], *vb = &l0->vertices[l0->indices[k + 1]], *vc = &l0->vertices[l0->indices[k + 2]];
+            LxVec3 a = lx_mat4_point(d->world, lx_v3(va->px, va->py, va->pz));
+            LxVec3 bb = lx_mat4_point(d->world, lx_v3(vb->px, vb->py, vb->pz));
+            LxVec3 cc = lx_mat4_point(d->world, lx_v3(vc->px, vc->py, vc->pz));
+            b->v0[t] = a;
+            b->e1[t] = lx_sub3(bb, a);
+            b->e2[t] = lx_sub3(cc, a);
+            LxVec3 nn = lx_cross3(b->e1[t], b->e2[t]);
+            float len = lx_len3(nn);
+            b->normals[t] = len > 1e-12f ? lx_scale3(nn, 1.0f / len) : lx_v3(0, 1, 0);
+        }
+    }
+    if (t != b->tri_count) return false;
+    /* children always come after their parent in the node array: walk it backwards */
+    for (int i = b->node_count - 1; i >= 0; i--) {
+        LxBvhNode *n = &b->nodes[i];
+        LxAabb bb = lx_aabb_empty();
+        if (n->count > 0) {
+            for (int k = 0; k < n->count; k++) {
+                int tri = b->tri_index[n->left_or_first + k];
+                LxVec3 a = b->v0[tri];
+                lx_aabb_grow(&bb, a);
+                lx_aabb_grow(&bb, lx_add3(a, b->e1[tri]));
+                lx_aabb_grow(&bb, lx_add3(a, b->e2[tri]));
+            }
+        } else {
+            const LxAabb *l = &b->nodes[n->left_or_first].bounds, *r = &b->nodes[n->left_or_first + 1].bounds;
+            bb.min = lx_min3(l->min, r->min);
+            bb.max = lx_max3(l->max, r->max);
+        }
+        n->bounds = bb;
+    }
+    b->bounds = b->nodes[0].bounds;
+    return true;
+}
+/* moving objects as they are this frame (skinned characters in their current pose): GI rebuilds it when they move */
+void lx_bvh_build_moving(LxBvh *b, LxScene *s) { build(b, s, true); }
 
 static inline float ray_box(const LxAabb *bb, LxVec3 o, LxVec3 inv, float tmax) {
     float tx1 = (bb->min.x - o.x) * inv.x, tx2 = (bb->max.x - o.x) * inv.x;
