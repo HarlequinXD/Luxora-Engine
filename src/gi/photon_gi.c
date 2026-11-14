@@ -35,6 +35,7 @@ static struct {
     LxVec3 origin, cell_size;
     uint32_t version;
     float frame_count;
+    double settled_photons;   /* photons traced since the lighting last changed */
     Emitter emitters[64];
     int emitter_count;
     float total_power;
@@ -68,6 +69,7 @@ void lx_gi_shutdown(void) {
 void lx_gi_reset(void) {
     if (G.accum) memset(G.accum, 0, sizeof(float) * (size_t)G.cells * SH_FLOATS);
     G.frame_count = 0;
+    G.settled_photons = 0;
     G.version++;
 }
 
@@ -106,6 +108,7 @@ static void setup_grid(int longest_res) {
     G.filtered = lx_calloc((size_t)G.cells * SH_FLOATS, sizeof(float));
     G.scratch = lx_calloc((size_t)G.cells * SH_FLOATS, sizeof(float));
     G.frame_count = 0;
+    G.settled_photons = 0;
     G.scene_bounds = b;
 }
 
@@ -338,6 +341,28 @@ void lx_gi_update(LxScene *s, const LxGraphicsSettings *g) {
     }
     lx_scene_update_transforms(s);
     gather_emitters(s);
+    {   /* graphics settings changes (bounces, intensity...) count as a lighting change too */
+        const uint8_t *gb = (const uint8_t *)g;
+        uint64_t h = G.light_hash;
+        for (size_t i = 0; i < sizeof *g; i++) h = (h ^ gb[i]) * 1099511628211ull;
+        G.light_hash = h;
+    }
+    /* Converged: nothing has changed since enough photons were traced, so tracing more only burns every
+     * CPU core for no visible difference. Stop until a light, the sky or the geometry changes. */
+    static const double SETTLED = 24e6;
+    if (G.light_hash == G.prev_light_hash && G.frame_count >= 8 && (G.settled_photons >= SETTLED || G.frame_count >= 1024.0f) && G.filtered) {
+        G.photons_last = 0;
+        G.ms_last = (float)((lx_time() - t0) * 1000.0);
+        G.volume.origin = G.origin;
+        G.volume.cell_size = G.cell_size;
+        G.volume.res[0] = G.res[0];
+        G.volume.res[1] = G.res[1];
+        G.volume.res[2] = G.res[2];
+        G.volume.sh = G.filtered;
+        G.volume.version = G.version;
+        G.volume.valid = true;
+        return;
+    }
     if (!G.emitter_count) return;
     if (!G.threads) {
         G.threads = lx_jobs_thread_count();
@@ -366,6 +391,7 @@ void lx_gi_update(LxScene *s, const LxGraphicsSettings *g) {
         float fast = 1.0f / lx_clampf(g->gi_responsiveness, 0.01f, 1.0f);
         if (G.frame_count > fast) G.frame_count = fast;
         G.prev_light_hash = G.light_hash;
+        G.settled_photons = 0;
     }
     G.frame_count = lx_minf(G.frame_count + 1.0f, MAX_HISTORY);
     BlendJob bj = {1.0f / G.frame_count};
@@ -377,6 +403,7 @@ void lx_gi_update(LxScene *s, const LxGraphicsSettings *g) {
     memcpy(G.filtered, G.scratch, sizeof(float) * (size_t)G.cells * SH_FLOATS);
     G.version++;
     G.photons_last = photons;
+    G.settled_photons += photons;
     G.ms_last = (float)((lx_time() - t0) * 1000.0);
     G.volume.origin = G.origin;
     G.volume.cell_size = G.cell_size;
