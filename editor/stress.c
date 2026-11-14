@@ -440,11 +440,16 @@ bool ed_stress_step(int frame, int frames) {
     }
     if (frame < 5) return true;
     if (frame % 50 == 0) rescan();
-    /* the monkey sometimes ends up in the Project Manager (Close Project): open the project again */
-    if (ED.mode != ED_MODE_EDITOR && frame % 20 == 0 && !ui_has_modal(ED.ui)) {
-        static char root[LX_PATH_MAX];
-        if (!root[0] && getenv("LUXORA_STRESS_PROJECT")) lx_strcpy(root, sizeof root, getenv("LUXORA_STRESS_PROJECT"));
-        if (root[0]) { act("reopen the project"); ed_open_project(root); }
+    /* the monkey sometimes ends up in the Project Manager (Close Project): open its own project again straight away.
+     * It doesn't play there: the recent-projects list holds other people's projects (on CI, the smoke test's), and
+     * clicking one would open and edit it. */
+    static char root[LX_PATH_MAX];
+    if (!root[0] && getenv("LUXORA_STRESS_PROJECT")) lx_strcpy(root, sizeof root, getenv("LUXORA_STRESS_PROJECT"));
+    if (!root[0] && ED.mode == ED_MODE_EDITOR) lx_strcpy(root, sizeof root, ED.project.root);
+    if (ED.mode != ED_MODE_EDITOR) {
+        if (ui_has_modal(ED.ui)) { act("close the Project Manager's dialog"); ui_close_modal(ED.ui); }
+        else if (root[0]) { act("reopen the project"); ed_open_project(root); }
+        return true;
     }
     int actions = 1;   /* one per frame, as a person would: the editor gets a frame to catch up in between */
     for (int i = 0; i < actions; i++) {
