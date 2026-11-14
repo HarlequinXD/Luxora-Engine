@@ -621,6 +621,7 @@ static UiNode *preview_button(UiNode *parent) {
     b->icon_color = ui_theme(ED.ui)->success;
     b->grow = 1;
     g_preview_btn = b;
+    ui_track(&g_preview_btn);
     preview_button_sync();
     return b;
 }
@@ -1356,6 +1357,7 @@ UiNode *ed_inspector_panel(UiNode *parent) {
     body->gap = 2;
     body->on_frame = inspector_frame;
     g_inspector_body = body;
+    ui_track(&g_inspector_body);
     return p;
 }
 
@@ -1393,6 +1395,7 @@ static void env_changed(UiNode *n) { LX_UNUSED(n); ed_mark_changed(); }
 
 static void lighting_frame(UiNode *body) {
     g_lighting_body = body;
+    ui_track(&g_lighting_body);
     if (g_lighting_gen == ED.scene_gen && g_lighting_scene == ED.scene && body->first) return;
     g_lighting_scene = ED.scene;
     g_lighting_gen = ED.scene_gen;
@@ -2053,6 +2056,7 @@ UiNode *ed_console_panel(UiNode *parent) {
         b->w = 110;
         b->bg_active = t->selection;
         g_console_toggles[k] = b;
+        ui_track(&g_console_toggles[k]);
     }
     UiNode *auto_cb = ui_checkbox(ui, bar, "Auto-scroll", &ED.console_autoscroll);
     auto_cb->w = 110;
@@ -2065,6 +2069,7 @@ UiNode *ed_console_panel(UiNode *parent) {
     f->on_change = console_filter_changed;
     f->tag = 0x6c697665;
     g_console_list = ui_box(ui, p, UI_COL);
+    ui_track(&g_console_list);
     g_console_list->grow = 1;
     g_console_list->scroll = true;
     ED.console_dirty = true;
@@ -2181,6 +2186,7 @@ UiNode *ed_mixer_panel(UiNode *parent) {
     sa->icon = UI_ICON_STOP;
     sa->w = 100;
     g_mixer_sources = ui_box(ui, right, UI_COL);
+    ui_track(&g_mixer_sources);
     g_mixer_sources->grow = 1;
     g_mixer_sources->scroll = true;
     g_mixer_sources->gap = 2;
@@ -2311,6 +2317,7 @@ UiNode *ed_scenes_panel(UiNode *parent) {
     hint->fg = t->text_dim;
     hint->w = 220;
     g_scene_list = ui_box(ui, p, UI_COL);
+    ui_track(&g_scene_list);
     g_scene_list->grow = 1;
     g_scene_list->scroll = true;
     ui_pad(g_scene_list, 6, 4, 6, 4);

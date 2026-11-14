@@ -138,6 +138,12 @@ int main(int argc, char **argv) {
     }
     lx_audio_init();
     ED.ui = ui_create();
+    {   /* the editor's remembered panel pointers clear themselves when their nodes are freed */
+        UiNode **slots[] = {&ED.root, &ED.menubar, &ED.toolbar, &ED.status, &ED.hierarchy, &ED.hierarchy_list, &ED.hierarchy_search_box,
+                            &ED.inspector_tabs, &ED.inspector, &ED.lighting_panel, &ED.stats_panel, &ED.bottom_tabs, &ED.content_panel,
+                            &ED.console_panel, &ED.mixer_panel, &ED.scenes_panel, &ED.viewport, &ED.content_tree, &ED.content_grid, &ED.content_path};
+        for (size_t i = 0; i < sizeof slots / sizeof slots[0]; i++) ui_track(slots[i]);
+    }
     ed_chrome_init();
 
     static char new_root[LX_PATH_MAX];

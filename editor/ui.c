@@ -1018,8 +1018,18 @@ UiNode *ui_new(UiCtx *ui, UiNode *parent, UiType type) {
     return n;
 }
 
+/* remembered pointers to nodes (a panel's "the list I fill", "the button I update"): cleared when the node is freed */
+#define MAX_TRACKED 768
+static UiNode **g_tracked[MAX_TRACKED];
+static int g_tracked_count;
+void ui_track(UiNode **slot) {
+    for (int i = 0; i < g_tracked_count; i++) if (g_tracked[i] == slot) return;
+    if (g_tracked_count < MAX_TRACKED) g_tracked[g_tracked_count++] = slot;
+}
+
 static void free_tree(UiCtx *ui, UiNode *n);
 static void forget(UiCtx *ui, UiNode *n) {
+    for (int i = 0; i < g_tracked_count; i++) if (*g_tracked[i] == n) *g_tracked[i] = NULL;
     if (ui->hot == n) ui->hot = NULL;
     if (ui->active == n) ui->active = NULL;
     if (ui->focus == n) ui->focus = NULL;

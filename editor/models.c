@@ -336,6 +336,7 @@ void ed_animator_section(UiNode *sec, LxEntity e) {
     pb->h = 26;
     pb->disabled = ED.play != ED_EDIT || !a->clip[0];
     g_time_label = ui_label(ui, pr, "");
+    ui_track(&g_time_label);
     g_time_label->fg = ui_theme(ui)->text_dim;
     g_time_label->grow = 1;
 }
@@ -692,6 +693,7 @@ void ed_avatar_window(const char *ref) {
     list->bg = t->panel_alt;
     list->radius = 6;
     g_av_list = list;
+    ui_track(&g_av_list);
     for (int g = 0; g < 8; g++) {
         UiNode *gh = ui_label(ui, list, GROUPS[g].title);
         gh->font = UI_FONT_SMALL;
@@ -725,6 +727,7 @@ void ed_avatar_window(const char *ref) {
             dd->tag = b;
             dd->on_change = bone_choice_changed;
             g_av_rows[b] = row;
+            ui_track(&g_av_rows[b]);
         }
     }
     UiNode *bottom = ui_box(ui, body, UI_ROW);
@@ -732,6 +735,7 @@ void ed_avatar_window(const char *ref) {
     bottom->gap = 8;
     bottom->cross_align = UI_ALIGN_CENTER;
     g_av_status = ui_label(ui, bottom, "");
+    ui_track(&g_av_status);
     g_av_status->grow = 1;
     status_update();
     UiNode *cancel = ui_button(ui, bottom, "Cancel", av_cancel);

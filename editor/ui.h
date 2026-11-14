@@ -195,6 +195,7 @@ const char *ui_dragging(UiCtx *ui, const char **payload); /* active drag type or
 void ui_notify(UiCtx *ui, const char *fmt, ...);          /* toast notification */
 
 void ui_unbind_children(UiCtx *ui, UiNode *n);
+void ui_track(UiNode **slot);   /* *slot is set to NULL when the node it points at is freed */
 void ui_set_after_input(UiCtx *ui, void (*fn)(UiCtx *ui));   /* runs after clicks are handled, before drawing */   /* hide + disconnect n's children (their data is gone) */
 /* test hooks (stress tester) */
 int ui_popup_nodes(UiCtx *ui, UiNode **out, int max);

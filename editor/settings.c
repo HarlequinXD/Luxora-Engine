@@ -603,7 +603,7 @@ static void input_rebuild(void) {
         l->icon = ic;
         l->icon_color = ed_color_for_icon(ic);
         l->grow = 1;
-        if (i == g_capture_binding) { l->fg = t->warning; g_capture_label = l; }
+        if (i == g_capture_binding) { l->fg = t->warning; g_capture_label = l; ui_track(&g_capture_label); }
         UiNode *sc = ui_number(ui, row, &b->scale, 0.01f);
         sc->w = 70;
         sc->h = 22;
@@ -647,6 +647,7 @@ static void build_input(UiNode *b) {
     ax->icon = UI_ICON_PLUS;
     ax->grow = 1;
     g_input_list = ui_box(ui, left, UI_COL);
+    ui_track(&g_input_list);
     g_input_list->grow = 1;
     g_input_list->scroll = true;
     g_input_list->bg = t->field;
@@ -655,6 +656,7 @@ static void build_input(UiNode *b) {
     g_input_list->gap = 1;
     /* details */
     g_input_detail = ui_box(ui, top, UI_COL);
+    ui_track(&g_input_detail);
     g_input_detail->grow = 1;
     g_input_detail->scroll = true;
     g_input_detail->gap = 6;
@@ -726,6 +728,7 @@ static void build_input(UiNode *b) {
 static void build_category(void) {
     ui_clear(ED.ui, g_settings_body);
     g_input_detail = g_input_list = NULL;
+    ui_track(&g_input_detail);
     for (int i = 0; i < SETTINGS_PAGES; i++) if (g_nav[i]) g_nav[i]->selected = (int)g_nav[i]->tag == g_category;
     switch (g_category) {
     case 0: build_general(g_settings_body); break;
@@ -766,6 +769,7 @@ void ed_project_settings(int category) {
         b->tag = ids[i];
         b->bg_active = t->selection;
         g_nav[i] = b;
+        ui_track(&g_nav[i]);
     }
     ui_spacer(ui, nav);
     UiNode *done = ui_button(ui, nav, "Done", close_settings);
@@ -777,6 +781,7 @@ void ed_project_settings(int category) {
     note_l->font = UI_FONT_SMALL;
     note_l->fg = t->text_dim;
     g_settings_body = ui_box(ui, body, UI_COL);
+    ui_track(&g_settings_body);
     g_settings_body->grow = 1;
     g_settings_body->scroll = true;
     g_settings_body->gap = 4;
@@ -925,6 +930,7 @@ static void icon_section(UiNode *right) {
     row->cross_align = UI_ALIGN_CENTER;
     const char *problem;
     g_icon_preview = ui_image(ui, row, icon_preview_texture(&problem));
+    ui_track(&g_icon_preview);
     g_icon_preview->w = 64;
     g_icon_preview->h = 64;
     g_icon_preview->bg = t->field;
@@ -952,6 +958,7 @@ static void icon_section(UiNode *right) {
     cl->w = 70;
     cl->disabled = !ED.project.build.icon[0];
     g_icon_hint = ui_label(ui, col, "");
+    ui_track(&g_icon_hint);
     g_icon_hint->font = UI_FONT_SMALL;
     g_icon_hint->wrap = true;
     icon_refresh();
@@ -963,6 +970,7 @@ static void build_settings_fill(void) {
     UiCtx *ui = ED.ui;
     const UiTheme *t = ui_theme(ui);
     g_icon_preview = g_icon_hint = NULL;
+    ui_track(&g_icon_preview);
     ui_clear(ui, g_build_body);
     UiNode *cols = ui_box(ui, g_build_body, UI_ROW);
     cols->grow = 1;
@@ -1089,6 +1097,7 @@ static void build_settings_fill(void) {
 void ed_build_settings(void) {
     g_build_platform = (int)ED.project.build.target;
     g_build_body = ui_modal(ED.ui, "Build Settings", 820, 650);
+    ui_track(&g_build_body);
     build_settings_fill();
 }
 
