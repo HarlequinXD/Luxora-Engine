@@ -33,6 +33,8 @@ layout(set = 0, binding = 0, std140) uniform SceneUBO {
     vec4 refl_params;     // x probe mip count, y 1 = probes on
     LxLightData lights[LX_MAX_LIGHTS];
     vec4 light_shadow[LX_MAX_LIGHTS * 2];  // per light: (first atlas tile or -1, near, far, tan half-angle), (up xyz, tile resolution)
+    vec4 gi_casc[2];      // camera GI grids, finest first: xyz first cell's corner, w cell size (0 = not in use)
+    ivec4 gi_casc_res;    // x cells per side (each cascade is stacked along z in the u_gc_* textures)
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2DArrayShadow u_shadow;
@@ -42,6 +44,11 @@ layout(set = 0, binding = 4) uniform sampler3D u_gi_b;
 layout(set = 0, binding = 5) uniform sampler2DShadow u_local_shadow;   // point / spot shadow atlas, 8 x 8 tiles
 layout(set = 0, binding = 6) uniform sampler3D u_gi_vis_a;   // GI cell walls: distance / 1.5 cells along +x -x +y -y
 layout(set = 0, binding = 7) uniform sampler3D u_gi_vis_b;   //   ... and +z -z
+layout(set = 0, binding = 8) uniform sampler3D u_gc_r;       // camera GI grids (stacked along z): SH red, green, blue
+layout(set = 0, binding = 9) uniform sampler3D u_gc_g;
+layout(set = 0, binding = 10) uniform sampler3D u_gc_b;
+layout(set = 0, binding = 11) uniform sampler3D u_gc_vis_a;  // their cell walls
+layout(set = 0, binding = 12) uniform sampler3D u_gc_vis_b;
 
 // The engine builds OpenGL-style matrices; convert clip space for Vulkan (y down, z 0..1).
 vec4 lx_to_vulkan(vec4 p) {

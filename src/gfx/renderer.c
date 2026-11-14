@@ -89,6 +89,8 @@ typedef struct SceneUBO {
     float refl[4];
     float lights[MAX_LIGHTS][12];
     float light_shadow[MAX_LIGHTS][8];   /* (first tile or -1, near, far, tan half-angle), (up xyz, tile resolution) */
+    float gi_casc[LX_GI_CASCADES][4];    /* camera GI grids: first cell's corner, cell size (0 = off) */
+    int32_t gi_casc_res[4];
 } SceneUBO;
 _Static_assert(sizeof(SceneUBO) <= 4096, "SceneUBO must fit its 4 KB slot");
 
@@ -173,8 +175,13 @@ static struct {
     VkDescriptorSetLayout gi_comp_layout;
     VkPipelineLayout gi_trace_pl, gi_post_pl;
     VkPipeline gi_trace_pipe, gi_post_pipe;
-    VkDescriptorSet gi_comp_set;
-    GpuBuffer gi_nodes, gi_tris, gi_mats, gi_emit, gi_dep, gi_accum, gi_tmp_a, gi_tmp_b, gi_vis_buf;
+    GpuBuffer gi_nodes, gi_tris, gi_mats, gi_emit, gi_dep, gi_tmp_a, gi_tmp_b;   /* shared by every grid */
+    size_t gi_shared_cells;
+    struct { GpuBuffer accum, count, vis; VkDescriptorSet set; size_t cells; } gl[1 + LX_GI_CASCADES];   /* 0: scene grid, 1..: camera grids */
+    GpuImage gc[3], gc_vis[2];           /* camera grids for shading, stacked along z: SH r g b, walls */
+    int gc_res;
+    float gc_ubo[LX_GI_CASCADES][4];     /* what the shader is told: origin, cell (0 = off) */
+    uint64_t gi_frame;                   /* GI runs once per frame, from the first view's camera */
     GpuImage gi_vis[2];                  /* GI cell walls for shading: (+x -x +y -y), (+z -z) as distance / 1.5 cells */
     uint32_t gi_vis_version;
     uint32_t gi_scene_version;
@@ -927,7 +934,8 @@ static void create_gi_images(int rx, int ry, int rz) {
     for (int i = 0; i < 2; i++) {
         image_destroy(&R.gi_vis[i]);
         ImageDesc vd = {(uint32_t)rx, (uint32_t)ry, (uint32_t)rz, 1, 1, VK_FORMAT_R8G8B8A8_UNORM,
-                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_3D, false};
+                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (R.gi_gpu ? VK_IMAGE_USAGE_STORAGE_BIT : 0),
+                        VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_3D, false};
         image_create(&R.gi_vis[i], &vd);
     }
     {   /* open everywhere until the real walls arrive */
@@ -975,6 +983,8 @@ static void write_scene_sets(void) {
         write_image(s, 5, R.local_shadow.view, R.shadow_sampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         for (int c = 0; c < 3; c++) write_image(s, (uint32_t)(2 + c), R.gi[c].view, R.linear_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         for (int c = 0; c < 2; c++) write_image(s, (uint32_t)(6 + c), R.gi_vis[c].view, R.point_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        for (int c = 0; c < 3; c++) write_image(s, (uint32_t)(8 + c), R.gc[c].view, R.point_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        for (int c = 0; c < 2; c++) write_image(s, (uint32_t)(11 + c), R.gc_vis[c].view, R.point_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
 }
 
@@ -1091,53 +1101,67 @@ static void create_dummy_cube(void) {
 }
 
 /* ------------------------------------------------------------------ GPU photons */
+/* Three grids: the scene grid (level 0) and two camera grids (levels 1, 2). Each has its own running average,
+ * per-cell counts and walls, and a descriptor set pointing at them; the BVH, emitters, deposits and blur
+ * scratch are shared (grids are worked on one after another). */
+#define GI_LEVELS (1 + LX_GI_CASCADES)
+
 static void gi_comp_write(void) {
-    if (!R.gi_gpu || !R.gi_comp_set) return;
-    GpuBuffer *bufs[9] = {&R.gi_nodes, &R.gi_tris, &R.gi_mats, &R.gi_emit, &R.gi_dep, &R.gi_accum, &R.gi_tmp_a, &R.gi_tmp_b, &R.gi_vis_buf};
-    VkDescriptorBufferInfo bi[9];
-    VkDescriptorImageInfo ii[3];
-    VkWriteDescriptorSet w[12];
-    int n = 0;
-    for (int i = 0; i < 9; i++) {
-        if (!bufs[i]->buf) continue;
-        bi[i] = (VkDescriptorBufferInfo){bufs[i]->buf, 0, VK_WHOLE_SIZE};
-        w[n] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w[n].dstSet = R.gi_comp_set;
-        w[n].dstBinding = (uint32_t)(i < 8 ? i : 11);
-        w[n].descriptorCount = 1;
-        w[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        w[n].pBufferInfo = &bi[i];
-        n++;
+    if (!R.gi_gpu) return;
+    for (int l = 0; l < GI_LEVELS; l++) {
+        if (!R.gl[l].set) continue;
+        GpuBuffer *bufs[15] = {&R.gi_nodes, &R.gi_tris, &R.gi_mats, &R.gi_emit, &R.gi_dep, &R.gl[l].accum, &R.gi_tmp_a, &R.gi_tmp_b,
+                               NULL, NULL, NULL, &R.gl[l].vis, &R.gl[l].count, NULL, NULL};
+        GpuImage *imgs[15] = {0};
+        for (int c = 0; c < 3; c++) imgs[8 + c] = l == 0 ? &R.gi[c] : &R.gc[c];
+        for (int c = 0; c < 2; c++) imgs[13 + c] = l == 0 ? &R.gi_vis[c] : &R.gc_vis[c];
+        VkDescriptorBufferInfo bi[15];
+        VkDescriptorImageInfo ii[15];
+        VkWriteDescriptorSet w[15];
+        int n = 0;
+        for (int i = 0; i < 15; i++) {
+            w[n] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            w[n].dstSet = R.gl[l].set;
+            w[n].dstBinding = (uint32_t)i;
+            w[n].descriptorCount = 1;
+            if (bufs[i]) {
+                if (!bufs[i]->buf) continue;
+                bi[i] = (VkDescriptorBufferInfo){bufs[i]->buf, 0, VK_WHOLE_SIZE};
+                w[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                w[n].pBufferInfo = &bi[i];
+            } else {
+                if (!imgs[i] || !imgs[i]->view) continue;
+                ii[i] = (VkDescriptorImageInfo){VK_NULL_HANDLE, imgs[i]->view, VK_IMAGE_LAYOUT_GENERAL};
+                w[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+                w[n].pImageInfo = &ii[i];
+            }
+            n++;
+        }
+        vkUpdateDescriptorSets(R.device, (uint32_t)n, w, 0, NULL);
     }
-    for (int c = 0; c < 3; c++) {
-        if (!R.gi[c].view) continue;
-        ii[c] = (VkDescriptorImageInfo){VK_NULL_HANDLE, R.gi[c].view, VK_IMAGE_LAYOUT_GENERAL};
-        w[n] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w[n].dstSet = R.gi_comp_set;
-        w[n].dstBinding = (uint32_t)(8 + c);
-        w[n].descriptorCount = 1;
-        w[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        w[n].pImageInfo = &ii[c];
-        n++;
-    }
-    vkUpdateDescriptorSets(R.device, (uint32_t)n, w, 0, NULL);
 }
 
+static void gc_create(int res);
 static void gi_comp_init(void) {
-    VkFormatProperties fp;
+    VkFormatProperties fp, fp8;
     vkGetPhysicalDeviceFormatProperties(R.gpu, VK_FORMAT_R16G16B16A16_SFLOAT, &fp);
+    vkGetPhysicalDeviceFormatProperties(R.gpu, VK_FORMAT_R8G8B8A8_UNORM, &fp8);
     const char *force_cpu = getenv("LUXORA_GI_CPU");
-    R.gi_gpu = R.queue_compute && (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && !(force_cpu && force_cpu[0] == '1');
+    R.gi_gpu = R.queue_compute && (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) &&
+               (fp8.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && !(force_cpu && force_cpu[0] == '1');
     /* a software rasterizer (lavapipe, SwiftShader) is a CPU: no point giving it eight times the photons */
     R.gi_mult = R.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? 1 : 8;
     if (!R.gi_gpu) { LX_INFO("Photon GI on the CPU"); return; }
-    VkDescriptorSetLayoutBinding b[12];
-    for (uint32_t i = 0; i < 12; i++)
-        b[i] = (VkDescriptorSetLayoutBinding){i, (i < 8 || i == 11) ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
-                                              VK_SHADER_STAGE_COMPUTE_BIT, NULL};
-    R.gi_comp_layout = set_layout(b, 12);
+    /* 0-7 buffers (BVH nodes, triangles, materials, emitters, deposits, average, scratch x2), 8-10 SH textures,
+     * 11 walls, 12 per-cell counts, 13-14 wall textures */
+    VkDescriptorSetLayoutBinding b[15];
+    for (uint32_t i = 0; i < 15; i++) {
+        bool img = (i >= 8 && i <= 10) || i >= 13;
+        b[i] = (VkDescriptorSetLayoutBinding){i, img ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL};
+    }
+    R.gi_comp_layout = set_layout(b, 15);
     R.gi_trace_pl = pipe_layout(&R.gi_comp_layout, 1, 96, VK_SHADER_STAGE_COMPUTE_BIT);
-    R.gi_post_pl = pipe_layout(&R.gi_comp_layout, 1, 32, VK_SHADER_STAGE_COMPUTE_BIT);
+    R.gi_post_pl = pipe_layout(&R.gi_comp_layout, 1, 48, VK_SHADER_STAGE_COMPUTE_BIT);
     struct { const uint32_t *code; size_t size; VkPipelineLayout pl; VkPipeline *out; } ps[2] = {
         {lx_spv_gi_trace_comp, sizeof lx_spv_gi_trace_comp, R.gi_trace_pl, &R.gi_trace_pipe},
         {lx_spv_gi_post_comp, sizeof lx_spv_gi_post_comp, R.gi_post_pl, &R.gi_post_pipe}};
@@ -1152,14 +1176,17 @@ static void gi_comp_init(void) {
         vkDestroyShaderModule(R.device, ci.stage.module, NULL);
         if (r != VK_SUCCESS) { LX_WARN("GPU photon pipeline failed (%d): photon GI on the CPU", (int)r); R.gi_gpu = false; return; }
     }
-    R.gi_comp_set = alloc_set(R.gi_comp_layout);
-    buffer_create(&R.gi_emit, (VkDeviceSize)FRAMES * 64 * 3 * 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
+    for (int l = 0; l < GI_LEVELS; l++) R.gl[l].set = alloc_set(R.gi_comp_layout);
+    buffer_create(&R.gi_emit, (VkDeviceSize)FRAMES * GI_LEVELS * 64 * 3 * 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
     LX_INFO("Photon GI on the GPU (%s, %dx photons)", R.props.deviceName, R.gi_mult);
 }
 
 static void gi_comp_free(void) {
-    GpuBuffer *bufs[9] = {&R.gi_nodes, &R.gi_tris, &R.gi_mats, &R.gi_emit, &R.gi_dep, &R.gi_accum, &R.gi_tmp_a, &R.gi_tmp_b, &R.gi_vis_buf};
-    for (int i = 0; i < 9; i++) buffer_destroy(bufs[i]);
+    GpuBuffer *bufs[7] = {&R.gi_nodes, &R.gi_tris, &R.gi_mats, &R.gi_emit, &R.gi_dep, &R.gi_tmp_a, &R.gi_tmp_b};
+    for (int i = 0; i < 7; i++) buffer_destroy(bufs[i]);
+    for (int l = 0; l < GI_LEVELS; l++) { buffer_destroy(&R.gl[l].accum); buffer_destroy(&R.gl[l].count); buffer_destroy(&R.gl[l].vis); }
+    for (int c = 0; c < 3; c++) image_destroy(&R.gc[c]);
+    for (int c = 0; c < 2; c++) image_destroy(&R.gc_vis[c]);
     if (R.gi_trace_pipe) vkDestroyPipeline(R.device, R.gi_trace_pipe, NULL);
     if (R.gi_post_pipe) vkDestroyPipeline(R.device, R.gi_post_pipe, NULL);
     if (R.gi_trace_pl) vkDestroyPipelineLayout(R.device, R.gi_trace_pl, NULL);
@@ -1170,7 +1197,7 @@ static void gi_comp_free(void) {
 /* a device-local storage buffer filled from memory (scene data: uploaded when the static geometry changes) */
 static void gi_upload(GpuBuffer *b, const void *data, size_t bytes) {
     buffer_destroy(b);
-    buffer_create(b, bytes ? bytes : 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false);
+    buffer_create(b, bytes ? bytes : 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false);
     GpuBuffer st;
     buffer_create(&st, bytes ? bytes : 16, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true);
     if (bytes) memcpy(st.mapped, data, bytes);
@@ -1179,6 +1206,13 @@ static void gi_upload(GpuBuffer *b, const void *data, size_t bytes) {
     vkCmdCopyBuffer(cmd, st.buf, b->buf, 1, &rg);
     one_shot_end(cmd);
     buffer_destroy(&st);
+}
+static void gi_zero_buffer(GpuBuffer *b, size_t bytes) {
+    buffer_destroy(b);
+    buffer_create(b, bytes ? bytes : 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false);
+    VkCommandBuffer cmd = one_shot_begin();
+    vkCmdFillBuffer(cmd, b->buf, 0, VK_WHOLE_SIZE, 0);
+    one_shot_end(cmd);
 }
 
 static void gi_upload_scene(const LxBvh *bvh) {
@@ -1214,24 +1248,68 @@ static void gi_upload_scene(const LxBvh *bvh) {
     lx_free(mats);
 }
 
+/* deposits and blur scratch are shared: big enough for the largest grid */
+static void gi_shared_ensure(size_t cells) {
+    if (cells <= R.gi_shared_cells && R.gi_dep.buf) return;
+    vkDeviceWaitIdle(R.device);
+    gi_zero_buffer(&R.gi_dep, cells * 12 * 4);
+    gi_zero_buffer(&R.gi_tmp_a, cells * 12 * 4);
+    gi_zero_buffer(&R.gi_tmp_b, cells * 12 * 4);
+    R.gi_shared_cells = cells;
+}
+
 static void create_gi_images(int rx, int ry, int rz);
 static void write_scene_sets(void);
-/* the grid changed size: new textures and per-cell buffers (the running average starts from zero) */
+/* the scene grid changed size: new textures and buffers (the running average starts from zero) */
 static void gi_resize(int rx, int ry, int rz) {
     vkDeviceWaitIdle(R.device);
     create_gi_images(rx, ry, rz);
     write_scene_sets();
     if (!R.gi_gpu) return;
-    VkDeviceSize bytes = (VkDeviceSize)rx * (VkDeviceSize)ry * (VkDeviceSize)rz * 12 * 4;
-    GpuBuffer *bufs[4] = {&R.gi_dep, &R.gi_accum, &R.gi_tmp_a, &R.gi_tmp_b};
-    for (int i = 0; i < 4; i++) {
-        buffer_destroy(bufs[i]);
-        buffer_create(bufs[i], bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false);
+    size_t cells = (size_t)rx * (size_t)ry * (size_t)rz;
+    gi_zero_buffer(&R.gl[0].accum, cells * 12 * 4);
+    gi_zero_buffer(&R.gl[0].count, cells * 4);
+    R.gl[0].cells = cells;
+    gi_shared_ensure(cells);
+    gi_comp_write();
+}
+
+static void clear_image(VkCommandBuffer cmd, GpuImage *im, float v) {
+    image_barrier(cmd, im->img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, 0, 1, 1);
+    VkClearColorValue c = {{v, v, v, v}};
+    VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdClearColorImage(cmd, im->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &c, 1, &range);
+    image_barrier(cmd, im->img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                  VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, 0, 1, 1);
+}
+
+/* the camera grids' textures (res x res x res each, stacked along z) and buffers; res 0 = placeholders */
+static void gc_create(int res) {
+    if (R.device) vkDeviceWaitIdle(R.device);
+    int r = res > 0 ? res : 1;
+    VkImageUsageFlags storage = R.gi_gpu ? VK_IMAGE_USAGE_STORAGE_BIT : 0;
+    for (int c = 0; c < 5; c++) {
+        GpuImage *im = c < 3 ? &R.gc[c] : &R.gc_vis[c - 3];
+        image_destroy(im);
+        ImageDesc d = {(uint32_t)r, (uint32_t)r, (uint32_t)(r * LX_GI_CASCADES), 1, 1, c < 3 ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM,
+                       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | storage, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_3D, false};
+        image_create(im, &d);
     }
     VkCommandBuffer cmd = one_shot_begin();
-    for (int i = 0; i < 4; i++) vkCmdFillBuffer(cmd, bufs[i]->buf, 0, VK_WHOLE_SIZE, 0);
+    for (int c = 0; c < 5; c++) clear_image(cmd, c < 3 ? &R.gc[c] : &R.gc_vis[c - 3], c < 3 ? 0.0f : 1.0f);
     one_shot_end(cmd);
-    gi_comp_write();
+    R.gc_res = res;
+    if (R.gi_gpu && res > 0) {
+        size_t cells = (size_t)res * (size_t)res * (size_t)res;
+        for (int l = 1; l < GI_LEVELS; l++) {
+            gi_zero_buffer(&R.gl[l].accum, cells * 12 * 4);
+            gi_zero_buffer(&R.gl[l].count, cells * 4);
+            gi_zero_buffer(&R.gl[l].vis, cells * 6 * 4);
+            R.gl[l].cells = cells;
+        }
+        gi_shared_ensure(cells);
+    }
 }
 
 static void cmd_compute_barrier(VkCommandBuffer cmd, VkPipelineStageFlags src, VkAccessFlags src_access) {
@@ -1241,7 +1319,7 @@ static void cmd_compute_barrier(VkCommandBuffer cmd, VkPipelineStageFlags src, V
     vkCmdPipelineBarrier(cmd, src, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
 }
 
-/* the GI cell walls: into the two shading textures and (GPU photons) the compute buffer, when they change */
+/* the scene grid's walls (found on the CPU): into its two shading textures and its compute buffer */
 static void gi_sync_vis(const LxGiVolume *gv) {
     if (!gv->valid || gv->vis_version == R.gi_vis_version) return;
     if (gv->res[0] != R.gi_res[0] || gv->res[1] != R.gi_res[1] || gv->res[2] != R.gi_res[2]) return;
@@ -1278,93 +1356,172 @@ static void gi_sync_vis(const LxGiVolume *gv) {
             open = lx_alloc(cells * 6 * sizeof(float));
             for (size_t i = 0; i < cells * 6; i++) open[i] = 1.5f;
         }
-        gi_upload(&R.gi_vis_buf, gv->vis ? gv->vis : open, cells * 6 * sizeof(float));
+        gi_upload(&R.gl[0].vis, gv->vis ? gv->vis : open, cells * 6 * sizeof(float));
         lx_free(open);
         gi_comp_write();
     }
     R.gi_vis_version = gv->vis_version;
 }
 
-/* this frame's photons: trace, resolve + blend, blur x / y / z into the GI textures */
-static void gi_gpu_run(VkCommandBuffer cmd, FrameData *fr, const LxGiGpuFrame *f) {
-    if (f->res[0] != R.gi_res[0] || f->res[1] != R.gi_res[1] || f->res[2] != R.gi_res[2] || !R.gi_accum.buf) {
-        gi_resize(f->res[0], f->res[1], f->res[2]);
-        R.gi_scene_version = 0;
-    }
-    if (f->scene_version != R.gi_scene_version) {
-        gi_upload_scene(f->bvh);
-        R.gi_scene_version = f->scene_version;
-        gi_comp_write();
-    }
-    gi_sync_vis(lx_gi_volume());
-    if (!f->trace || !f->emitter_count || !R.gi_vis_buf.buf) return;
-    int slot = (int)(fr - R.frames);
-    memcpy((uint8_t *)R.gi_emit.mapped + (size_t)slot * 64 * 3 * 16, f->emitters, (size_t)f->emitter_count * 48);
-    /* previous frame's compute is done with the deposits before they're cleared */
+typedef struct GiTracePC {
+    float origin_cell[4];
+    int32_t res_photons[4];
+    float bmin_seed[4];
+    float bext_power[4];
+    float scales[4];
+    int32_t misc[4];
+} GiTracePC;
+typedef struct GiPostPC { int32_t res_mode[4]; float params[4]; int32_t shift[4]; } GiPostPC;
+
+static void gi_post(VkCommandBuffer cmd, int level, const int res[3], int mode, float blend, float inv_scale, int zoff, const int *shift) {
+    GiPostPC pp = {{res[0], res[1], res[2], mode}, {blend, inv_scale, (float)zoff, 0}, {0, 0, 0, 0}};
+    if (shift) { pp.shift[0] = shift[0]; pp.shift[1] = shift[1]; pp.shift[2] = shift[2]; }
+    cmd_compute_barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, R.gi_post_pipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, R.gi_post_pl, 0, 1, &R.gl[level].set, 0, NULL);
+    vkCmdPushConstants(cmd, R.gi_post_pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pp, &pp);
+    int cells = res[0] * res[1] * res[2];
+    vkCmdDispatch(cmd, (uint32_t)((cells + 63) / 64), 1, 1);
+}
+
+/* one grid's photons: clear the deposits, trace, resolve + blend, blur x / y / z into its textures */
+static void gi_trace_grid(VkCommandBuffer cmd, int slot, int level, const LxGiTrace *t, LxVec3 origin, float cell, const int res[3],
+                          int max_bounces, int zoff) {
+    if (!t->trace || !t->emitter_count) return;
+    int ebase = (slot * GI_LEVELS + level) * 64 * 3;
+    memcpy((uint8_t *)R.gi_emit.mapped + (size_t)ebase * 16, t->emitters, (size_t)t->emitter_count * 48);
+    /* whatever ran before is done with the deposits before they're cleared */
     VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     mb.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     mb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
     vkCmdFillBuffer(cmd, R.gi_dep.buf, 0, VK_WHOLE_SIZE, 0);
     cmd_compute_barrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
-    struct {
-        float origin_cell[4];
-        int32_t res_photons[4];
-        float bmin_seed[4];
-        float bext_power[4];
-        float scales[4];
-        int32_t misc[4];
-    } pc;
-    pc.origin_cell[0] = f->origin.x; pc.origin_cell[1] = f->origin.y; pc.origin_cell[2] = f->origin.z; pc.origin_cell[3] = f->cell;
-    pc.res_photons[0] = f->res[0]; pc.res_photons[1] = f->res[1]; pc.res_photons[2] = f->res[2]; pc.res_photons[3] = f->photons;
-    pc.bmin_seed[0] = f->bounds_min.x; pc.bmin_seed[1] = f->bounds_min.y; pc.bmin_seed[2] = f->bounds_min.z; memcpy(&pc.bmin_seed[3], &f->seed, 4);
-    pc.bext_power[0] = f->bounds_ext.x; pc.bext_power[1] = f->bounds_ext.y; pc.bext_power[2] = f->bounds_ext.z; pc.bext_power[3] = f->total_power;
-    pc.scales[0] = f->flux_scale; pc.scales[1] = f->deposit_scale; pc.scales[2] = (float)f->max_bounces; pc.scales[3] = (float)f->emitter_count;
-    pc.misc[0] = slot * 64 * 3; pc.misc[1] = pc.misc[2] = pc.misc[3] = 0;
+    GiTracePC pc;
+    pc.origin_cell[0] = origin.x; pc.origin_cell[1] = origin.y; pc.origin_cell[2] = origin.z; pc.origin_cell[3] = cell;
+    pc.res_photons[0] = res[0]; pc.res_photons[1] = res[1]; pc.res_photons[2] = res[2]; pc.res_photons[3] = t->photons;
+    pc.bmin_seed[0] = t->bounds_min.x; pc.bmin_seed[1] = t->bounds_min.y; pc.bmin_seed[2] = t->bounds_min.z; memcpy(&pc.bmin_seed[3], &t->seed, 4);
+    pc.bext_power[0] = t->bounds_ext.x; pc.bext_power[1] = t->bounds_ext.y; pc.bext_power[2] = t->bounds_ext.z; pc.bext_power[3] = t->total_power;
+    pc.scales[0] = t->flux_scale; pc.scales[1] = t->deposit_scale; pc.scales[2] = (float)max_bounces; pc.scales[3] = (float)t->emitter_count;
+    pc.misc[0] = ebase; pc.misc[1] = 0; memcpy(&pc.misc[2], &t->step_back, 4); pc.misc[3] = zoff;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, R.gi_trace_pipe);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, R.gi_trace_pl, 0, 1, &R.gi_comp_set, 0, NULL);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, R.gi_trace_pl, 0, 1, &R.gl[level].set, 0, NULL);
     vkCmdPushConstants(cmd, R.gi_trace_pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
-    vkCmdDispatch(cmd, (uint32_t)((f->photons + 63) / 64), 1, 1);
-    int cells = f->res[0] * f->res[1] * f->res[2];
-    struct { int32_t res_mode[4]; float params[4]; } pp = {{f->res[0], f->res[1], f->res[2], 0}, {f->blend, 1.0f / f->fixed_scale, 0, 0}};
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, R.gi_post_pipe);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, R.gi_post_pl, 0, 1, &R.gi_comp_set, 0, NULL);
-    for (int mode = 0; mode < 4; mode++) {
-        cmd_compute_barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
-        if (mode == 3)
-            for (int c = 0; c < 3; c++)
-                image_barrier(cmd, R.gi[c].img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
-                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, 0, 1, 1);
-        pp.res_mode[3] = mode;
-        vkCmdPushConstants(cmd, R.gi_post_pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pp, &pp);
-        vkCmdDispatch(cmd, (uint32_t)((cells + 63) / 64), 1, 1);
-    }
-    for (int c = 0; c < 3; c++)
-        image_barrier(cmd, R.gi[c].img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, 0, 1, 1);
+    vkCmdDispatch(cmd, (uint32_t)((t->photons + 63) / 64), 1, 1);
+    for (int mode = 0; mode < 4; mode++) gi_post(cmd, level, res, mode, t->blend, 1.0f / t->fixed_scale, zoff, NULL);
 }
 
-/* the GPU's running average (before the blur), for checking it against the CPU tracer */
-float *lx_renderer_gi_readback(int res[3]) {
-    if (!R.gi_gpu || !R.gi_accum.buf) return NULL;
+/* a camera grid finds its walls on the GPU (six short rays per cell) */
+static void gi_find_walls(VkCommandBuffer cmd, int level, LxVec3 origin, float cell, const int res[3], int zoff) {
+    cmd_compute_barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+    GiTracePC pc;
+    memset(&pc, 0, sizeof pc);
+    pc.origin_cell[0] = origin.x; pc.origin_cell[1] = origin.y; pc.origin_cell[2] = origin.z; pc.origin_cell[3] = cell;
+    pc.res_photons[0] = res[0]; pc.res_photons[1] = res[1]; pc.res_photons[2] = res[2];
+    pc.misc[1] = 1; pc.misc[3] = zoff;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, R.gi_trace_pipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, R.gi_trace_pl, 0, 1, &R.gl[level].set, 0, NULL);
+    vkCmdPushConstants(cmd, R.gi_trace_pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
+    int cells = res[0] * res[1] * res[2];
+    vkCmdDispatch(cmd, (uint32_t)((cells + 63) / 64), 1, 1);
+}
+
+static void gi_images_to(VkCommandBuffer cmd, GpuImage **ims, int n, bool writable) {
+    for (int i = 0; i < n; i++)
+        image_barrier(cmd, ims[i]->img, VK_IMAGE_ASPECT_COLOR_BIT, writable ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL,
+                      writable ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                      writable ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                      writable ? 0 : VK_ACCESS_SHADER_WRITE_BIT,
+                      writable ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                      writable ? (VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT) : VK_ACCESS_SHADER_READ_BIT, 0, 1, 1);
+}
+
+/* this frame's GPU photons: the scene grid, then each camera grid (reset / moved -> walls; then its photons) */
+static void gi_gpu_run(VkCommandBuffer cmd, FrameData *fr, const LxGiGpuFrame *f) {
+    if (f->res[0] != R.gi_res[0] || f->res[1] != R.gi_res[1] || f->res[2] != R.gi_res[2] || !R.gl[0].accum.buf) {
+        gi_resize(f->res[0], f->res[1], f->res[2]);
+        R.gi_scene_version = 0;
+    }
+    int cres = 0;
+    for (int l = 0; l < LX_GI_CASCADES; l++) if (f->casc[l].on) cres = f->casc[l].res;
+    if (cres && cres != R.gc_res) { gc_create(cres); write_scene_sets(); gi_comp_write(); }
+    if (f->scene_version != R.gi_scene_version) {
+        gi_upload_scene(f->bvh);
+        R.gi_scene_version = f->scene_version;
+        gi_comp_write();
+    }
+    gi_sync_vis(lx_gi_volume());
+    int slot = (int)(fr - R.frames);
+    if (f->t.trace && R.gl[0].vis.buf) {
+        GpuImage *ims[5] = {&R.gi[0], &R.gi[1], &R.gi[2], &R.gi_vis[0], &R.gi_vis[1]};   /* the shaders name them all */
+        gi_images_to(cmd, ims, 5, true);
+        gi_trace_grid(cmd, slot, 0, &f->t, f->origin, f->cell, f->res, f->max_bounces, 0);
+        gi_images_to(cmd, ims, 5, false);
+    }
+    bool any = false;
+    for (int l = 0; l < LX_GI_CASCADES; l++) {
+        const LxGiCascadeFrame *c = &f->casc[l];
+        R.gc_ubo[l][3] = 0;
+        if (!c->on || c->res != R.gc_res) continue;
+        if (c->reset || c->shifted || c->t.trace) any = true;
+    }
+    if (any) {
+        GpuImage *ims[5] = {&R.gc[0], &R.gc[1], &R.gc[2], &R.gc_vis[0], &R.gc_vis[1]};
+        gi_images_to(cmd, ims, 5, true);
+        for (int l = 0; l < LX_GI_CASCADES; l++) {
+            const LxGiCascadeFrame *c = &f->casc[l];
+            if (!c->on || c->res != R.gc_res) continue;
+            int res[3] = {c->res, c->res, c->res}, zoff = l * c->res;
+            if (c->reset) {
+                VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+                mb.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                mb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+                vkCmdFillBuffer(cmd, R.gl[1 + l].accum.buf, 0, VK_WHOLE_SIZE, 0);
+                vkCmdFillBuffer(cmd, R.gl[1 + l].count.buf, 0, VK_WHOLE_SIZE, 0);
+            } else if (c->shifted) {
+                gi_post(cmd, 1 + l, res, 4, 0, 0, zoff, c->shift);
+                gi_post(cmd, 1 + l, res, 5, 0, 0, zoff, c->shift);
+            }
+            if (c->reset || c->shifted) gi_find_walls(cmd, 1 + l, c->origin, c->cell, res, zoff);
+            gi_trace_grid(cmd, slot, 1 + l, &c->t, c->origin, c->cell, res, f->max_bounces, zoff);
+        }
+        gi_images_to(cmd, ims, 5, false);
+    }
+    for (int l = 0; l < LX_GI_CASCADES; l++) {
+        const LxGiCascadeFrame *c = &f->casc[l];
+        if (!c->on || !c->show || c->res != R.gc_res) continue;
+        R.gc_ubo[l][0] = c->origin.x; R.gc_ubo[l][1] = c->origin.y; R.gc_ubo[l][2] = c->origin.z; R.gc_ubo[l][3] = c->cell;
+    }
+}
+
+/* a grid's running average (before the blur), for checking: level 0 the scene grid, 1.. the camera grids */
+float *lx_renderer_gi_readback_level(int level, int res[3], LxVec3 *origin, float *cell) {
+    if (!R.gi_gpu || level < 0 || level >= GI_LEVELS || !R.gl[level].accum.buf) return NULL;
+    if (level > 0 && (R.gc_ubo[level - 1][3] <= 0 || R.gc_res <= 0)) return NULL;
     vkDeviceWaitIdle(R.device);
-    size_t bytes = (size_t)R.gi_res[0] * (size_t)R.gi_res[1] * (size_t)R.gi_res[2] * 12 * 4;
+    int r[3] = {R.gi_res[0], R.gi_res[1], R.gi_res[2]};
+    if (level > 0) r[0] = r[1] = r[2] = R.gc_res;
+    size_t bytes = (size_t)r[0] * (size_t)r[1] * (size_t)r[2] * 12 * 4;
     GpuBuffer st;
     buffer_create(&st, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
     VkCommandBuffer cmd = one_shot_begin();
     VkBufferCopy rg = {0, 0, bytes};
-    vkCmdCopyBuffer(cmd, R.gi_accum.buf, st.buf, 1, &rg);
+    vkCmdCopyBuffer(cmd, R.gl[level].accum.buf, st.buf, 1, &rg);
     one_shot_end(cmd);
     float *out = lx_alloc(bytes);
     memcpy(out, st.mapped, bytes);
     buffer_destroy(&st);
-    res[0] = R.gi_res[0]; res[1] = R.gi_res[1]; res[2] = R.gi_res[2];
+    memcpy(res, r, sizeof r);
+    if (origin) *origin = level > 0 ? lx_v3(R.gc_ubo[level - 1][0], R.gc_ubo[level - 1][1], R.gc_ubo[level - 1][2]) : lx_gi_volume()->origin;
+    if (cell) *cell = level > 0 ? R.gc_ubo[level - 1][3] : lx_gi_volume()->cell_size.x;
     return out;
 }
+float *lx_renderer_gi_readback(int res[3]) { return lx_renderer_gi_readback_level(0, res, NULL, NULL); }
 
 static void create_static_resources(void) {
     VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 16}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8192},
-                                    {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 24}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 8}};
+                                    {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 64}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 24}};
     VkDescriptorPoolCreateInfo pi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     pi.maxSets = 4096;
@@ -1373,7 +1530,7 @@ static void create_static_resources(void) {
     VK_CHECK(vkCreateDescriptorPool(R.device, &pi, NULL, &R.desc_pool));
 
     VkShaderStageFlags vf = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    VkDescriptorSetLayoutBinding sb[8] = {
+    VkDescriptorSetLayoutBinding sb[13] = {
         {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, vf, NULL},
         {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
         {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
@@ -1381,8 +1538,13 @@ static void create_static_resources(void) {
         {4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
         {5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
         {6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
-        {7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL}};
-    R.scene_layout = set_layout(sb, 8);
+        {7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
+        {8, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
+        {9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
+        {10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
+        {11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
+        {12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL}};
+    R.scene_layout = set_layout(sb, 13);
     VkDescriptorSetLayoutBinding mb[MAT_TEXTURES];
     for (uint32_t i = 0; i < MAT_TEXTURES; i++) mb[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
     R.material_layout = set_layout(mb, MAT_TEXTURES);
@@ -1516,6 +1678,7 @@ static void create_static_resources(void) {
     create_local_shadow(local_shadow_size(R.settings.shadow_resolution));
     gi_comp_init();
     create_gi_images(2, 2, 2);
+    gc_create(0);
     write_scene_sets();
     create_dummy_cube();
     R.probe_set = alloc_set(R.probe_layout);
@@ -2622,8 +2785,12 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
 
     /* ---- GI ---- */
     if (R.gi_gpu) {
-        static LxGiGpuFrame gf;
-        if (lx_gi_gpu_frame(s, gs, R.gi_mult, &gf)) gi_gpu_run(cmd, fr, &gf);
+        if (R.gi_frame != R.frame_serial) {   /* once per frame: the first view's camera places the camera grids */
+            R.gi_frame = R.frame_serial;
+            static LxGiGpuFrame gf;
+            if (lx_gi_gpu_frame(s, gs, R.gi_mult, view->eye, &gf)) gi_gpu_run(cmd, fr, &gf);
+            else for (int l = 0; l < LX_GI_CASCADES; l++) R.gc_ubo[l][3] = 0;
+        }
     } else {
         lx_gi_update(s, gs);
         upload_gi(cmd, fr);
@@ -2688,6 +2855,9 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     ubo.gi_origin[0] = gv->origin.x; ubo.gi_origin[1] = gv->origin.y; ubo.gi_origin[2] = gv->origin.z; ubo.gi_origin[3] = gi_on ? 1.0f : 0.0f;
     ubo.gi_cell[0] = gv->cell_size.x; ubo.gi_cell[1] = gv->cell_size.y; ubo.gi_cell[2] = gv->cell_size.z;
     ubo.gi_res[0] = (float)gv->res[0]; ubo.gi_res[1] = (float)gv->res[1]; ubo.gi_res[2] = (float)gv->res[2];
+    for (int l = 0; l < LX_GI_CASCADES; l++) memcpy(ubo.gi_casc[l], R.gc_ubo[l], sizeof R.gc_ubo[l]);
+    if (!gi_on || !R.gi_gpu) for (int l = 0; l < LX_GI_CASCADES; l++) ubo.gi_casc[l][3] = 0;
+    ubo.gi_casc_res[0] = R.gc_res;
     ubo.counts[0] = nl; ubo.counts[1] = cascades; ubo.counts[2] = R.shadow_res;
     /* point and spot shadows: the shadow-casting lights nearest the camera whose reach is in view get atlas tiles */
     int local_n = 0, local_light[LOCAL_SHADOW_LIGHTS];

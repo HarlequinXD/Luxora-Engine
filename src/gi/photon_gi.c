@@ -498,7 +498,62 @@ void lx_gi_update(LxScene *s, const LxGraphicsSettings *g) {
 }
 
 /* ---------------- the GPU tracer's side: the renderer runs the photons in compute shaders ---------------- */
-bool lx_gi_gpu_frame(LxScene *s, const LxGraphicsSettings *g, int photon_multiplier, LxGiGpuFrame *f) {
+/* Fill one GPU dispatch: emitters (sun and sky powers follow the area photons are aimed at), budget, scales. */
+static void fill_trace(LxGiTrace *t, int photons, LxAabb aim, float step_back, float cell, LxVec3 near_c, float near_r) {
+    LxVec3 ext = lx_sub3(aim.max, aim.min);
+    t->trace = true;
+    t->photons = photons;
+    t->seed = (uint32_t)(G.seed >> 32) ^ (uint32_t)G.seed ^ (uint32_t)(cell * 7919.0f);
+    t->bounds_min = aim.min;
+    t->bounds_ext = ext;
+    t->step_back = step_back;
+    float chroma = 1.0f, cum = 0;
+    int n = 0;
+    for (int i = 0; i < G.emitter_count; i++) {
+        const Emitter *e = &G.emitters[i];
+        float power = e->power;
+        float lum = luminance(e->color);
+        if (e->kind == LX_LIGHT_DIRECTIONAL)
+            power = lum * (fabsf(e->dir.y) * ext.x * ext.z + fabsf(e->dir.x) * ext.y * ext.z + fabsf(e->dir.z) * ext.x * ext.y);
+        else if (e->kind == 3)
+            power = lum * LX_PI * ext.x * ext.z;
+        else if (near_r > 0 && lx_len3(lx_sub3(e->pos, near_c)) > near_r * 6.0f)
+            continue;   /* a lamp far beyond a camera grid hardly lights it: don't spend its photons there */
+        if (power <= 0) continue;
+        LxVec3 c = lx_scale3(e->color, 1.0f / (lum > 1e-6f ? lum : 1.0f));
+        chroma = lx_maxf(chroma, lx_maxf(c.x, lx_maxf(c.y, c.z)));
+        cum += power;
+        float *E = t->emitters[n++];
+        E[0] = e->pos.x; E[1] = e->pos.y; E[2] = e->pos.z; E[3] = (float)e->kind;
+        E[4] = e->dir.x; E[5] = e->dir.y; E[6] = e->dir.z; E[7] = e->cos_cone;
+        E[8] = c.x; E[9] = c.y; E[10] = c.z; E[11] = cum;
+    }
+    t->emitter_count = n;
+    t->total_power = cum;
+    t->flux_scale = cum / (float)photons;
+    /* Deposits are summed with integer atomics (every Vulkan GPU has them). The fixed-point scale is
+     * chosen so even every deposit of the frame landing in one cell can't overflow: a deposit is at
+     * most flux x chroma x 1.4 (albedo / survival over the bounces) x 0.49 (largest SH basis value). */
+    float inv_area = 1.0f / (cell * cell);
+    double worst = (double)photons * (double)(G.max_bounces + 1) * (double)t->flux_scale * inv_area * chroma * 1.4 * 0.49;
+    t->fixed_scale = (float)(2.0e9 / lx_maxf((float)worst, 1e-20f));
+    t->deposit_scale = t->fixed_scale * inv_area;
+    if (n == 0) t->trace = false;
+}
+
+/* camera grids: per cascade where it is and how settled it is */
+static struct {
+    bool on;
+    int origin[3];        /* in its own cells */
+    float cell;
+    int res;
+    uint32_t scene_version;
+    uint64_t light_hash;
+    float frame_count;
+    double settled;
+} C[LX_GI_CASCADES];
+
+bool lx_gi_gpu_frame(LxScene *s, const LxGraphicsSettings *g, int photon_multiplier, LxVec3 eye, LxGiGpuFrame *f) {
     memset(f, 0, sizeof *f);
     double t0 = lx_time();
     int st = prepare(s, g, true);
@@ -508,43 +563,76 @@ bool lx_gi_gpu_frame(LxScene *s, const LxGraphicsSettings *g, int photon_multipl
     f->res[0] = G.res[0]; f->res[1] = G.res[1]; f->res[2] = G.res[2];
     f->origin = G.origin;
     f->cell = G.cell_size.x;
+    f->max_bounces = G.max_bounces;
+    int photons = g->gi_photons_per_frame < 256 ? 256 : g->gi_photons_per_frame;
+    photons *= photon_multiplier < 1 ? 1 : photon_multiplier;
+    photons = (photons + 63) / 64 * 64;
+    LxVec3 sext = lx_sub3(G.scene_bounds.max, G.scene_bounds.min);
+    float step_back = lx_len3(sext) * 1.5f;
     if (st == 2) {
-        int photons = g->gi_photons_per_frame < 256 ? 256 : g->gi_photons_per_frame;
-        photons *= photon_multiplier < 1 ? 1 : photon_multiplier;
-        photons = (photons + 63) / 64 * 64;
-        f->trace = true;
-        f->photons = photons;
-        f->max_bounces = G.max_bounces;
-        f->seed = (uint32_t)(G.seed >> 32) ^ (uint32_t)G.seed;
-        f->flux_scale = G.total_power / (float)photons;
-        f->total_power = G.total_power;
-        f->bounds_min = G.scene_bounds.min;
-        f->bounds_ext = lx_sub3(G.scene_bounds.max, G.scene_bounds.min);
-        /* Deposits are summed with integer atomics (every Vulkan GPU has them). The fixed-point scale is
-         * chosen so even every deposit of the frame landing in one cell can't overflow: a deposit is at
-         * most flux x chroma x 1.4 (albedo / survival over the bounces) x 0.49 (largest SH basis value). */
-        float chroma = 1.0f;
-        f->emitter_count = G.emitter_count;
-        float cum = 0;
-        for (int i = 0; i < G.emitter_count; i++) {
-            const Emitter *e = &G.emitters[i];
-            float lum = luminance(e->color);
-            LxVec3 c = lx_scale3(e->color, 1.0f / (lum > 1e-6f ? lum : 1.0f));
-            chroma = lx_maxf(chroma, lx_maxf(c.x, lx_maxf(c.y, c.z)));
-            cum += e->power;
-            float *E = f->emitters[i];
-            E[0] = e->pos.x; E[1] = e->pos.y; E[2] = e->pos.z; E[3] = (float)e->kind;
-            E[4] = e->dir.x; E[5] = e->dir.y; E[6] = e->dir.z; E[7] = e->cos_cone;
-            E[8] = c.x; E[9] = c.y; E[10] = c.z; E[11] = cum;
-        }
-        float inv_area = 1.0f / (G.cell_size.x * G.cell_size.x);
-        double worst = (double)photons * (double)(G.max_bounces + 1) * (double)f->flux_scale * inv_area * chroma * 1.4 * 0.49;
-        f->fixed_scale = (float)(2.0e9 / lx_maxf((float)worst, 1e-20f));
-        f->deposit_scale = f->fixed_scale * inv_area;
-        f->blend = next_blend(g);
+        fill_trace(&f->t, photons, G.scene_bounds, step_back, G.cell_size.x, lx_v3(0, 0, 0), 0);
+        f->t.blend = next_blend(g);
         G.version++;
         G.photons_last = photons;
         G.settled_photons += photons;
+    }
+    /* Camera grids, finest first: the same number of cells as the scene grid's quality, half the cell size of
+     * the one outside it, centred on the camera in steps of 2 cells. Only where the scene grid is coarser. */
+    int cres = g->gi_grid_resolution < 16 ? 16 : g->gi_grid_resolution > 64 ? 64 : g->gi_grid_resolution;
+    float cell0 = 16.0f / (float)cres;
+    for (int l = 0; l < LX_GI_CASCADES; l++) {
+        LxGiCascadeFrame *cf = &f->casc[l];
+        float cell = cell0 * (float)(1 << l);
+        bool want = cell < G.cell_size.x * 0.75f && isfinite(eye.x) && isfinite(eye.y) && isfinite(eye.z);
+        if (!want) { C[l].on = false; continue; }
+        int o[3];
+        for (int a = 0; a < 3; a++) {
+            int c = (int)floorf(lx_comp3(eye, a) / cell) - cres / 2;
+            o[a] = c >> 1 << 1;   /* even cells: it moves in steps of two */
+        }
+        bool reset = !C[l].on || C[l].cell != cell || C[l].res != cres || C[l].scene_version != G.scene_version;
+        cf->on = true;
+        cf->reset = reset;
+        cf->res = cres;
+        cf->cell = cell;
+        if (!reset && (o[0] != C[l].origin[0] || o[1] != C[l].origin[1] || o[2] != C[l].origin[2])) {
+            cf->shifted = true;
+            for (int a = 0; a < 3; a++) cf->shift[a] = o[a] - C[l].origin[a];
+        }
+        cf->origin = lx_v3(o[0] * cell, o[1] * cell, o[2] * cell);
+        if (reset) { C[l].frame_count = 0; C[l].settled = 0; C[l].light_hash = 0; }
+        if (cf->shifted) C[l].settled = 0;   /* new cells at the edge: keep tracing */
+        C[l].on = true;
+        C[l].cell = cell;
+        C[l].res = cres;
+        C[l].scene_version = G.scene_version;
+        memcpy(C[l].origin, o, sizeof o);
+        /* trace unless settled: the same rule as the scene grid, per cascade */
+        bool changed = C[l].light_hash != G.light_hash;
+        if (changed) {
+            float fast = 1.0f / lx_clampf(g->gi_responsiveness, 0.01f, 1.0f);
+            if (C[l].frame_count > fast) C[l].frame_count = fast;
+            C[l].light_hash = G.light_hash;
+            C[l].settled = 0;
+        }
+        cf->show = C[l].frame_count >= 2;
+        if (C[l].frame_count >= 8 && C[l].settled >= 24e6 && !changed && !cf->shifted) continue;
+        if (!G.emitter_count) continue;
+        /* aim the sun and sky at this grid plus a margin of half its size (light bouncing in from around it),
+         * over the scene's full height (sky photons must start above every roof) */
+        float size = cell * (float)cres;
+        LxVec3 lo = lx_madd3(cf->origin, lx_v3(1, 1, 1), -size * 0.5f), hi = lx_madd3(cf->origin, lx_v3(1, 1, 1), size * 1.5f);
+        LxAabb aim;
+        aim.min = lx_v3(lx_maxf(lo.x, G.scene_bounds.min.x), G.scene_bounds.min.y, lx_maxf(lo.z, G.scene_bounds.min.z));
+        aim.max = lx_v3(lx_minf(hi.x, G.scene_bounds.max.x), G.scene_bounds.max.y, lx_minf(hi.z, G.scene_bounds.max.z));
+        if (aim.max.x <= aim.min.x || aim.max.z <= aim.min.z) continue;   /* the camera is outside the scene */
+        LxVec3 centre = lx_madd3(cf->origin, lx_v3(1, 1, 1), size * 0.5f);
+        fill_trace(&cf->t, photons, aim, step_back, cell, centre, size);
+        if (!cf->t.trace) continue;
+        C[l].frame_count = lx_minf(C[l].frame_count + 1.0f, 1024.0f);
+        cf->t.blend = 1.0f / C[l].frame_count;
+        C[l].settled += photons;
+        G.photons_last += photons;
     }
     G.volume.sh = NULL;   /* the solution lives in the GPU's textures */
     G.volume.version = G.version;

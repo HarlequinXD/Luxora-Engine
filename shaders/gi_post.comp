@@ -1,19 +1,24 @@
 #version 450
-// After gi_trace.comp: mode 0 turns this frame's fixed-point deposits into floats and blends them into the
-// running average; modes 1-3 are the [1,2,1] blur along x, y and z (the last writes the three GI textures).
+// After gi_trace.comp, for one grid (the scene's or a camera cascade):
+//   mode 0: this frame's fixed-point deposits -> floats, blended into the running average (per-cell sample
+//           counts, so cells new to a moving camera grid fill in at once)
+//   modes 1-3: the [1,2,1] blur along x, y, z (not through walls); the last writes the three GI textures
+//   mode 4/5: the camera grid moved by `shift` cells: move the average (and counts) through the scratch buffers
 layout(local_size_x = 64) in;
 layout(std430, set = 0, binding = 4) buffer Deposits { int dep[]; };
 layout(std430, set = 0, binding = 5) buffer Accum { float accum[]; };
 layout(std430, set = 0, binding = 6) buffer TmpA { float tmp_a[]; };
 layout(std430, set = 0, binding = 7) buffer TmpB { float tmp_b[]; };
 layout(std430, set = 0, binding = 11) readonly buffer Vis { float vis[]; };   // per cell: distance to the first surface (cells)
+layout(std430, set = 0, binding = 12) buffer Count { float count[]; };       // per cell: frames averaged so far
 layout(set = 0, binding = 8, rgba16f) uniform writeonly image3D out_r;
 layout(set = 0, binding = 9, rgba16f) uniform writeonly image3D out_g;
 layout(set = 0, binding = 10, rgba16f) uniform writeonly image3D out_b;
 
 layout(push_constant) uniform PC {
     ivec4 res_mode;   // grid resolution, mode
-    vec4 params;      // blend weight, 1 / fixed-point scale
+    vec4 params;      // blend weight (1 / frames since the light changed), 1 / fixed-point scale, texture z offset
+    ivec4 shift;      // modes 4/5: how far the grid moved, in cells
 } pc;
 
 float src(int mode, int i) { return mode == 1 ? accum[i] : mode == 2 ? tmp_a[i] : tmp_b[i]; }
@@ -24,14 +29,30 @@ void main() {
     int i = int(gl_GlobalInvocationID.x);
     if (i >= cells) return;
     int mode = pc.res_mode.w;
+    ivec3 c = ivec3(i % r.x, (i / r.x) % r.y, i / (r.x * r.y));
     if (mode == 0) {
+        float n = count[i] + 1.0;
+        float a = max(1.0 / n, pc.params.x);   // a cell's own first frames weigh fully, then the grid's history rule
         for (int k = 0; k < 12; k++) {
             float f = float(dep[i * 12 + k]) * pc.params.y;
-            accum[i * 12 + k] += (f - accum[i * 12 + k]) * pc.params.x;
+            accum[i * 12 + k] += (f - accum[i * 12 + k]) * a;
         }
+        count[i] = min(n, 1024.0);
         return;
     }
-    ivec3 c = ivec3(i % r.x, (i / r.x) % r.y, i / (r.x * r.y));
+    if (mode == 4) {   // new cell c holds what old cell c + shift had (or nothing)
+        ivec3 o = c + pc.shift.xyz;
+        bool in_old = all(greaterThanEqual(o, ivec3(0))) && all(lessThan(o, r));
+        int j = (o.z * r.y + o.y) * r.x + o.x;
+        for (int k = 0; k < 12; k++) tmp_a[i * 12 + k] = in_old ? accum[j * 12 + k] : 0.0;
+        tmp_b[i * 12] = in_old ? count[j] : 0.0;
+        return;
+    }
+    if (mode == 5) {
+        for (int k = 0; k < 12; k++) accum[i * 12 + k] = tmp_a[i * 12 + k];
+        count[i] = tmp_b[i * 12];
+        return;
+    }
     int axis = mode - 1;
     int stride = axis == 0 ? 1 : axis == 1 ? r.x : r.x * r.y;
     int p = c[axis], len = r[axis];
@@ -44,8 +65,9 @@ void main() {
     if (mode == 1) for (int k = 0; k < 12; k++) tmp_a[i * 12 + k] = o[k];
     else if (mode == 2) for (int k = 0; k < 12; k++) tmp_b[i * 12 + k] = o[k];
     else {
-        imageStore(out_r, c, vec4(o[0], o[1], o[2], o[3]));
-        imageStore(out_g, c, vec4(o[4], o[5], o[6], o[7]));
-        imageStore(out_b, c, vec4(o[8], o[9], o[10], o[11]));
+        ivec3 at = c + ivec3(0, 0, int(pc.params.z));
+        imageStore(out_r, at, vec4(o[0], o[1], o[2], o[3]));
+        imageStore(out_g, at, vec4(o[4], o[5], o[6], o[7]));
+        imageStore(out_b, at, vec4(o[8], o[9], o[10], o[11]));
     }
 }

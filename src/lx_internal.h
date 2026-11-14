@@ -437,22 +437,38 @@ void lx_gi_update(LxScene *s, const LxGraphicsSettings *g);
 const LxGiVolume *lx_gi_volume(void);
 int lx_gi_last_photon_count(void);
 /* the GPU tracer: what the renderer needs to run this frame's photons in compute shaders */
+typedef struct LxGiTrace {         /* one photon dispatch into one grid */
+    bool trace;                    /* false: converged, keep the last solution */
+    int photons, emitter_count;
+    uint32_t seed;
+    float flux_scale, total_power, fixed_scale, deposit_scale, blend, step_back;
+    LxVec3 bounds_min, bounds_ext; /* where sun and sky photons are aimed */
+    float emitters[64][12];        /* (pos, kind), (dir, cos cone), (colour / luminance, cumulative power) */
+} LxGiTrace;
+#define LX_GI_CASCADES 2
+typedef struct LxGiCascadeFrame {  /* a finer grid centred on the camera (cascade 0 is the finest) */
+    bool on;                       /* the scene grid is coarser than this: use it */
+    bool reset;                    /* new geometry or just switched on: clear it and find its walls again */
+    bool shifted;                  /* followed the camera by `shift` cells: move what it has, find walls again */
+    bool show;                     /* has enough light gathered to be drawn */
+    int shift[3], res;
+    LxVec3 origin;                 /* world position of its first cell's corner */
+    float cell;
+    LxGiTrace t;
+} LxGiCascadeFrame;
 typedef struct LxGiGpuFrame {
     const LxBvh *bvh;
     uint32_t scene_version;        /* the BVH changed when this does: upload it again */
-    int res[3];
+    int res[3], max_bounces;
     LxVec3 origin;
     float cell;
-    bool trace;                    /* false: converged, keep the last solution */
-    int photons, max_bounces, emitter_count;
-    uint32_t seed;
-    float flux_scale, total_power, fixed_scale, deposit_scale, blend;
-    LxVec3 bounds_min, bounds_ext;
-    float emitters[64][12];        /* (pos, kind), (dir, cos cone), (colour / luminance, cumulative power) */
+    LxGiTrace t;                   /* the whole-scene grid */
+    LxGiCascadeFrame casc[LX_GI_CASCADES];
 } LxGiGpuFrame;
-bool lx_gi_gpu_frame(LxScene *s, const LxGraphicsSettings *g, int photon_multiplier, LxGiGpuFrame *f);
+bool lx_gi_gpu_frame(LxScene *s, const LxGraphicsSettings *g, int photon_multiplier, LxVec3 eye, LxGiGpuFrame *f);
 float *lx_gi_cpu_reference(LxScene *s, const LxGraphicsSettings *g, int frames, int res[3]);
-float *lx_renderer_gi_readback(int res[3]);
+float *lx_renderer_gi_readback(int res[3]);   /* the GPU tracer's running average (NULL when GI runs on the CPU) */
+float *lx_renderer_gi_readback_level(int level, int res[3], LxVec3 *origin, float *cell);   /* 0 scene grid, 1.. camera grids */
 LxVec3 lx_gi_irradiance(LxVec3 p, LxVec3 n, bool walls);
 void lx_gi_set_walls(bool on);   /* tests: false = the old leaky grid */   /* the shader's GI lookup on the CPU (tests) */   /* the GPU tracer's running average (NULL when GI runs on the CPU) */
 float lx_gi_last_ms(void);

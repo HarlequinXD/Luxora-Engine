@@ -1058,6 +1058,65 @@ static void s_leak_check(void) {
     lx_free(px);
 }
 
+/* the camera grids carry the same light as the scene grid around the camera: both summed over 4 m blocks of the
+ * fine grid's area, as irradiance x cell area (a grid's cells hold irradiance, so finer cells hold the same values
+ * over more cells), must match in total and in where it falls */
+static void s_gi_view(void) {
+    ED.game_view = false;
+    ED.cam_pos = lx_v3(0, 8, 12);
+    ED.cam_yaw = 0;
+    ED.cam_pitch = -30;
+}
+static void s_casc_compare(void) {
+    int sr[3];
+    LxVec3 so;
+    float scell;
+    float *scene = lx_renderer_gi_readback_level(0, sr, &so, &scell);
+    if (!scene) { LX_INFO("[smoke] photon GI runs on the CPU here - camera grid check skipped"); return; }
+    int checked = 0;
+    for (int level = 1; level <= 2; level++) {
+        int cr[3];
+        LxVec3 co;
+        float ccell;
+        float *casc = lx_renderer_gi_readback_level(level, cr, &co, &ccell);
+        if (!casc) continue;
+        checked++;
+        const int B = 4;   /* blocks per side over the fine grid */
+        double cs[64] = {0}, ss[64] = {0}, ct = 0, st = 0;
+        float size = ccell * (float)cr[0];
+        for (int z = 0; z < cr[2]; z++)
+            for (int y = 0; y < cr[1]; y++)
+                for (int x = 0; x < cr[0]; x++) {
+                    size_t i = ((size_t)(z * cr[1] + y) * (size_t)cr[0] + (size_t)x) * 12;
+                    int b = ((z * B / cr[2]) * B + y * B / cr[1]) * B + x * B / cr[0];
+                    double v = (casc[i] + casc[i + 4] + casc[i + 8]) * (double)ccell * ccell;
+                    cs[b] += v; ct += v;
+                }
+        for (int z = 0; z < sr[2]; z++)
+            for (int y = 0; y < sr[1]; y++)
+                for (int x = 0; x < sr[0]; x++) {
+                    LxVec3 c = lx_v3(so.x + (x + 0.5f) * scell, so.y + (y + 0.5f) * scell, so.z + (z + 0.5f) * scell);
+                    LxVec3 g = lx_scale3(lx_sub3(c, co), 1.0f / size);
+                    if (g.x < 0 || g.y < 0 || g.z < 0 || g.x >= 1 || g.y >= 1 || g.z >= 1) continue;
+                    size_t i = ((size_t)(z * sr[1] + y) * (size_t)sr[0] + (size_t)x) * 12;
+                    int b = ((int)(g.z * B) * B + (int)(g.y * B)) * B + (int)(g.x * B);
+                    double v = (scene[i] + scene[i + 4] + scene[i + 8]) * (double)scell * scell;
+                    ss[b] += v; st += v;
+                }
+        double sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+        int nb = B * B * B;
+        for (int b = 0; b < nb; b++) { sa += cs[b]; sb += ss[b]; saa += cs[b] * cs[b]; sbb += ss[b] * ss[b]; sab += cs[b] * ss[b]; }
+        double cov = sab - sa * sb / nb, va = saa - sa * sa / nb, vb = sbb - sb * sb / nb;
+        double corr = (va > 0 && vb > 0) ? cov / sqrt(va * vb) : 0;
+        SMOKE_CHECK(st > 0 && ct > st * 0.7 && ct < st * 1.3, "camera grid %d carries the scene grid's light (%.4g vs %.4g, cells %.2f m vs %.2f m)",
+                    level, ct, st, ccell, scell);
+        SMOKE_CHECK(corr > 0.8, "camera grid %d puts it in the same places (correlation %.3f)", level, corr);
+        lx_free(casc);
+    }
+    SMOKE_CHECK(checked > 0, "the template level uses camera grids");
+    lx_free(scene);
+}
+
 static const struct { int frame; SmokeFn fn; const char *what; } TPL_STEPS[] = {
     {0, s_tpl_close, "close the project"},
     {4, s_tpl_dialog, "New Project"},
@@ -1073,12 +1132,14 @@ static const struct { int frame; SmokeFn fn; const char *what; } TPL_STEPS[] = {
     {164, s_tpl_tps_playing, "the Third Person template runs"},
     {166, s_tpl_stop, "stop"},
     {170, s_tpl_stopped, "edit mode, mouse free"},
-    {172, s_ls_setup, "a point light between two walls"},
-    {182, s_ls_shot_off, "picture with its shadows off"},
-    {186, s_ls_on, "turn its shadows on"},
-    {196, s_ls_shot_on, "picture with its shadows on"},
-    {200, s_ls_check, "the floor behind each wall is in shadow"},
-    {290, s_gi_compare, "GPU photon GI matches the CPU tracer"},
+    {172, s_gi_view, "look over the arena and let the GI settle"},
+    {240, s_gi_compare, "GPU photon GI matches the CPU tracer"},
+    {241, s_casc_compare, "the camera grids agree with the scene grid"},
+    {242, s_ls_setup, "a point light between two walls"},
+    {252, s_ls_shot_off, "picture with its shadows off"},
+    {256, s_ls_on, "turn its shadows on"},
+    {266, s_ls_shot_on, "picture with its shadows on"},
+    {270, s_ls_check, "the floor behind each wall is in shadow"},
     {292, s_leak_setup, "two rooms, a thin wall, a lamp in one"},
     {352, s_leak_shot, "picture of the two rooms"},
     {356, s_leak_check, "the dark room stays dark"},

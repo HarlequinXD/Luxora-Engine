@@ -127,9 +127,20 @@ float local_shadow(int i, vec3 world, vec3 ng) {
  * see the point (a wall in between, or buried inside solid geometry), so light doesn't leak through walls.
  * Returns the blended L1 SH of the red, green and blue channels. Same rule as the CPU (lx_gi_irradiance). */
 struct GiSH { vec4 r, g, b; };
-GiSH gi_gather(vec3 world, vec3 ng) {
-    ivec3 res = ivec3(u.gi_res.xyz);
-    vec3 g = (world + ng * u.gi_cell.x * 0.25 - u.gi_origin.xyz) / u.gi_cell.xyz;
+GiSH gi_mix(GiSH a, GiSH b, float t) { return GiSH(mix(a.r, b.r, t), mix(a.g, b.g, t), mix(a.b, b.b, t)); }
+// level -1: the scene grid; 0, 1: the camera grids (stacked along z in their textures)
+GiSH gi_gather_level(int level, vec3 q) {
+    ivec3 res;
+    vec3 g;
+    int zoff = 0;
+    if (level < 0) {
+        res = ivec3(u.gi_res.xyz);
+        g = (q - u.gi_origin.xyz) / u.gi_cell.xyz;
+    } else {
+        res = ivec3(u.gi_casc_res.x);
+        g = (q - u.gi_casc[level].xyz) / u.gi_casc[level].w;
+        zoff = level * u.gi_casc_res.x;
+    }
     vec3 t = g - 0.5;
     ivec3 base = ivec3(floor(t));
     vec3 f = t - vec3(base);
@@ -141,11 +152,18 @@ GiSH gi_gather(vec3 world, vec3 ng) {
         if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, res))) continue;
         vec3 ww = mix(1.0 - f, f, vec3(o));
         float w = ww.x * ww.y * ww.z;
-        vec4 cr = texelFetch(u_gi_r, c, 0), cg = texelFetch(u_gi_g, c, 0), cb = texelFetch(u_gi_b, c, 0);
+        ivec3 at = c + ivec3(0, 0, zoff);
+        vec4 cr, cg, cb, va;
+        vec2 vb;
+        if (level < 0) {
+            cr = texelFetch(u_gi_r, at, 0); cg = texelFetch(u_gi_g, at, 0); cb = texelFetch(u_gi_b, at, 0);
+            va = texelFetch(u_gi_vis_a, at, 0) * 1.5; vb = texelFetch(u_gi_vis_b, at, 0).xy * 1.5;
+        } else {
+            cr = texelFetch(u_gc_r, at, 0); cg = texelFetch(u_gc_g, at, 0); cb = texelFetch(u_gc_b, at, 0);
+            va = texelFetch(u_gc_vis_a, at, 0) * 1.5; vb = texelFetch(u_gc_vis_b, at, 0).xy * 1.5;
+        }
         plain_sum.r += cr * w; plain_sum.g += cg * w; plain_sum.b += cb * w;
         wp += w;
-        vec4 va = texelFetch(u_gi_vis_a, c, 0) * 1.5;
-        vec2 vb = texelFetch(u_gi_vis_b, c, 0).xy * 1.5;
         vec3 d = g - (vec3(c) + 0.5);
         vec3 wall = vec3(d.x >= 0.0 ? va.x : va.y, d.y >= 0.0 ? va.z : va.w, d.z >= 0.0 ? vb.x : vb.y);
         if (any(lessThan(wall, abs(d) - 0.02))) continue;
@@ -155,6 +173,28 @@ GiSH gi_gather(vec3 world, vec3 ng) {
     if (wv > 1e-6) return GiSH(vis_sum.r / wv, vis_sum.g / wv, vis_sum.b / wv);
     if (wp > 1e-6) return GiSH(plain_sum.r / wp, plain_sum.g / wp, plain_sum.b / wp);
     return GiSH(vec4(0.0), vec4(0.0), vec4(0.0));
+}
+// how far inside a camera grid a point is: 1 well inside, fading to 0 over the last 3 cells at its edge
+float gi_casc_fade(int level, vec3 q) {
+    if (u.gi_casc[level].w <= 0.0) return 0.0;
+    vec3 g = (q - u.gi_casc[level].xyz) / u.gi_casc[level].w;
+    vec3 edge = min(g, vec3(u.gi_casc_res.x) - g);
+    return clamp((min(min(edge.x, edge.y), edge.z) - 1.0) / 3.0, 0.0, 1.0);
+}
+/* The GI around a surface point: the finest grid that covers it, blending into the coarser ones near its edge.
+ * Within each grid, the 8 surrounding cells, trilinear, leaving out cells that can't see the point (a wall in
+ * between, or buried inside solid geometry), so light doesn't leak through walls (as lx_gi_irradiance). */
+GiSH gi_gather(vec3 world, vec3 ng) {
+    float f0 = gi_casc_fade(0, world + ng * u.gi_casc[0].w * 0.25);
+    if (f0 >= 1.0) return gi_gather_level(0, world + ng * u.gi_casc[0].w * 0.25);
+    float f1 = gi_casc_fade(1, world + ng * u.gi_casc[1].w * 0.25);
+    GiSH coarse;
+    if (f1 >= 1.0) coarse = gi_gather_level(1, world + ng * u.gi_casc[1].w * 0.25);
+    else {
+        coarse = gi_gather_level(-1, world + ng * u.gi_cell.x * 0.25);
+        if (f1 > 0.0) coarse = gi_mix(coarse, gi_gather_level(1, world + ng * u.gi_casc[1].w * 0.25), f1);
+    }
+    return f0 > 0.0 ? gi_mix(coarse, gi_gather_level(0, world + ng * u.gi_casc[0].w * 0.25), f0) : coarse;
 }
 vec3 gi_eval(GiSH sh, vec3 n) {
     // L1 SH irradiance (coeff order: L0, y, z, x) with clamped-cosine convolution
