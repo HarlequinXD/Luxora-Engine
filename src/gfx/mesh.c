@@ -328,6 +328,7 @@ void lx_mesh_generate_lods(LxMesh *m) {
 
 void lx_mesh_destroy(LxMesh *m) {
     if (!m) return;
+    lx_mesh_lightmap_variants_release(m);
     lx_renderer_mesh_release(m);
     for (int l = 0; l < m->lod_count; l++) {
         lx_free(m->lods[l].vertices);

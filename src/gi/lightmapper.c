@@ -236,7 +236,7 @@ LxLightmapBake *lx_lightmap_prepare(LxScene *s) {
     for (int i = 1; i < s->count; i++) {
         if (!lightmapped(s, i)) continue;
         LxEntityData *d = &s->entities[i];
-        const LxMesh *m = lx_asset_mesh(d->mesh.mesh);
+        const LxMesh *m = lx_mesh_lightmap_variant(lx_asset_mesh(d->mesh.mesh), lx_mat4_scale_of(&d->world));
         const LxMeshLod *l = &m->lods[0];
         double wa = 0, ua = 0;
         for (int t = 0; t + 2 < l->index_count; t += 3) {
@@ -249,7 +249,8 @@ LxLightmapBake *lx_lightmap_prepare(LxScene *s) {
         if (wa <= 0 || ua <= 0) continue;
         float side = (float)sqrt(wa / ua);   /* metres across the 0..1 square */
         int size = (int)ceilf(side * b->set.texels_per_unit);
-        int min_size = m->lm_pack_res > 0 ? m->lm_pack_res / 2 : 8;   /* keeps the unwrap's padding at least a texel */
+        int min_size = m->lm_pack_res > 0 ? m->lm_pack_res / 2 : 8;
+        if (min_size > 128) min_size = 128;   /* keeps the unwrap's padding at least a texel */
         if (min_size < 8) min_size = 8;
         if (size < min_size) size = min_size;
         if (size > amax) size = amax;
@@ -295,7 +296,7 @@ LxLightmapBake *lx_lightmap_prepare(LxScene *s) {
     for (int k = 0; k < nt; k++) {
         const LxLmTile *tl = &b->tiles[k];
         LxEntityData *d = &s->entities[tl->entity];
-        const LxMesh *m = lx_asset_mesh(d->mesh.mesh);
+        const LxMesh *m = lx_mesh_lightmap_variant(lx_asset_mesh(d->mesh.mesh), lx_mat4_scale_of(&d->world));
         const LxMeshLod *l = &m->lods[0];
         LxMat4 nm = lx_mat4_transpose(lx_mat4_inverse(d->world));
         float texel_m = 0;

@@ -218,7 +218,8 @@ float gi_eval_l1(vec4 c, vec3 n) {
     return a * (k + (1.0 - k) * (p + 1.0) * pow(q, p));
 }
 vec3 gi_eval(GiSH sh, vec3 n) {
-    return vec3(gi_eval_l1(sh.r, n), gi_eval_l1(sh.g, n), gi_eval_l1(sh.b, n)) * u.fog_color.w;
+    vec3 e = vec3(gi_eval_l1(sh.r, n), gi_eval_l1(sh.g, n), gi_eval_l1(sh.b, n)) * u.fog_color.w;
+    return (any(isnan(e)) || any(isinf(e))) ? vec3(0.0) : e;   // a broken GI cell must not blacken the screen
 }
 
 vec3 env_brdf_approx(vec3 f0, float rough, float ndv) {

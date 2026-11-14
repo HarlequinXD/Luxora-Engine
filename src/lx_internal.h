@@ -243,6 +243,11 @@ void lx_mesh_generate_lods(LxMesh *m);
  * skinned/dynamic meshes), and measuring UVs that came with the model */
 bool lx_mesh_unwrap_lightmap(LxMesh *m);
 void lx_mesh_lightmap_measure(LxMesh *m);
+/* a static object scaled unevenly is lightmapped with its own unwrap of the mesh in its real proportions (cached;
+ * the mesh itself when the scale is about even) */
+LxMesh *lx_mesh_lightmap_variant(LxMesh *base, LxVec3 world_scale);
+void lx_mesh_lightmap_variants_release(const LxMesh *base);
+LxVec3 lx_mat4_scale_of(const LxMat4 *m);   /* lengths of the basis columns */
 
 struct LxTexture {
     char ref[LX_REF_MAX];

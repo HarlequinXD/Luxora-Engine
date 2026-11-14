@@ -39,7 +39,10 @@ void main() {
         float scale = pc.params.y / max(open, 0.2);
         for (int k = 0; k < 12; k++) {
             float f = float(dep[i * 12 + k]) * scale;
-            accum[i * 12 + k] += (f - accum[i * 12 + k]) * a;
+            float old = accum[i * 12 + k];
+            if (isnan(old) || isinf(old)) old = f;   // never keep a broken value in the history
+            float v = old + (f - old) * a;
+            accum[i * 12 + k] = (isnan(v) || isinf(v)) ? 0.0 : v;
         }
         count[i] = min(n, 1024.0);
         return;

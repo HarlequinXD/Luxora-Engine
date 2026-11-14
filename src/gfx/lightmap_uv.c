@@ -50,7 +50,9 @@ static int chart_h_cmp(const void *pa, const void *pb) {
     return ia - ib;
 }
 
-static LxVec3 vpos(const LxVertex *v) { return lx_v3(v->px, v->py, v->pz); }
+/* the unwrap measures shapes in this scale (a stretched object's own unwrap, see lx_mesh_lightmap_variant) */
+static LxVec3 g_scale = {1, 1, 1};
+static LxVec3 vpos(const LxVertex *v) { return lx_v3(v->px * g_scale.x, v->py * g_scale.y, v->pz * g_scale.z); }
 
 /* welds equal positions so triangles that share a corner see the same id */
 static uint32_t *weld_positions(const LxVertex *v, int vc) {
@@ -313,7 +315,63 @@ void lx_mesh_lightmap_measure(LxMesh *m) {
     m->lm_world_size = ua > 0 ? (float)sqrt(wa / ua) : 0;
 }
 
-bool lx_mesh_unwrap_lightmap(LxMesh *m) {
+static bool unwrap(LxMesh *m);
+LxVec3 lx_mat4_scale_of(const LxMat4 *m) {
+    return lx_v3(lx_len3(lx_v3(m->m[0], m->m[1], m->m[2])), lx_len3(lx_v3(m->m[4], m->m[5], m->m[6])), lx_len3(lx_v3(m->m[8], m->m[9], m->m[10])));
+}
+bool lx_mesh_unwrap_lightmap(LxMesh *m) { return unwrap(m); }
+
+/* ---- stretched objects ----
+ * Lightmap UVs belong to a mesh, so a cube stretched into a 16 x 1 x 16 floor would give its thin sides as much of
+ * the lightmap as its big top. Static objects scaled unevenly get their own copy of the mesh, unwrapped in their
+ * real proportions (the same every time for the same mesh and scale, so bakes and drawing agree). */
+typedef struct Variant { const LxMesh *base; int key[3]; LxMesh *mesh; } Variant;
+static Variant *g_variants;
+static int g_variant_count, g_variant_cap;
+
+static int scale_key(float s) {   /* steps of about 2%, so tiny drifts in a transform don't make new copies */
+    s = fabsf(s);
+    return s < 1e-6f ? -100000 : (int)lroundf(log2f(s) * 32.0f);
+}
+static float key_scale(int k) { return k <= -100000 ? 0.0f : exp2f((float)k / 32.0f); }
+
+LxMesh *lx_mesh_lightmap_variant(LxMesh *base, LxVec3 scale) {
+    if (!base || !base->has_uv2 || !base->uv2_generated || base->skin || base->dynamic) return base;
+    float sx = fabsf(scale.x), sy = fabsf(scale.y), sz = fabsf(scale.z);
+    float lo = lx_minf(sx, lx_minf(sy, sz)), hi = lx_maxf(sx, lx_maxf(sy, sz));
+    if (lo <= 1e-6f || hi / lo < 1.25f) return base;   /* about even: the mesh's own UVs are fine */
+    int key[3] = {scale_key(sx / hi), scale_key(sy / hi), scale_key(sz / hi)};   /* only the proportions matter */
+    for (int i = 0; i < g_variant_count; i++)
+        if (g_variants[i].base == base && !memcmp(g_variants[i].key, key, sizeof key)) return g_variants[i].mesh;
+    const LxMeshLod *l0 = &base->lods[0];
+    LxMesh *v = lx_calloc(1, sizeof *v);
+    snprintf(v->ref, sizeof v->ref, "%s", base->ref);
+    v->lods[0].vertices = lx_alloc(sizeof(LxVertex) * (size_t)l0->vertex_count);
+    memcpy(v->lods[0].vertices, l0->vertices, sizeof(LxVertex) * (size_t)l0->vertex_count);
+    v->lods[0].indices = lx_alloc(sizeof(uint32_t) * (size_t)l0->index_count);
+    memcpy(v->lods[0].indices, l0->indices, sizeof(uint32_t) * (size_t)l0->index_count);
+    v->lods[0].vertex_count = l0->vertex_count;
+    v->lods[0].index_count = l0->index_count;
+    v->lod_count = 1;
+    v->bounds = base->bounds;
+    g_scale = lx_v3(key_scale(key[0]), key_scale(key[1]), key_scale(key[2]));
+    unwrap(v);
+    g_scale = lx_v3(1, 1, 1);
+    Variant var = {base, {key[0], key[1], key[2]}, v};
+    LX_VEC_PUSH(g_variants, g_variant_count, g_variant_cap, var);
+    return v;
+}
+
+void lx_mesh_lightmap_variants_release(const LxMesh *base) {
+    for (int i = 0; i < g_variant_count;) {
+        if (g_variants[i].base == base) {
+            lx_mesh_destroy(g_variants[i].mesh);
+            g_variants[i] = g_variants[--g_variant_count];
+        } else i++;
+    }
+}
+
+static bool unwrap(LxMesh *m) {
     if (!m || m->skin || m->dynamic) return false;
     LxMeshLod *l0 = &m->lods[0];
     int vc = l0->vertex_count, nt = l0->index_count / 3;

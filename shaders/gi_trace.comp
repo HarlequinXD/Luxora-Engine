@@ -39,6 +39,7 @@ vec3 rnd_sphere() {
     return vec3(s * cos(a), s * sin(a), z);
 }
 vec3 rnd_cosine(vec3 n) {
+    if (!(dot(n, n) > 1e-12)) return rnd_sphere();   // a degenerate triangle has no facing (and NaN must not spread)
     float u1 = rnd(), u2 = rnd();
     float r = sqrt(u1), phi = 2.0 * PI * u2;
     vec3 t = abs(n.x) > 0.9 ? vec3(0, 1, 0) : vec3(1, 0, 0);
@@ -162,6 +163,9 @@ int trace_moving(vec3 o, vec3 d, float tmax, out float best) {
 }
 
 void deposit(vec3 pos, vec3 dir, vec3 flux) {
+    // never let a broken value through: on GPUs without robust buffer access a NaN cell index writes anywhere in
+    // memory (other buffers, other textures: flickering garbage on screen)
+    if (any(isnan(pos)) || any(isinf(pos)) || any(isnan(flux)) || any(isinf(flux)) || any(isnan(dir))) return;
     ivec3 res = pc.res_photons.xyz;
     vec3 g = (pos - pc.origin_cell.xyz) / pc.origin_cell.w;
     vec3 t = g - 0.5;
@@ -186,10 +190,11 @@ void deposit(vec3 pos, vec3 dir, vec3 flux) {
     for (int k = 0; k < 8; k++) { if (pick < w[k]) { chosen = k; break; } pick -= w[k]; }
     if (w[chosen] <= 0.0) return;
     ivec3 c = base + ivec3(chosen & 1, (chosen >> 1) & 1, chosen >> 2);
+    if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, res))) return;
     int cbase = ((c.z * res.y + c.y) * res.x + c.x) * 12;
     vec3 wd = -dir;   // light arrives from where the photon came
     vec4 sh = vec4(0.282095, 0.488603 * wd.y, 0.488603 * wd.z, 0.488603 * wd.x);
-    vec3 fl = flux * pc.scales.y;
+    vec3 fl = clamp(flux * pc.scales.y, vec3(-1.0e9), vec3(1.0e9));   // int() of anything bigger is undefined
     // random rounding: unbiased, so even deposits smaller than one unit add up to the right total
     for (int k = 0; k < 4; k++) {
         int ir = int(floor(fl.r * sh[k] + rnd())), ig = int(floor(fl.g * sh[k] + rnd())), ib = int(floor(fl.b * sh[k] + rnd()));

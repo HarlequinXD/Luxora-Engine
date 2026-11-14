@@ -2913,8 +2913,9 @@ static bool probe_render_face(LxScene *s, ProbeSlot *p, int face, VkCommandBuffe
         float radius = lx_len3(lx_aabb_extent(wb));
         float dist = lx_maxf(lx_len3(lx_sub3(c, eye)), 1e-3f);
         float lmb[4];
-        dl_add_lm(&R.probe_list, mesh, pick_lod(mesh, radius * 0.5f / dist), lx_asset_material(d->mesh.material), d->world.m, white,
-                  entity_lightmap(d, mesh, lmb));
+        const float *lm = entity_lightmap(d, mesh, lmb);
+        LxMesh *dm = lm[3] >= 0 ? lx_mesh_lightmap_variant(mesh, lx_mat4_scale_of(&d->world)) : mesh;
+        dl_add_lm(&R.probe_list, dm, pick_lod(dm, radius * 0.5f / dist), lx_asset_material(d->mesh.material), d->world.m, white, lm);
     }
     if (!dl_upload(&R.probe_list, fr)) return false;
 
@@ -3243,7 +3244,9 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
             if (lx_frustum_test_aabb(&frustum, wb)) {
                 float dist = lx_maxf(lx_len3(lx_sub3(c, view->eye)), 1e-3f);
                 float lmb[4];
-                dl_add_lm(&R.main_list, mesh, pick_lod(mesh, radius * proj_scale / dist), mat, d->world.m, white, entity_lightmap(d, mesh, lmb));
+                const float *lm = entity_lightmap(d, mesh, lmb);
+                LxMesh *dm = lm[3] >= 0 ? lx_mesh_lightmap_variant(mesh, lx_mat4_scale_of(&d->world)) : mesh;   /* stretched: its own unwrap */
+                dl_add_lm(&R.main_list, dm, pick_lod(dm, radius * proj_scale / dist), mat, d->world.m, white, lm);
             } else R.stats.instances_culled++;
             if (d->mesh.cast_shadows) {
                 for (int k = 0; k < cascades; k++)

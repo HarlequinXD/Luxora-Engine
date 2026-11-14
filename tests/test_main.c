@@ -943,6 +943,25 @@ static void test_lightmap_uvs(void) {
     for (int l = 1; l < a->lod_count; l++)
         for (int i = 0; i < a->lods[l].vertex_count; i++) lod_uv &= a->lods[l].vertices[i].u2 > 0 && a->lods[l].vertices[i].u2 < 1;
     CHECK(lod_uv, "LODs have lightmap UVs (%d LODs)", a->lod_count);
+    /* a cube stretched into a floor gets its own unwrap: the big top takes a big share of the lightmap */
+    LxMesh *cube = lx_mesh_build_primitive(LX_PRIM_CUBE);
+    LxMesh *flat = lx_mesh_lightmap_variant(cube, lx_v3(16, 1, 16));
+    CHECK(flat != cube && flat == lx_mesh_lightmap_variant(cube, lx_v3(32, 2, 32.0001f)), "stretched copies are cached by proportions");
+    CHECK(lx_mesh_lightmap_variant(cube, lx_v3(2, 2.1f, 2)) == cube, "an evenly scaled object uses the mesh as it is");
+    for (int pass = 0; pass < 2; pass++) {
+        const LxMesh *m = pass ? flat : lx_mesh_build_primitive(LX_PRIM_CUBE);
+        double top = 0, all = 0;
+        const LxMeshLod *l = &m->lods[0];
+        for (int t = 0; t + 2 < l->index_count; t += 3) {
+            const LxVertex *p0 = &l->vertices[l->indices[t]], *p1 = &l->vertices[l->indices[t + 1]], *p2 = &l->vertices[l->indices[t + 2]];
+            double ua = 0.5 * fabs((double)(p1->u2 - p0->u2) * (p2->v2 - p0->v2) - (double)(p2->u2 - p0->u2) * (p1->v2 - p0->v2));
+            all += ua;
+            if (p0->ny > 0.9f) top += ua;
+        }
+        if (pass) CHECK(top / all > 0.4, "the stretched floor's top gets %.0f%% of its lightmap UVs", 100 * top / all);
+        else { CHECK(top / all < 0.2, "a plain cube's top gets a sixth (%.0f%%)", 100 * top / all); lx_mesh_destroy((LxMesh *)m); }
+    }
+    lx_mesh_destroy(cube);   /* takes its stretched copies with it */
     lx_mesh_destroy(a);
     lx_mesh_destroy(b);
 }
