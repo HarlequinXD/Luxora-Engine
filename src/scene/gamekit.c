@@ -536,6 +536,12 @@ void lx_music_stop(float fade_seconds) {
     if (!MU.scene) return;
     lx_music_play(MU.scene, "", 0, fade_seconds);
 }
+/* A scene is being destroyed. The music keeps the scene it plays in, so it can cross-fade one track
+ * into the next, and lx_music_stop goes back through that pointer - which would reach into a freed
+ * scene after a scene change. Anything else here that holds a scene must let go in the same way. */
+void lx_gamekit_scene_gone(LxScene *s) {
+    if (MU.scene == s) memset(&MU, 0, sizeof MU);
+}
 const char *lx_music_current(void) { return MU.clip; }
 void lx_load_scene_faded(const char *ref, float seconds, LxVec4 color) {
     if (!ref || !ref[0]) return;

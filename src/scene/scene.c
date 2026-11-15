@@ -65,6 +65,7 @@ LxScene *lx_scene_create_default(const char *name) {
 void lx_scene_destroy(LxScene *s) {
     if (!s) return;
     lx_scene_stop_simulation(s);
+    lx_gamekit_scene_gone(s);
     lx_physics_world_free(s);
     lx_gameplay_free(s);
     for (int i = 1; i < s->count; i++) lx_anim_release(&s->entities[i]);

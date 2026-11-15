@@ -111,20 +111,33 @@ static bool fz_scene_sane(LxScene *s, char *why, size_t cap) {
 static int g_fz_broken;
 static char g_fz_now[200];
 #if !defined(_WIN32)
-static void fz_alarm(int sig) {   /* a run that never ends: say which one */
-    (void)sig;
-    static const char msg[] = "\n  FAIL fuzz: this action run hangs: ";
-    if (write(2, msg, sizeof msg - 1) < 0) {}
+/* Say which run we were in, on stderr and as a workflow annotation. Reading a job's log needs admin
+   rights on the repository; annotations do not, so this is what makes a fuzz failure in CI diagnosable
+   at all. Only write() from here: it is all a signal handler may safely call. */
+static void fz_report(const char *what, const char *title) {
+    if (write(2, "\n  FAIL fuzz: ", 14) < 0) {}
+    if (write(2, what, strlen(what)) < 0) {}
+    if (write(2, ": ", 2) < 0) {}
     if (write(2, g_fz_now, strlen(g_fz_now)) < 0) {}
     if (write(2, "\n", 1) < 0) {}
-    /* Also as a workflow command on stdout, so the name reaches the run's annotations. Reading a job's
-       log needs admin rights on the repository; annotations do not, so this is what makes a hang in CI
-       diagnosable by whoever is looking at the failure. */
-    static const char ann[] = "::error title=Fuzz hang::action run exceeded the watchdog: ";
-    if (write(1, ann, sizeof ann - 1) < 0) {}
+    if (write(1, "::error title=", 14) < 0) {}
+    if (write(1, title, strlen(title)) < 0) {}
+    if (write(1, "::", 2) < 0) {}
+    if (write(1, what, strlen(what)) < 0) {}
+    if (write(1, ": ", 2) < 0) {}
     if (write(1, g_fz_now, strlen(g_fz_now)) < 0) {}
     if (write(1, "\n", 1) < 0) {}
+}
+static void fz_alarm(int sig) {   /* a run that never ends: say which one */
+    (void)sig;
+    fz_report("this action run exceeded the watchdog", "Fuzz hang");
     _exit(3);
+}
+/* A crash says nothing about where it happened unless we name the run, and the run that crashes is
+   exactly the one worth knowing about. */
+static void fz_crash(int sig) {
+    fz_report(sig == SIGFPE ? "this action run raised an arithmetic fault" : "this action run crashed", "Fuzz crash");
+    _exit(139);
 }
 #endif
 static char g_fz_first[400];
@@ -234,6 +247,10 @@ static void fz_run(const LxFsmActionDesc *d, int variant, const char *dir) {
 static void test_fsm_fuzz(void) {
 #if !defined(_WIN32)
     signal(SIGALRM, fz_alarm);
+    signal(SIGSEGV, fz_crash);
+    signal(SIGBUS, fz_crash);
+    signal(SIGFPE, fz_crash);
+    signal(SIGILL, fz_crash);
 #endif
     printf("state graph actions (fuzz)\n");
     char dir[LX_PATH_MAX];
@@ -760,6 +777,22 @@ static void test_fsm_semantics(void) {
     CHECK(sv("i") == 2 && sv("b") == 1 && !strcmp(sst(), "Yes"), "Get Inventory Count says whether there is enough (%g)", sv("i"));
     sem_end();
     lx_inventory_clear();
+
+    /* The music keeps the scene it plays in so it can cross-fade. Stopping it after that scene has gone
+     * must not reach back into it: play, destroy, stop, and play again somewhere else. */
+    {
+        LxScene *a = lx_scene_create("MusicA");
+        lx_music_play(a, "Sounds/beep.wav", 1.0f, 0.1f);
+        CHECK(!strcmp(lx_music_current(), "Sounds/beep.wav"), "music starts in a scene (\"%s\")", lx_music_current());
+        lx_scene_destroy(a);
+        lx_music_stop(0.1f);        /* used to use the freed scene */
+        CHECK(true, "stopping music after its scene was destroyed is safe");
+        LxScene *b = lx_scene_create("MusicB");
+        lx_music_play(b, "Sounds/beep.wav", 1.0f, 0.1f);
+        CHECK(!strcmp(lx_music_current(), "Sounds/beep.wav"), "music starts again in a new scene");
+        lx_scene_destroy(b);
+        lx_music_stop(0);
+    }
 
     /* ================= breakpoints ================= */
     lx_fsm_breakpoints_clear();
