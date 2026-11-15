@@ -753,6 +753,7 @@ void ed_pause(void) {
 
 void ed_stop(void) {
     if (ED.play == ED_EDIT) return;
+    lx_input_set_platform_preview(-1);
     lx_audio_stop_all();
     lx_scene_stop_simulation(ED.scene);
     char *sel = selected_name();
@@ -1172,6 +1173,8 @@ void ed_update(float dt) {
     ed_shortcuts();
     /* edit gestures end when the mouse is released and no field is being typed in */
     if (ED.change_pending && !lx_mouse_down(LX_MOUSE_LEFT) && !ui_wants_keyboard(ED.ui)) ed_commit();
+    /* Play with Android as the target: the game behaves as on a phone (touch controls, the mouse is a finger) */
+    lx_input_set_platform_preview(ED.play != ED_EDIT && ED.project.build.target == LX_PLATFORM_ANDROID ? (int)LX_PLATFORM_ANDROID : -1);
     if (ED.viewport) /* the game's HUD is laid out over the viewport */
         lx_game_ui_begin_frame(ED.viewport->x, ED.viewport->y, ED.viewport->cw, ED.viewport->ch, ED.play == ED_PLAYING);
     {   /* the game's mouse pointer (Set Mouse) applies over the game view while playing; Escape gives it back */

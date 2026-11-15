@@ -442,6 +442,8 @@ void lx_input_begin_frame(void) {
     memcpy(g_lx_input.prev_keys, g_lx_input.keys, sizeof g_lx_input.keys);
     memcpy(g_lx_input.prev_mouse, g_lx_input.mouse, sizeof g_lx_input.mouse);
     g_lx_input.prev_mouse_pos = g_lx_input.mouse_pos;
+    g_lx_input.prev_touch_count = g_lx_input.touch_count;
+    memcpy(g_lx_input.prev_touches, g_lx_input.touches, sizeof g_lx_input.touches);
     g_lx_input.mouse_delta_accum = lx_v2(0, 0);
     g_lx_input.wheel = 0;
     g_lx_input.text_count = 0;
@@ -466,6 +468,23 @@ LxVec2 lx_mouse_delta(void) {
 float lx_mouse_wheel(void) { return g_lx_input.wheel; }
 int lx_touch_count(void) { return g_lx_input.touch_count; }
 LxVec2 lx_touch_pos(int i) { return (i >= 0 && i < g_lx_input.touch_count) ? g_lx_input.touches[i] : lx_v2(0, 0); }
+/* fingers are told apart by their slot: a finger that's still down keeps its slot from frame to frame */
+LxTouchPhase lx_touch_phase(int i) {
+    if (i < 0 || i >= 10) return LX_TOUCH_NONE;
+    bool now = i < g_lx_input.touch_count, before = i < g_lx_input.prev_touch_count;
+    if (now && !before) return LX_TOUCH_BEGAN;
+    if (!now) return before ? LX_TOUCH_ENDED : LX_TOUCH_NONE;
+    LxVec2 a = g_lx_input.touches[i], b = g_lx_input.prev_touches[i];
+    return (a.x != b.x || a.y != b.y) ? LX_TOUCH_MOVED : LX_TOUCH_STATIONARY;
+}
+LxVec2 lx_touch_delta(int i) {
+    LxTouchPhase ph = lx_touch_phase(i);
+    if (ph != LX_TOUCH_MOVED) return lx_v2(0, 0);
+    return lx_v2(g_lx_input.touches[i].x - g_lx_input.prev_touches[i].x, g_lx_input.touches[i].y - g_lx_input.prev_touches[i].y);
+}
+LxVec2 lx_touch_last_pos(int i) {   /* where it was last frame: for a finger that just lifted, where it lifted */
+    return (i >= 0 && i < 10 && i < g_lx_input.prev_touch_count) ? g_lx_input.prev_touches[i] : lx_touch_pos(i);
+}
 const uint32_t *lx_text_input(int *count) { *count = g_lx_input.text_count; return g_lx_input.text; }
 void lx_window_size(int *w, int *h) { *w = g_lx_input.width; *h = g_lx_input.height; }
 float lx_dpi_scale(void) { return g_lx_input.dpi_scale; }

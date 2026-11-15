@@ -605,7 +605,10 @@ static void viewport_draw(UiNode *n, UiCtx *ui) {
     }
     if (ED.play != ED_EDIT) {
         ui_draw_border(ui, n->x, n->y, n->cw, n->ch, ED.play == ED_PAUSED ? t->warning : t->success, 0, 2 * ui_scale(ui));
-        const char *msg = ED.play == ED_PAUSED ? "PAUSED" : (game ? "PLAYING · Game view" : "PLAYING · Scene view");
+        bool android = lx_game_platform() == LX_PLATFORM_ANDROID && lx_platform_current() != LX_PLATFORM_ANDROID;
+        const char *msg = ED.play == ED_PAUSED ? "PAUSED"
+                        : android ? (game ? "PLAYING · Android · click = touch" : "PLAYING · Android · Scene view")
+                                  : (game ? "PLAYING · Game view" : "PLAYING · Scene view");
         float tw = ui_text_width(ui, UI_FONT_BOLD, msg) + 20 * ui_scale(ui);
         ui_draw_rect(ui, n->x + (n->cw - tw) * 0.5f, n->y + 8 * ui_scale(ui), tw, 24 * ui_scale(ui), ui_alpha(ED.play == ED_PAUSED ? t->warning : t->success, 0.9f), 12 * ui_scale(ui));
         ui_draw_text(ui, UI_FONT_BOLD, n->x + (n->cw - tw) * 0.5f + 10 * ui_scale(ui), n->y + 8 * ui_scale(ui) + (24 * ui_scale(ui) - ui_line_height(ui, UI_FONT_BOLD)) * 0.5f, msg, UI_HEX(0x101113));

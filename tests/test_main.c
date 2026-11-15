@@ -1437,6 +1437,8 @@ static void test_game_ui(void) {
     printf("game ui\n");
     lx_game_ui_use_atlas(true);
     memset(&g_lx_input, 0, sizeof g_lx_input);
+    int touch_mode = lx_input_map()->touch_controls_mode;
+    lx_input_map()->touch_controls_mode = 2;   /* no on-screen touch controls in the measured geometry */
     /* a 3840x2160 window: canvas stays 1080 tall, everything scales by 2 */
     lx_game_ui_begin_frame(0, 0, 3840, 2160, true);
     LxVec2 cs = lx_ui_canvas_size();
@@ -1472,6 +1474,43 @@ static void test_game_ui(void) {
     lx_ui_rect_outline(10, 10, 50, 50, LX_COLOR_BLUE, 6, 2);
     lx_game_ui_geometry(&g);
     CHECK(g.index_count > 100 && g.cmd_count == 1, "shapes batch into one draw (%d cmds)", g.cmd_count);
+    lx_input_map()->touch_controls_mode = touch_mode;
+
+    /* the editor previewing Android: touch controls drawn in the game view, the mouse acts as a finger */
+    LxInputMap saved = *lx_input_map();
+    lx_input_map_defaults(lx_input_map());
+    lx_input_map()->touch_controls_mode = 0;
+    lx_input_set_platform_preview(LX_PLATFORM_ANDROID);
+    g_lx_input.width = 1600; g_lx_input.height = 900;
+    const LxTouchControl *jump = NULL;
+    for (int i = 0; i < lx_input_map()->touch_count; i++) if (!strcmp(lx_input_map()->touch[i].name, "Jump Button")) jump = &lx_input_map()->touch[i];
+    float vx = 100, vy = 50, vw = 1280, vh = 720;   /* a game view inside the editor window */
+    lx_input_begin_frame();
+    g_lx_input.mouse_pos = lx_v2(vx + jump->x * vw, vy + jump->y * vh);
+    g_lx_input.mouse[LX_MOUSE_LEFT] = true;
+    lx_game_ui_begin_frame(vx, vy, vw, vh, true);
+    lx_input_update(1.0f / 60);
+    lx_game_ui_geometry(&g);
+    CHECK(lx_game_platform() == LX_PLATFORM_ANDROID && lx_input_touch_controls_visible() && g.index_count > 0, "Android preview: touch controls show in the game view");
+    CHECK(lx_touch_count() == 1 && lx_action_down("Jump"), "Android preview: clicking the Jump button presses Jump");
+    lx_input_begin_frame();
+    g_lx_input.mouse_pos = lx_v2(5, 5);   /* outside the game view: not a finger */
+    lx_game_ui_begin_frame(vx, vy, vw, vh, true);
+    lx_input_update(1.0f / 60);
+    bool dragged = lx_touch_count() == 1;   /* a held finger dragged out of the view stays down */
+    lx_input_begin_frame();
+    g_lx_input.mouse[LX_MOUSE_LEFT] = false;
+    lx_input_update(1.0f / 60);
+    lx_input_begin_frame();
+    g_lx_input.mouse[LX_MOUSE_LEFT] = true;
+    lx_input_update(1.0f / 60);
+    CHECK(dragged && lx_touch_count() == 0, "Android preview: a click outside the game view isn't a touch");
+    lx_input_set_platform_preview(-1);
+    g_lx_input.mouse[LX_MOUSE_LEFT] = false;
+    lx_input_begin_frame();
+    lx_input_update(1.0f / 60);
+    CHECK(lx_game_platform() == lx_platform_current() && lx_touch_count() == 0, "preview off: back to the PC");
+    *lx_input_map() = saved;
     lx_game_ui_shutdown();
 }
 
@@ -2295,6 +2334,7 @@ int main(void) {
     test_state_graph();
     test_fsm_fuzz();
     test_fsm_semantics();
+    test_fsm_playmaker();
     test_templates();
     test_axis_into_character_move();
 #if LUXORA_SCRIPT_COMPILER

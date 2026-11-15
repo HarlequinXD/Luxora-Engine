@@ -38,6 +38,20 @@ static void s_game_stop(void) {
     SMOKE_CHECK(!ED.game_view, "Stop restores the Scene view");
 }
 
+/* Play with Android as the target: the game view shows the touch controls */
+static LxPlatform g_target_before;
+static void s_android_on(void) { g_target_before = ED.project.build.target; ED.project.build.target = LX_PLATFORM_ANDROID; }
+static void smoke_shot(const char *name);
+static void s_android_shot(void) {
+    if (lx_platform_current() != LX_PLATFORM_ANDROID)
+        SMOKE_CHECK(lx_game_platform() == LX_PLATFORM_ANDROID && lx_input_touch_controls_visible(), "Play with an Android target shows the touch controls");
+    smoke_shot("android_preview.ppm");
+}
+static void s_android_off(void) {
+    ED.project.build.target = g_target_before;
+    SMOKE_CHECK(lx_game_platform() == lx_platform_current(), "Stop: the editor is a PC again");
+}
+
 static char g_reopen[LX_PATH_MAX];
 static void s_close_project(void) {
     lx_strcpy(g_reopen, sizeof g_reopen, ED.project.root);
@@ -952,8 +966,11 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {205, s_close, "close build settings"},
     {206, s_game_edit, "game view in edit mode"},
     {209, s_game_back, "scene view"},
+    {210, s_android_on, "target Android"},
     {211, s_game_play, "play switches to game view"},
+    {213, s_android_shot, "android touch controls"},
     {214, s_game_stop, "stop restores scene view"},
+    {214, s_android_off, "target back"},
     {214, s_collapse, "select the cube"},
     {215, s_collapse_click, "collapse and expand a component"},
     {216, s_close_project, "close project"},

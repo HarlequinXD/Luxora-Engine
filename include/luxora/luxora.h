@@ -114,6 +114,10 @@ const char *lx_mouse_image(void);
 float lx_mouse_wheel(void);
 int lx_touch_count(void);
 LxVec2 lx_touch_pos(int index);
+typedef enum LxTouchPhase { LX_TOUCH_NONE, LX_TOUCH_BEGAN, LX_TOUCH_MOVED, LX_TOUCH_STATIONARY, LX_TOUCH_ENDED } LxTouchPhase;
+LxTouchPhase lx_touch_phase(int index);   /* ENDED on the frame the finger lifts (lx_touch_last_pos says where) */
+LxVec2 lx_touch_delta(int index);         /* window pixels moved this frame */
+LxVec2 lx_touch_last_pos(int index);
 const uint32_t *lx_text_input(int *count); /* unicode codepoints typed this frame */
 void lx_window_size(int *w, int *h);
 float lx_dpi_scale(void);
@@ -1108,6 +1112,9 @@ bool lx_project_load(LxProject *p, const char *root_dir);
 bool lx_project_save(const LxProject *p);
 const char *lx_platform_name(LxPlatform p);
 LxPlatform lx_platform_current(void);
+/* the platform the game should behave as: lx_platform_current(), except in the editor's Play mode with Android as the
+   Build Settings target - then Android (touch controls on screen, the mouse acts as a finger) */
+LxPlatform lx_game_platform(void);
 
 /* ===================================================================
  *  Game UI: HUDs, menus, health bars, buttons (immediate mode)
@@ -1152,6 +1159,9 @@ LxVec2 lx_ui_pointer(void);                     /* mouse / first touch, in canva
 bool lx_ui_pointer_over(void);                  /* over a button: don't treat the click as gameplay */
 /* project a world position (e.g. above an enemy's head) to canvas units with the scene's main camera */
 bool lx_ui_world_to_canvas(LxScene *s, LxVec3 world, LxVec2 *out);
+LxVec2 lx_ui_screen_to_canvas(LxVec2 window_pixels);   /* a touch or mouse position in canvas units */
+/* the ray from the main camera through a canvas point (Mouse Pick, tapping objects) */
+bool lx_ui_canvas_ray(LxScene *s, LxVec2 canvas, LxVec3 *origin, LxVec3 *dir);
 
 /* ===================================================================
  *  Application runtime

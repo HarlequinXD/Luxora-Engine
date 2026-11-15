@@ -849,4 +849,6 @@ void lx_fsm_register_builtin_actions(void) {
     lx_fsm_register_more_actions();
     extern void lx_fsm_register_controller_actions(void);
     lx_fsm_register_controller_actions();
+    extern void lx_fsm_register_playmaker_actions(void);
+    lx_fsm_register_playmaker_actions();
 }

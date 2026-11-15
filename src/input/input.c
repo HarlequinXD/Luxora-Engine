@@ -33,6 +33,9 @@ static struct {
     LxInputDevice last_device;
     float rumble_time[LX_MAX_PADS];
     double next_scan;
+    int preview_platform;           /* the editor playing as another platform: Android = touch controls, mouse is a finger */
+    bool preview_set, sim_touch;
+    float ax, ay, aw, ah;           /* where the game is shown, window pixels (0 size = the whole window) */
 #if LX_OS_LINUX
     int js_fd[LX_MAX_PADS];
     bool js_init;
@@ -518,17 +521,43 @@ bool lx_input_touch_controls_visible(void) {
     LxInputMap *m = lx_input_map();
     if (m->touch_controls_mode == 1) return true;
     if (m->touch_controls_mode == 2) return false;
-#if LX_OS_ANDROID
-    return true;
-#else
-    return INP.last_device == LX_DEVICE_TOUCH;
-#endif
+    return lx_game_platform() == LX_PLATFORM_ANDROID || INP.last_device == LX_DEVICE_TOUCH;
+}
+
+void lx_input_set_platform_preview(int platform) {
+    bool on = platform >= 0 && platform < LX_PLATFORM_COUNT && platform != (int)lx_platform_current();
+    INP.preview_set = on;
+    INP.preview_platform = on ? platform : 0;
+}
+LxPlatform lx_game_platform(void) { return INP.preview_set ? (LxPlatform)INP.preview_platform : lx_platform_current(); }
+void lx_input_set_touch_area(float x, float y, float w, float h) { INP.ax = x; INP.ay = y; INP.aw = w; INP.ah = h; }
+static void touch_area(float *x, float *y, float *w, float *h) {
+    if (INP.aw > 0 && INP.ah > 0) { *x = INP.ax; *y = INP.ay; *w = INP.aw; *h = INP.ah; return; }
+    *x = 0; *y = 0; *w = (float)g_lx_input.width; *h = (float)g_lx_input.height;
+}
+/* previewing Android on a PC: the left mouse button is a finger (only inside the game view) */
+static void simulate_touch(void) {
+    bool want = INP.preview_set && INP.preview_platform == LX_PLATFORM_ANDROID;
+    if (!want) {
+        if (INP.sim_touch) { g_lx_input.touch_count = 0; INP.sim_touch = false; }
+        return;
+    }
+    INP.sim_touch = true;
+    float x, y, w, h;
+    touch_area(&x, &y, &w, &h);
+    LxVec2 p = g_lx_input.mouse_pos;
+    bool inside = p.x >= x && p.y >= y && p.x < x + w && p.y < y + h;
+    bool was = g_lx_input.prev_touch_count > 0;
+    /* a finger stays down while held, even dragged out of the view; it only lands inside it */
+    g_lx_input.touch_count = g_lx_input.mouse[LX_MOUSE_LEFT] && (inside || was) ? 1 : 0;
+    g_lx_input.touches[0] = p;
 }
 
 static void update_touch(void) {
     LxInputMap *m = lx_input_map();
-    int w = g_lx_input.width, h = g_lx_input.height;
-    float shortest = (float)(w < h ? w : h);
+    float ox, oy, w, h;
+    touch_area(&ox, &oy, &w, &h);
+    float shortest = w < h ? w : h;
     for (int c = 0; c < m->touch_count; c++) {
         TouchState *ts = &INP.touch[c];
         const LxTouchControl *tc = &m->touch[c];
@@ -537,7 +566,7 @@ static void update_touch(void) {
         ts->look_delta = lx_v2(0, 0);
         bool any = false;
         for (int t = 0; t < g_lx_input.touch_count; t++) {
-            LxVec2 p = g_lx_input.touches[t];
+            LxVec2 p = lx_v2(g_lx_input.touches[t].x - ox, g_lx_input.touches[t].y - oy);
             if (tc->type == LX_TOUCH_LOOK_AREA) {
                 float x0 = tc->x * (float)w, y0 = tc->y * (float)h, x1 = x0 + tc->size * (float)w, y1 = y0 + tc->height * (float)h;
                 if (p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1) continue;
@@ -574,41 +603,35 @@ static void update_touch(void) {
     }
 }
 
-void lx_input_draw_touch_controls(void) {
+/* drawn through the game UI (lx_game_ui_geometry calls this), so the player and the editor's game view both show them */
+void lx_input_draw_touch_controls(void) {}
+void lx_input_emit_touch_controls(void) {
     if (!lx_input_touch_controls_visible()) return;
     LxInputMap *m = lx_input_map();
-    int w = g_lx_input.width, h = g_lx_input.height;
-    float shortest = (float)(w < h ? w : h);
-    LxUiVertex *v = NULL;
-    uint32_t *idx = NULL;
-    int vc = 0, vcap = 0, ic = 0, icap = 0;
-#define CIRCLE(cx, cy, r, col)                                                                                  \
-    for (int s = 0; s < 32; s++) {                                                                              \
-        float a0 = (float)s / 32 * 2 * LX_PI, a1 = (float)(s + 1) / 32 * 2 * LX_PI;                              \
-        LxUiVertex q0 = {(cx), (cy), 0.5f, 0.5f, (col)}, q1 = {(cx) + cosf(a0) * (r), (cy) + sinf(a0) * (r), 0.5f, 0.5f, (col)}, \
-                   q2 = {(cx) + cosf(a1) * (r), (cy) + sinf(a1) * (r), 0.5f, 0.5f, (col)};                      \
-        uint32_t b = (uint32_t)vc;                                                                              \
-        LX_VEC_PUSH(v, vc, vcap, q0); LX_VEC_PUSH(v, vc, vcap, q1); LX_VEC_PUSH(v, vc, vcap, q2);                 \
-        LX_VEC_PUSH(idx, ic, icap, b); LX_VEC_PUSH(idx, ic, icap, b + 1); LX_VEC_PUSH(idx, ic, icap, b + 2);       \
-    }
+    float ox, oy, w, h;
+    touch_area(&ox, &oy, &w, &h);
+    if (w <= 0 || h <= 0) return;
+    float shortest = w < h ? w : h;
+    LxVec2 cs = lx_ui_canvas_size();
+    float k = cs.y / h;   /* window pixels to canvas units */
+    lx_ui_anchor(LX_ANCHOR_TOP_LEFT);
     for (int c = 0; c < m->touch_count; c++) {
         const LxTouchControl *tc = &m->touch[c];
-        if (tc->type == LX_TOUCH_LOOK_AREA) continue;
-        float cx = tc->x * (float)w, cy = tc->y * (float)h, r = tc->size * shortest;
         const TouchState *ts = &INP.touch[c];
-        uint32_t base = ts->pressed || ts->stick.x != 0 || ts->stick.y != 0 ? 0x70ffffffu : 0x38ffffffu;
-        CIRCLE(cx, cy, r, base);
-        if (tc->type == LX_TOUCH_STICK) {
-            float kx = cx + ts->stick.x * r * 0.6f, ky = cy - ts->stick.y * r * 0.6f;
-            CIRCLE(kx, ky, r * 0.45f, 0x90ffffffu);
+        if (tc->type == LX_TOUCH_LOOK_AREA) continue;
+        float cx = tc->x * w * k, cy = tc->y * h * k, r = tc->size * shortest * k;
+        bool active = ts->pressed || ts->stick.x != 0 || ts->stick.y != 0;
+        lx_ui_circle(cx, cy, r, active ? 0x70ffffffu : 0x38ffffffu);
+        if (tc->type == LX_TOUCH_STICK) lx_ui_circle(cx + ts->stick.x * r * 0.6f, cy - ts->stick.y * r * 0.6f, r * 0.45f, 0x90ffffffu);
+        else {
+            float tw = lx_ui_text_width(r * 0.42f, tc->name);
+            char label[32];
+            lx_strcpy(label, sizeof label, tc->name);
+            char *sp = strstr(label, " Button");   /* "Jump Button" -> "Jump" */
+            if (sp) { *sp = 0; tw = lx_ui_text_width(r * 0.42f, label); }
+            lx_ui_text(cx - tw * 0.5f, cy - r * 0.25f, r * 0.42f, 0xb0ffffffu, "%s", label);
         }
     }
-#undef CIRCLE
-    LxUiCmd cmd = {lx_ui_white_texture(), 0, (uint32_t)ic, {0, 0, (float)w, (float)h}};
-    LxUiDrawList dl = {v, vc, idx, ic, &cmd, 1, lx_v4(0, 0, 0, 1)};
-    lx_renderer_draw_ui(&dl);
-    lx_free(v);
-    lx_free(idx);
 }
 
 /* ======================================================================
@@ -661,6 +684,7 @@ static void note_device(void) {
 
 void lx_input_update(float dt) {
     LxInputMap *m = lx_input_map();
+    simulate_touch();
     for (int p = 0; p < LX_MAX_PADS; p++) memcpy(g_lx_pads[p].prev_buttons, g_lx_pads[p].buttons, sizeof g_lx_pads[p].buttons);
     if (!g_lx_pad_polling_disabled) poll_pads();
     for (int p = 0; p < LX_MAX_PADS; p++)

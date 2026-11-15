@@ -114,12 +114,15 @@ typedef struct LxInputState {
     float wheel;
     uint32_t text[64];
     int text_count;
-    int touch_count;
-    LxVec2 touches[10];
+    int touch_count, prev_touch_count;
+    LxVec2 touches[10], prev_touches[10];
     int width, height;
     float dpi_scale;
 } LxInputState;
 extern LxInputState g_lx_input;
+void lx_input_set_platform_preview(int platform);          /* the editor: -1 = off */
+void lx_input_set_touch_area(float x, float y, float w, float h);   /* the game view, window pixels */
+void lx_input_emit_touch_controls(void);                   /* into the game UI, from lx_game_ui_geometry */
 
 /* gamepad state written by platform layers (Android) or polled by the input module */
 #define LX_MAX_PADS 4

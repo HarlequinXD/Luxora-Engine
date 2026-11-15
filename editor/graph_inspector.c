@@ -1349,6 +1349,11 @@ static void ab_fav_click(UiNode *n) {
     ge_prefs_save();
 }
 
+static int ab_ci_prefix(const char *s, const char *prefix) {   /* 0 when s starts with prefix, ignoring case */
+    for (; *prefix; s++, prefix++)
+        if (tolower((unsigned char)*s) != tolower((unsigned char)*prefix)) return 1;
+    return 0;
+}
 static bool matches(const LxFsmActionDesc *d, const char *q) {
     if (!q[0]) return true;
     return lx_strcasestr_ascii(d->name, q) || (d->category && lx_strcasestr_ascii(d->category, q)) || (d->description && lx_strcasestr_ascii(d->description, q));
@@ -1423,6 +1428,23 @@ static void ab_build_list(void) {
         if (!dup && nc < 64) cats[nc++] = c;
     }
     qsort(cats, (size_t)nc, sizeof cats[0], cmp_str);
+    if (searching && !GE.ab_sel[0]) {   /* the best match gets picked: "rotate" → Rotate before Vector3 Rotate Towards */
+        const LxFsmActionDesc *best = NULL;
+        int best_score = 1 << 30;
+        size_t ql = strlen(q);
+        for (int i = 0; i < total; i++) {
+            const LxFsmActionDesc *d = lx_fsm_action_at(i);
+            if (!d || !matches(d, q)) continue;
+            int score = 3;
+            const char *nm = d->name;
+            if (strlen(nm) == ql && !ab_ci_prefix(nm, q)) score = 0;
+            else if (!ab_ci_prefix(nm, q)) score = 1;
+            else for (const char *w = strchr(nm, ' '); w; w = strchr(w + 1, ' ')) if (!ab_ci_prefix(w + 1, q)) { score = 2; break; }
+            score = score * 1000 + (int)strlen(nm);
+            if (score < best_score) { best_score = score; best = d; }
+        }
+        if (best) { lx_strcpy(GE.ab_sel, sizeof GE.ab_sel, best->name); GE.ab_dirty = true; }
+    }
     int shown = 0;
     for (int c = 0; c < nc; c++) {
         const LxFsmActionDesc *items[256];

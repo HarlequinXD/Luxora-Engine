@@ -52,7 +52,7 @@ static struct {
     LxVec2 pointer;
     bool down, prev_down, pressed, released;
     bool over_button, over_button_prev;
-    bool cursor_drawn;
+    bool cursor_drawn, touch_drawn;
     uint64_t active_id;
     /* image textures */
     struct { char ref[LX_REF_MAX]; uint32_t tex; } tex[64];
@@ -378,6 +378,38 @@ bool lx_ui_world_to_canvas(LxScene *s, LxVec3 world, LxVec2 *out) {
     if (out) *out = lx_v2((cx / cw * 0.5f + 0.5f) * cs.x, (0.5f - cy / cw * 0.5f) * cs.y);
     return true;
 }
+LxVec2 lx_ui_screen_to_canvas(LxVec2 p) {
+    float k = G.scale > 0 ? G.scale : 1;
+    return lx_v2((p.x - G.vx) / k, (p.y - G.vy) / k);
+}
+bool lx_ui_canvas_ray(LxScene *s, LxVec2 canvas, LxVec3 *origin, LxVec3 *dir) {
+    LxEntity cam = s ? lx_scene_main_camera(s) : 0;
+    if (!cam || G.vw <= 0 || G.vh <= 0) return false;
+    LxRenderView v;
+    if (!lx_camera_view(s, cam, (int)G.vw, (int)G.vh, &v)) return false;
+    LxVec2 cs = lx_ui_canvas_size();
+    if (cs.x <= 0 || cs.y <= 0) return false;
+    float nx = canvas.x / cs.x * 2 - 1, ny = 1 - canvas.y / cs.y * 2;
+    LxMat4 inv = lx_mat4_inverse(lx_mat4_mul(v.proj, v.view));
+    LxVec3 pt[2];
+    for (int i = 0; i < 2; i++) {   /* near and far plane (0..1 depth; either convention gives a point on the ray) */
+        float z = i ? 1.0f : 0.0f;
+        float x = inv.m[0] * nx + inv.m[4] * ny + inv.m[8] * z + inv.m[12];
+        float y = inv.m[1] * nx + inv.m[5] * ny + inv.m[9] * z + inv.m[13];
+        float zz = inv.m[2] * nx + inv.m[6] * ny + inv.m[10] * z + inv.m[14];
+        float w = inv.m[3] * nx + inv.m[7] * ny + inv.m[11] * z + inv.m[15];
+        if (fabsf(w) < 1e-12f) return false;
+        pt[i] = lx_v3(x / w, y / w, zz / w);
+    }
+    /* the end nearer the eye is the near plane, whichever depth convention the projection uses */
+    int n = lx_len3sq(lx_sub3(pt[0], v.eye)) <= lx_len3sq(lx_sub3(pt[1], v.eye)) ? 0 : 1;
+    LxVec3 d = lx_sub3(pt[1 - n], pt[n]);
+    if (!(lx_len3sq(d) > 1e-12f)) return false;
+    d = lx_norm3(d);
+    if (origin) *origin = pt[n];
+    if (dir) *dir = d;
+    return true;
+}
 
 /* ---------------- host side ---------------- */
 void lx_game_ui_begin_frame(float vx, float vy, float vw, float vh, bool clear) {
@@ -385,12 +417,14 @@ void lx_game_ui_begin_frame(float vx, float vy, float vw, float vh, bool clear) 
     G.vy = vy;
     G.vw = vw;
     G.vh = vh;
+    lx_input_set_touch_area(vx, vy, vw, vh);
     float rh = G.ref_h > 1 ? G.ref_h : 1080.0f;
     G.scale = vh > 0 ? vh / rh : 1;
     if (!G.atlas_known && !G.editor_atlas) load_glyphs(true);   /* games use the 2x atlas */
     if (!clear) return;   /* paused in the editor: keep showing the last frame */
     G.vc = G.ic = G.cc = 0;
     G.cursor_drawn = false;
+    G.touch_drawn = false;
     G.anchor = LX_ANCHOR_TOP_LEFT;
     G.font = LX_FONT_REGULAR;
     G.over_button_prev = G.over_button;
@@ -409,6 +443,12 @@ void lx_game_ui_begin_frame(float vx, float vy, float vw, float vh, bool clear) 
 
 void lx_game_ui_geometry(LxGameUiGeometry *out) {
     memset(out, 0, sizeof *out);
+    if (!G.touch_drawn && ready()) {   /* on-screen touch controls, over the game's own UI */
+        G.touch_drawn = true;
+        LxUiAnchor a = G.anchor;
+        lx_input_emit_touch_controls();
+        G.anchor = a;
+    }
     /* a custom mouse pointer (Set Mouse): drawn last, over everything, once a frame */
     if (!G.cursor_drawn && g_lx_input.mouse_image[0] && !g_lx_input.mouse_locked && !g_lx_input.mouse_lock_blocked && !g_lx_input.mouse_hide_want && ready()) {
         G.cursor_drawn = true;

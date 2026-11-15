@@ -650,6 +650,168 @@ static void test_fsm_semantics(void) {
     lx_assets_clear();
 }
 
+/* ---------------- the PlayMaker-style actions (actions4.c) ---------------- */
+static void pm_frame(void) {   /* a new input frame with the game view 1280 x 720 */
+    lx_input_begin_frame();
+}
+static void pm_step(void) {
+    lx_game_ui_begin_frame(0, 0, 1280, 720, true);
+    lx_input_update(1.0f / 60);
+    lx_scene_simulate(g_ss, 1.0f / 60);
+}
+static void test_fsm_playmaker(void) {
+    printf("state graph: PlayMaker-style actions\n");
+    lx_path_join(g_sdir, sizeof g_sdir, tmpdir(), "luxora_test_fsmpm");
+    lx_path_remove(g_sdir);
+    lx_mkdir_p(g_sdir);
+    lx_assets_set_root(g_sdir);
+    const float DT = 1.0f / 60;
+    memset(g_lx_input.keys, 0, sizeof g_lx_input.keys);
+    memset(g_lx_input.mouse, 0, sizeof g_lx_input.mouse);
+    g_lx_input.touch_count = 0;
+    g_lx_input.width = 1280; g_lx_input.height = 720;
+    lx_input_begin_frame();
+    lx_input_begin_frame();
+
+    /* ---- logic, maths, text ---- */
+    sem_begin(ONE("[action]\ntype = Bool Operator\np0 = true\np1 = false\np2 = XOR\np3 = $b\n"
+                  "[action]\ntype = Float Remap\np0 = 5\np1 = 0\np2 = 10\np3 = 100\np4 = 200\np6 = $f\n"
+                  "[action]\ntype = Trigonometry\np0 = 1\np1 = Asin\np2 = true\np3 = $f2\n"
+                  "[action]\ntype = Float Switch\np0 = 30\np1 = 25\np2 = NO\np3 = 50\np4 = YES\np9 = NO\n"));
+    sem_run(1, DT);
+    CHECK(sv("b") == 1 && NEAR(sv("f"), 150, 1e-4f) && NEAR(sv("f2"), 90, 1e-3f) && !strcmp(sst(), "Yes"),
+          "Bool Operator, Float Remap, Trigonometry, Float Switch (%g %g %g %s)", sv("b"), sv("f"), sv("f2"), sst());
+    sem_end();
+    sem_begin(ONE("[action]\ntype = String Replace\np0 = a-b-c\np1 = -\np2 = ::\np3 = $s\n"
+                  "[action]\ntype = String Split\np0 = $s\np1 = ::\np2 = 2\np3 = $s\np4 = $i\n"
+                  "[action]\ntype = String Case\np0 = $s\np1 = Upper\np2 = $s\n"
+                  "[action]\ntype = String To Number\np0 = 12.5\np1 = $f\np3 = YES\np4 = NO\n"));
+    sem_run(1, DT);
+    CHECK(!strcmp(svs("s"), "C") && sv("i") == 3 && NEAR(sv("f"), 12.5f, 1e-5f) && !strcmp(sst(), "Yes"),
+          "String Replace, String Split, String Case, String To Number (%s %g %g %s)", svs("s"), sv("i"), sv("f"), sst());
+    sem_end();
+    sem_begin(ONE("[action]\ntype = Get Substring\np0 = Luxora Engine\np1 = 7\np2 = 3\np3 = $s\n"
+                  "[action]\ntype = String To Number\np0 = twelve\np1 = $f\np3 = YES\np4 = NO\n"));
+    sem_run(1, DT);
+    CHECK(!strcmp(svs("s"), "Eng") && !strcmp(sst(), "No"), "Get Substring, and String To Number on words (%s %s)", svs("s"), sst());
+    sem_end();
+    sem_begin("[variable]\nname = col\ntype = color\nvalue = 0 0 0 1\n"
+              ONE("[action]\ntype = Color Ramp\np0 = 0.75\np1 = 1 0 0 1\np2 = 0 1 0 1\np3 = 0 0 1 1\np5 = $col\n"
+                  "[action]\ntype = Get Color RGBA\np0 = $col\np2 = $f\np3 = $f2\n"));
+    sem_run(1, DT);
+    CHECK(NEAR(sv("f"), 0.5f, 1e-4f) && NEAR(sv("f2"), 0.5f, 1e-4f), "Color Ramp halfway between green and blue (%g %g)", sv("f"), sv("f2"));
+    sem_end();
+    sem_begin(ONE("[action]\ntype = Set Vector3\np0 = $v\np1 = 3 0 4\n[action]\ntype = Vector3 Clamp Magnitude\np0 = $v\np1 = 2.5\n"
+                  "[action]\ntype = Get Vector Length\np0 = $v\np1 = $f\n[action]\ntype = Get Atan2\np0 = 1\np1 = 0\np2 = true\np3 = $f2\n"));
+    sem_run(1, DT);
+    CHECK(NEAR(sv("f"), 2.5f, 1e-4f) && VEQ(svv("v"), 1.5f, 0, 2, 1e-4f) && NEAR(sv("f2"), 90, 1e-3f), "Vector3 Clamp Magnitude, Get Vector Length, Get Atan2 (%g, %g %g %g, %g)", sv("f"), svv("v").x, svv("v").y, svv("v").z, sv("f2"));
+    sem_end();
+    sem_begin(ONE("[action]\ntype = Vector3 Interpolate\np0 = $v\np1 = 0 0 0\np2 = 10 0 0\np3 = 0.5\np5 = YES\n"));
+    sem_run(15, DT);
+    float half = svv("v").x;
+    sem_run(30, DT);
+    CHECK(half > 3 && half < 7 && NEAR(svv("v").x, 10, 1e-4f) && !strcmp(sst(), "Yes"), "Vector3 Interpolate goes there over time (%g then %g)", half, svv("v").x);
+    sem_end();
+
+    /* ---- transform and objects (the fuzz scene: Owner at 0 1 0 facing -Z, Char at 2 1 0, two Enemies) ---- */
+    sem_begin(ONE("[action]\ntype = Get Angle To Target\np0 = Owner\np1 = name:Char\np2 = 0 0 0\np3 = true\np4 = $f\n"
+                  "[action]\ntype = Transform Point\np0 = Owner\np1 = 0 0 -2\np2 = Local Point To World\np3 = $v\n"
+                  "[action]\ntype = Get Root\np0 = name:Child\np1 = $o\n"));
+    sem_run(1, DT);
+    CHECK(NEAR(sv("f"), 90, 0.5f) && VEQ(svv("v"), 0, 1, -2, 1e-3f) && svo("o") == g_so, "Get Angle To Target (+ = right), Transform Point, Get Root (%g)", sv("f"));
+    sem_end();
+    sem_begin("[event]\nname = LOOP\n[event]\nname = END\n[state]\nname = A\ntransition = LOOP > B\ntransition = END > Done\n"
+              "[action]\ntype = Get Next With Tag\np0 = Enemy\np1 = $i\np2 = $o\np3 = LOOP\np4 = END\n"
+              "[state]\nname = B\ntransition = FINISHED > A\n[action]\ntype = Float Add\np0 = $f\np1 = 1\n[state]\nname = Done\n");
+    sem_run(12, DT);
+    CHECK(NEAR(sv("f"), 2, 1e-5f) && !strcmp(sst(), "Done") && sv("i") == 0, "Get Next With Tag visits both enemies, then Finished (%g %s)", sv("f"), sst());
+    sem_end();
+
+    /* ---- keys: a press on the entering frame belongs to the state before ---- */
+    sem_begin(ONE("[action]\ntype = Get Key Down\np0 = Space\np1 = YES\n[action]\ntype = Get Key\np0 = Space\np1 = $b\n"));
+    pm_frame(); g_lx_input.keys[LX_KEY_SPACE] = true; pm_step();
+    bool first = strcmp(sst(), "Yes") != 0;
+    float held = sv("b");
+    pm_frame(); pm_step();
+    pm_frame(); g_lx_input.keys[LX_KEY_SPACE] = false; pm_step();
+    bool still = strcmp(sst(), "Yes") != 0;
+    pm_frame(); g_lx_input.keys[LX_KEY_SPACE] = true; pm_step();
+    CHECK(first && still && held == 1 && !strcmp(sst(), "Yes"), "Get Key Down: not on the entering frame, then on a new press (%d %d %s)", first, still, sst());
+    pm_frame(); g_lx_input.keys[LX_KEY_SPACE] = false; pm_step();
+    sem_end();
+    sem_begin(ONE("[action]\ntype = Get Button Up\np0 = Jump\np1 = YES\n"));
+    pm_frame(); g_lx_input.keys[LX_KEY_SPACE] = true; pm_step();
+    pm_frame(); g_lx_input.keys[LX_KEY_SPACE] = false; pm_step();
+    CHECK(!strcmp(sst(), "Yes"), "Get Button Up: letting go of Space (Jump) (%s)", sst());
+    pm_frame(); pm_step();
+    sem_end();
+
+    /* ---- axis vector relative to the camera: Cam turned to look along -X, W walks along -X ---- */
+    sem_begin(ONE("[action]\ntype = Get Axis Vector\nupdate = every_frame\np0 = MoveX\np1 = MoveY\np2 = 2\np3 = Ground (XZ)\np4 = Camera\np6 = $v\np7 = $f\n"));
+    lx_entity_set_euler(g_ss, lx_entity_find(g_ss, "Cam"), lx_v3(-30, 90, 0));
+    pm_frame(); g_lx_input.keys[LX_KEY_W] = true; pm_step();
+    pm_frame(); pm_step();
+    CHECK(VEQ(svv("v"), -2, 0, 0, 1e-3f) && NEAR(sv("f"), 2, 1e-3f), "Get Axis Vector: forward is where the camera looks, flat on the ground (%g %g %g)", svv("v").x, svv("v").y, svv("v").z);
+    pm_frame(); g_lx_input.keys[LX_KEY_W] = false; pm_step();
+    sem_end();
+
+    /* ---- picking with the mouse: put the pointer over the Owner cube ---- */
+    sem_begin(ONE("[action]\ntype = Mouse Pick\nupdate = every_frame\np0 = 100\np1 = $b\np2 = $o\np3 = $v\n"));
+    lx_game_ui_begin_frame(0, 0, 1280, 720, true);
+    lx_scene_update_transforms(g_ss);
+    LxVec2 at = lx_v2(0, 0);
+    bool vis = lx_ui_world_to_canvas(g_ss, lx_v3(0, 1, 0), &at);
+    LxVec2 cs = lx_ui_canvas_size();
+    g_lx_input.mouse_pos = lx_v2(at.x / cs.x * 1280, at.y / cs.y * 720);
+    pm_frame(); pm_step();
+    pm_frame(); pm_step();
+    CHECK(vis && sv("b") == 1 && svo("o") == g_so && NEAR(svv("v").z, 0.5f, 0.05f), "Mouse Pick finds the cube under the pointer (hit z %.2f)", svv("v").z);
+    sem_end();
+    sem_begin(ONE("[action]\ntype = Mouse Pick Event\np0 = Owner\np1 = 100\np3 = NO\np7 = YES\np8 = $b\n"));
+    pm_frame(); pm_step();
+    pm_frame(); g_lx_input.mouse[LX_MOUSE_LEFT] = true; pm_step();
+    bool over = sv("b") == 1;
+    pm_frame(); g_lx_input.mouse[LX_MOUSE_LEFT] = false; pm_step();
+    CHECK(over && !strcmp(sst(), "Yes"), "Mouse Pick Event: a click on the cube (%s)", sst());
+    sem_end();
+    g_lx_input.mouse_pos = lx_v2(5, 5);
+    sem_begin(ONE("[action]\ntype = Mouse Pick Event\np0 = Owner\np1 = 100\np7 = YES\np8 = $b\n"));
+    pm_frame(); pm_step();
+    pm_frame(); g_lx_input.mouse[LX_MOUSE_LEFT] = true; pm_step();
+    pm_frame(); g_lx_input.mouse[LX_MOUSE_LEFT] = false; pm_step();
+    CHECK(sv("b") == 0 && strcmp(sst(), "Yes"), "...and a click in the corner isn't on it");
+    sem_end();
+
+    /* ---- touch: a finger lands, then swipes left ---- */
+    sem_begin(ONE("[action]\ntype = Touch Event\np0 = -1\np1 = Ended\np2 = YES\np3 = $i\np4 = $v\n[action]\ntype = Get Touch Count\np0 = $f\n"));
+    pm_frame(); pm_step();
+    pm_frame(); g_lx_input.touch_count = 1; g_lx_input.touches[0] = lx_v2(640, 360); pm_step();
+    float fingers = sv("f");
+    pm_frame(); g_lx_input.touch_count = 0; pm_step();
+    CHECK(fingers == 1 && !strcmp(sst(), "Yes") && NEAR(svv("v").x, cs.x * 0.5f, 1) , "Touch Event: a finger lifting, where it lifted (%g %s %g)", fingers, sst(), svv("v").x);
+    sem_end();
+    sem_begin(ONE("[action]\ntype = Swipe Gesture Event\np0 = 120\np1 = 0.6\np2 = YES\np3 = NO\np4 = NO\np5 = NO\np6 = $v\n"));
+    pm_frame(); pm_step();
+    for (int k = 0; k <= 6; k++) { pm_frame(); g_lx_input.touch_count = 1; g_lx_input.touches[0] = lx_v2(900.0f - (float)k * 80, 400); pm_step(); }
+    pm_frame(); g_lx_input.touch_count = 0; pm_step();
+    CHECK(!strcmp(sst(), "Yes") && NEAR(svv("v").x, -1, 1e-3f), "Swipe Gesture Event: a quick drag to the left (%s)", sst());
+    pm_frame(); pm_step();
+    sem_end();
+
+    /* ---- graph to graph ---- */
+    sem_begin(ONE("[action]\ntype = Set Float\np0 = $f\np1 = 3\n[action]\ntype = Get Graph Variable\np0 = Owner\np1 = 0\np2 = f\np3 = $f2\n"
+                  "[action]\ntype = Get Current State\np0 = Owner\np1 = 0\np2 = $s\np3 = A\np4 = YES\np5 = NO\n"));
+    sem_run(1, DT);
+    CHECK(NEAR(sv("f2"), 3, 1e-5f) && !strcmp(sst(), "Yes"), "Get Graph Variable, Get Current State (%g %s)", sv("f2"), sst());
+    sem_end();
+    memset(g_lx_input.keys, 0, sizeof g_lx_input.keys);
+    memset(g_lx_input.mouse, 0, sizeof g_lx_input.mouse);
+    g_lx_input.touch_count = 0;
+    lx_input_begin_frame();
+    lx_input_begin_frame();
+    lx_assets_clear();
+}
+
 /* ---------------- the FPS and Third Person project templates ---------------- */
 static LxScene *tp_open(const char *name, LxProjectTemplate tpl, LxProject *proj) {
     char dir[LX_PATH_MAX];
