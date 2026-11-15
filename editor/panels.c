@@ -1512,6 +1512,12 @@ static void lighting_frame(UiNode *body) {
         lx_strcpy(sm->tooltip, sizeof sm->tooltip, "Light paths per texel: more is smoother and slower.");
         bool_row(sec, "Directional", &bk->directional)->on_change = bake_settings_changed;
         bool_row(sec, "Denoise", &bk->denoise)->on_change = bake_settings_changed;
+        UiNode *ao = slider_row(sec, "Ambient Occlusion", &bk->ao_intensity, 0, 1);
+        ao->on_change = bake_settings_changed;
+        lx_strcpy(ao->tooltip, sizeof ao->tooltip, "How much corners, creases and the ground around objects darken (0 = off).");
+        UiNode *ar2 = float_row(sec, "AO Radius", &bk->ao_radius, 0.05f, 0.05f, 20);
+        ar2->on_change = bake_settings_changed;
+        lx_strcpy(ar2->tooltip, sizeof ar2->tooltip, "How far ambient occlusion looks for nearby geometry, in metres.");
         UiNode *bar = ui_box(ui, sec, UI_ROW);
         bar->gap = 6;
         ui_pad(bar, 0, 4, 0, 2);

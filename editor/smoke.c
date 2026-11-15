@@ -1216,9 +1216,9 @@ static void s_bake_compare(void) {
     double *gb = lx_calloc((size_t)nb, sizeof(double)), *cb = lx_calloc((size_t)nb, sizeof(double)), gt = 0, ct = 0, gs = 0, cs = 0;
     for (int i = 0; i < g->texel_count; i++) {
         int a = i / (A * A), y = (i / A) % A, x = i % A, blk = (a * bw + y / 4) * bw + x / 4;
-        double ge = g->accum[(size_t)i * 8 + 1], ce = c->accum[(size_t)i * 8 + 1];
+        double ge = g->accum[(size_t)i * LX_LM_ACC + 1], ce = c->accum[(size_t)i * LX_LM_ACC + 1];
         gb[blk] += ge; cb[blk] += ce; gt += ge; ct += ce;
-        gs += g->accum[(size_t)i * 8 + 3]; cs += c->accum[(size_t)i * 8 + 3];
+        gs += g->accum[(size_t)i * LX_LM_ACC + 3]; cs += c->accum[(size_t)i * LX_LM_ACC + 3];
     }
     double sg = 0, sc = 0, sgg = 0, scc = 0, sgc = 0;
     for (int b = 0; b < nb; b++) { sg += gb[b]; sc += cb[b]; sgg += gb[b] * gb[b]; scc += cb[b] * cb[b]; sgc += gb[b] * cb[b]; }

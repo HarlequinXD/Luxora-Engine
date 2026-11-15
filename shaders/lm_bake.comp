@@ -13,14 +13,14 @@ layout(std430, set = 0, binding = 1) readonly buffer Tris { Tri tris[]; };
 layout(std430, set = 0, binding = 2) readonly buffer Mats { vec4 mats[]; };        // 2 per material: albedo, glow
 layout(std430, set = 0, binding = 3) readonly buffer Lights { Light lights[]; };
 layout(std430, set = 0, binding = 4) readonly buffer Texels { vec4 texels[]; };    // 3 per texel: position + valid, normal + size, face normal
-layout(std430, set = 0, binding = 5) buffer Accum { vec4 acc[]; };                 // 2 per texel: irradiance + samples, direction + back faces
+layout(std430, set = 0, binding = 5) buffer Accum { vec4 acc[]; };                 // 3 per texel: irradiance + samples, direction + back faces, (open for AO, direct rgb)
 layout(std430, set = 0, binding = 6) readonly buffer Voxels { vec4 voxels[]; };    // Baked Lighting Volumes: 1 per voxel, position
 layout(std430, set = 0, binding = 7) buffer VoxAccum { vec4 vacc[]; };             // 5 per voxel: SH red, green, blue, (samples, back faces), shadowmask
 
 layout(push_constant) uniform PC {
     vec4 zenith;     // w: sky brightness (ambient)
     vec4 horizon;    // w: surface offset
-    vec4 ground;
+    vec4 ground;     // w: ambient occlusion ray length (0 = off)
     ivec4 counts;    // first texel, texel count, light count, bounces
     uvec4 sample_;   // x: sample index, y: 1 = volume voxels (counts.x is then the first voxel)
 } pc;
@@ -271,6 +271,16 @@ void main() {
     }
     E += path;
     D += first_dir * lum(path);
-    acc[texel * 2] += vec4(E, 1.0);
-    acc[texel * 2 + 1] += vec4(D, back);
+    // ambient occlusion: does a short ray get out?
+    float open = 1.0;
+    if (pc.ground.w > 0.0) {
+        vec3 ad = rnd_cosine(n);
+        float an = dot(ad, ng);
+        if (an <= 0.0) ad = normalize(ad - ng * (2.0 * an - 1e-3));
+        float hd;
+        open = trace(x, ad, pc.ground.w, true, hd) >= 0 ? 0.0 : 1.0;
+    }
+    acc[texel * 3] += vec4(E, 1.0);
+    acc[texel * 3 + 1] += vec4(D, back);
+    acc[texel * 3 + 2] += vec4(open, E - path);   // Baked lights straight on (AO leaves it alone)
 }

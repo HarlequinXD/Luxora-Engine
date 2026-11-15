@@ -1029,13 +1029,24 @@ static void test_lightmapper(void) {
     /* under the box the texels look at the box's inside: thrown away (and filled from neighbours, never seen) */
     int inside = 0, under_n = 0;
     for (int i = 0; i < b->texel_count; i++) {
-        const float *t = &b->texels[(size_t)i * 12], *a = &b->accum[(size_t)i * 8];
+        const float *t = &b->texels[(size_t)i * 12], *a = &b->accum[(size_t)i * LX_LM_ACC];
         if (t[3] <= 0 || t[9] < 0.9f || fabsf(t[1]) > 0.01f || fabsf(t[0]) > 0.8f || fabsf(t[2]) > 0.8f) continue;
         under_n++;
         inside += a[3] > 0 && a[7] / a[3] > 0.5f;
     }
     LX_UNUSED(under);
     CHECK(under_n > 0 && inside == under_n, "texels under the box are found inside geometry (%d of %d)", inside, under_n);
+    /* ...and stay dark: no light under the box, its shadow isn't cut off at its outline */
+    float under_max = 0;
+    for (int i = 0; i < b->texel_count; i++) {
+        const float *t = &b->texels[(size_t)i * 12];
+        if (t[3] <= 0 || t[9] < 0.9f || fabsf(t[1]) > 0.01f || fabsf(t[0]) > 0.8f || fabsf(t[2]) > 0.8f) continue;
+        under_max = lx_maxf(under_max, b->color[i * 4 + 1]);
+    }
+    CHECK(under_max == 0, "no light under the box (brightest %.3f)", under_max);
+    /* ambient occlusion leaves a Baked light's direct light alone: right beside the box the sun still gives 3 */
+    LxVec3 beside = lm_probe(b, s, floor, lx_v3(1.4f, 0, 0), 0.36f, up, NULL);
+    CHECK(fabsf(beside.y - 3.0f) < 0.05f, "the sun right beside the box isn't darkened by AO (%.3f)", beside.y);
     CHECK(fabsf(box_top.y - 3.0f) < 0.05f, "the box's top gets it too (%.3f)", box_top.y);
     /* direction map: straight up in the open */
     int dir_ok = 0, dir_n = 0;
@@ -1089,6 +1100,19 @@ static void test_lightmapper(void) {
     CHECK(fabsf(open.y / (LX_PI * 0.5f) - 1.0f) < 0.06f, "sky irradiance in the open (%.3f)", open.y);
     CHECK(near_box.y < open.y * 0.9f, "the box shades the floor beside it (%.3f vs %.3f)", near_box.y, open.y);
     lx_lightmap_bake_free(b);
+    /* ambient occlusion: the ground right at the box's foot darkens more than the sky alone does; the open floor doesn't */
+    s->bake.ao_intensity = 0;
+    b = lm_bake_cpu(s);
+    LxVec3 foot_off = lm_probe(b, s, floor, lx_v3(1.4f, 0, 0), 0.36f, up, NULL), open_off = lm_probe(b, s, floor, lx_v3(8, 0, 8), 1.5f, up, NULL);
+    lx_lightmap_bake_free(b);
+    s->bake.ao_intensity = 1;
+    s->bake.ao_radius = 1;
+    b = lm_bake_cpu(s);
+    LxVec3 foot_on = lm_probe(b, s, floor, lx_v3(1.4f, 0, 0), 0.36f, up, NULL), open_on = lm_probe(b, s, floor, lx_v3(8, 0, 8), 1.5f, up, NULL);
+    printf("  ambient occlusion at the box's foot: %.3f without, %.3f with (open floor %.3f / %.3f)\n", foot_off.y, foot_on.y, open_off.y, open_on.y);
+    CHECK(foot_on.y < foot_off.y * 0.9f, "AO darkens the ground at the box's foot (%.3f -> %.3f)", foot_off.y, foot_on.y);
+    CHECK(fabsf(open_on.y - open_off.y) < open_off.y * 0.02f, "and not the open floor (%.3f / %.3f)", open_off.y, open_on.y);
+    lx_lightmap_bake_free(b);
 
     /* files: written and read back */
     char path[LX_PATH_MAX];
@@ -1121,7 +1145,7 @@ static void test_lightmapper(void) {
     CHECK(lx_entity_data(c, cb)->lm_index == -1, "an object without one stays without");
     CHECK(c->lightmap_count == 1 && !strcmp(c->lightmap_ref, "Lightmaps/Bake"), "lightmap folder saved");
     CHECK(lx_get_light(c, cs)->mode == LX_LIGHT_BAKED && lx_get_light(c, cs)->shadow_radius == 0.4f, "light mode saved");
-    CHECK(c->bake.samples == 256 && c->bake.texels_per_unit == 2, "bake settings saved");
+    CHECK(c->bake.samples == 256 && c->bake.texels_per_unit == 2 && c->bake.ao_intensity == 1 && c->bake.ao_radius == 1, "bake settings saved");
     lx_scene_destroy(c);
     lx_scene_destroy(s);
 }

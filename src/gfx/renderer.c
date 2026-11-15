@@ -1520,7 +1520,7 @@ bool lx_renderer_lightmap_begin(const LxLightmapBake *b) {
     static const float none[12] = {0};
     if (b->texel_count) gi_upload(&R.lm_buf[4], b->texels, (size_t)b->texel_count * 48);
     else gi_upload(&R.lm_buf[4], none, sizeof none);
-    gi_zero_buffer(&R.lm_buf[5], (size_t)(b->texel_count ? b->texel_count : 1) * 32);
+    gi_zero_buffer(&R.lm_buf[5], (size_t)(b->texel_count ? b->texel_count : 1) * LX_LM_ACC * 4);
     if (b->voxel_count) gi_upload(&R.lm_buf[6], b->vox_pos, (size_t)b->voxel_count * 16);
     else gi_upload(&R.lm_buf[6], none, 16);
     gi_zero_buffer(&R.lm_buf[7], (size_t)(b->voxel_count ? b->voxel_count : 1) * 80);
@@ -1548,6 +1548,7 @@ void lx_renderer_lightmap_trace(LxLightmapBake *b, int first, int count, uint32_
     pc.zenith[0] = b->sky_zenith.x; pc.zenith[1] = b->sky_zenith.y; pc.zenith[2] = b->sky_zenith.z; pc.zenith[3] = b->ambient;
     pc.horizon[0] = b->sky_horizon.x; pc.horizon[1] = b->sky_horizon.y; pc.horizon[2] = b->sky_horizon.z; pc.horizon[3] = b->eps;
     pc.ground[0] = b->ground.x; pc.ground[1] = b->ground.y; pc.ground[2] = b->ground.z;
+    pc.ground[3] = b->set.ao_intensity > 0 ? b->set.ao_radius : 0;   /* ambient occlusion ray length (0 = off) */
     /* work items: texels first, then volume voxels (a slice is always one kind) */
     bool vox = first >= b->texel_count;
     pc.counts[0] = vox ? first - b->texel_count : first; pc.counts[1] = count; pc.counts[2] = b->light_count; pc.counts[3] = b->bounces;
@@ -1565,7 +1566,7 @@ bool lx_renderer_lightmap_end(LxLightmapBake *b, bool read_back) {
     if (!R.lm_baking) return false;
     bool ok = true;
     for (int pass = 0; read_back && pass < 2; pass++) {   /* texel sums, then voxel sums (5 vec4 -> 20 floats each, same layout) */
-        size_t bytes = pass ? (size_t)b->voxel_count * 80 : (size_t)b->texel_count * 32;
+        size_t bytes = pass ? (size_t)b->voxel_count * 80 : (size_t)b->texel_count * LX_LM_ACC * 4;
         if (!bytes) continue;
         GpuBuffer st;
         buffer_create(&st, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);

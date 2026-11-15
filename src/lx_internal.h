@@ -461,6 +461,7 @@ typedef struct LxLmLight {
 #define LX_MAX_BAKE_VOLUMES 8
 typedef struct LxLmVolume { int entity; int n[3]; int first; } LxLmVolume;
 typedef struct LxLmTile { int entity, atlas, x, y, size; } LxLmTile;
+#define LX_LM_ACC 12
 typedef struct LxLightmapBake {
     LxBakeSettings set;
     int bounces;
@@ -475,7 +476,7 @@ typedef struct LxLightmapBake {
     int texel_count;          /* atlas_count * atlas_size^2 */
     float *texels;            /* 12 per texel: position, valid; normal, texel size (m); face normal, 0 */
     int *owner;               /* tile of each texel, -1 = none */
-    float *accum;             /* 8 per texel: irradiance sum rgb, samples; direction sum xyz, back-face hits */
+    float *accum;             /* LX_LM_ACC per texel: irradiance sum rgb, samples; direction sum xyz, back-face hits; open (AO), direct rgb (Baked lights straight on) */
     float *color, *dir;       /* resolved: RGBA per texel */
     /* Baked Lighting Volumes: 3D textures of light, traced after the texels (work items texel_count + voxel) */
     LxLmVolume *vols;

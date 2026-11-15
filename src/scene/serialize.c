@@ -133,6 +133,7 @@ char *lx_scene_serialize(const LxScene *s) {
     const LxBakeSettings *bk = &s->bake;
     lx_sb_printf(&sb, "bake.texels_per_unit = %g\nbake.max_atlas = %d\nbake.bounces = %d\nbake.samples = %d\nbake.directional = %d\nbake.denoise = %d\n",
                  bk->texels_per_unit, bk->max_atlas_size, bk->bounces, bk->samples, bk->directional, bk->denoise);
+    lx_sb_printf(&sb, "bake.ao = %g\nbake.ao_radius = %g\n", bk->ao_intensity, bk->ao_radius);
     if (s->lightmap_count > 0 || s->volume_count > 0) lx_sb_printf(&sb, "lightmaps = %d %s\n", s->lightmap_count, s->lightmap_ref);
     if (s->volume_count > 0) lx_sb_printf(&sb, "volumes = %d\n", s->volume_count);
     int next_id = 1;
@@ -187,6 +188,8 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
             else if (!strcmp(k, "bake.samples")) s->bake.samples = atoi(v);
             else if (!strcmp(k, "bake.directional")) s->bake.directional = lx_parse_bool(v);
             else if (!strcmp(k, "bake.denoise")) s->bake.denoise = lx_parse_bool(v);
+            else if (!strcmp(k, "bake.ao")) s->bake.ao_intensity = (float)atof(v);
+            else if (!strcmp(k, "bake.ao_radius")) s->bake.ao_radius = (float)atof(v);
             else if (!strcmp(k, "lightmaps")) {
                 char ref[LX_REF_MAX] = {0};
                 int n = 0;

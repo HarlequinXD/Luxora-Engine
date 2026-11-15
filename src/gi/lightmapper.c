@@ -57,6 +57,8 @@ LxBakeSettings lx_bake_settings_defaults(void) {
     b.samples = 128;
     b.directional = true;
     b.denoise = true;
+    b.ao_intensity = 1.0f;
+    b.ao_radius = 1.0f;
     return b;
 }
 
@@ -170,8 +172,19 @@ static void trace_texel(const LxLightmapBake *b, int texel, uint32_t sample, flo
     }
     E = lx_add3(E, path);
     D = lx_add3(D, lx_scale3(first_dir, lum3(path)));
+    /* ambient occlusion: does a short ray get out (corners, contact under objects)? */
+    float open = 1;
+    if (b->set.ao_intensity > 0 && b->set.ao_radius > 0) {
+        LxVec3 ad = lm_cosine(n, &rng);
+        float an = lx_dot3(ad, ng);
+        if (an <= 0) ad = lx_norm3(lx_sub3(ad, lx_scale3(ng, 2.0f * an - 1e-3f)));
+        LxRay ar = {x, ad};
+        open = lx_bvh_occluded(&b->bvh, ar, b->set.ao_radius) ? 0.0f : 1.0f;
+    }
     acc[0] += E.x; acc[1] += E.y; acc[2] += E.z; acc[3] += 1.0f;
     acc[4] += D.x; acc[5] += D.y; acc[6] += D.z; acc[7] += back;
+    acc[8] += open;
+    acc[9] += E.x - path.x; acc[10] += E.y - path.y; acc[11] += E.z - path.z;   /* Baked lights straight on (AO leaves it alone) */
 }
 
 /* uniform direction on the sphere */
@@ -238,7 +251,7 @@ static void cpu_pass_job(void *user, int begin, int end, int thread) {
     for (int i = begin; i < end; i++) {
         int t = p->first + i;
         if (t < p->b->texel_count) {
-            if (p->b->texels[(size_t)t * 12 + 3] > 0) trace_texel(p->b, t, p->sample, &p->b->accum[(size_t)t * 8]);
+            if (p->b->texels[(size_t)t * 12 + 3] > 0) trace_texel(p->b, t, p->sample, &p->b->accum[(size_t)t * LX_LM_ACC]);
         } else {
             int v = t - p->b->texel_count;
             trace_voxel(p->b, v, p->sample, &p->b->vox_acc[(size_t)v * 20]);
@@ -380,7 +393,7 @@ LxLightmapBake *lx_lightmap_prepare(LxScene *s) {
     size_t texels = (size_t)b->atlas_count * (size_t)size * (size_t)size;
     b->texel_count = (int)texels;
     b->texels = lx_calloc(texels * 12, sizeof(float));
-    b->accum = lx_calloc(texels * 8, sizeof(float));
+    b->accum = lx_calloc(texels * LX_LM_ACC, sizeof(float));
     b->owner = lx_alloc(sizeof(int) * texels);
     float *bestd = lx_alloc(sizeof(float) * texels);
     for (size_t i = 0; i < texels; i++) { b->owner[i] = -1; bestd[i] = 1e30f; }
@@ -517,14 +530,19 @@ void lx_lightmap_resolve(LxLightmapBake *b) {
     lx_free(b->color); lx_free(b->dir);
     b->color = lx_calloc(n * 4, sizeof(float));
     b->dir = lx_calloc(n * 4, sizeof(float));
-    uint8_t *valid = lx_calloc(n, 1);
+    uint8_t *valid = lx_calloc(n, 1), *inside = lx_calloc(n ? n : 1, 1);
+    float ao_k = lx_clampf(b->set.ao_intensity, 0.0f, 1.0f);
     for (size_t i = 0; i < n; i++) {
-        const float *a = &b->accum[i * 8];
+        const float *a = &b->accum[i * LX_LM_ACC];
         if (b->owner[i] < 0 || a[3] <= 0) continue;
-        if (a[7] / a[3] > 0.5f) continue;   /* mostly sees the back of geometry: inside something */
+        if (a[7] / a[3] > 0.5f) { inside[i] = 1; continue; }   /* mostly sees the back of geometry: covered by something */
         valid[i] = 1;
         float inv = 1.0f / a[3];
-        b->color[i * 4] = a[0] * inv; b->color[i * 4 + 1] = a[1] * inv; b->color[i * 4 + 2] = a[2] * inv; b->color[i * 4 + 3] = 1;
+        /* ambient occlusion: corners and contact darken */
+        /* (on the sky and bounced light: the light of Baked lights shining straight on has its own exact shadows) */
+        float ao = b->set.ao_radius > 0 ? 1.0f - ao_k * (1.0f - a[8] * inv) : 1.0f;
+        for (int c = 0; c < 3; c++) b->color[i * 4 + c] = (a[9 + c] + (a[c] - a[9 + c]) * ao) * inv;
+        b->color[i * 4 + 3] = 1;
         float l = lum3(lx_v3(a[0], a[1], a[2]));
         LxVec3 dv = l > 1e-8f ? lx_scale3(lx_v3(a[4], a[5], a[6]), 1.0f / l) : lx_v3(0, 0, 0);
         if (lx_len3(dv) > 1) dv = lx_norm3(dv);
@@ -569,8 +587,17 @@ void lx_lightmap_resolve(LxLightmapBake *b) {
         lx_free(b->color);
         b->color = out;
     }
-    /* fill: texels without light of their own (padding, insides) take their object's neighbours', ring by ring,
-     * so filtering never reads black at chart edges */
+    /* texels covered by something (a floor under a box standing on it) are dark: no light gets there, and the
+     * darkness reaching a texel's width past the box's foot is its contact shadow. Filling them from their lit
+     * neighbours would put light under the box and cut its shadow off at its outline. */
+    for (size_t i = 0; i < n; i++)
+        if (inside[i]) {
+            for (int k = 0; k < 4; k++) { b->color[i * 4 + k] = 0; b->dir[i * 4 + k] = 0; }
+            valid[i] = 1;
+        }
+    lx_free(inside);
+    /* fill: texels without light of their own (padding around the charts) take their object's neighbours', ring
+     * by ring, so filtering never reads black at chart edges */
     uint8_t *nv = lx_alloc(n);
     for (int pass = 0; pass < 16; pass++) {
         memcpy(nv, valid, n);

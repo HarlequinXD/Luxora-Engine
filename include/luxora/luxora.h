@@ -461,6 +461,8 @@ typedef struct LxBakeSettings {
     int samples;             /* paths per texel */
     bool directional;        /* also store where light comes from, so normal maps respond to baked light */
     bool denoise;
+    float ao_intensity;      /* ambient occlusion: how much corners and contact darken (0 off, 1 full) */
+    float ao_radius;         /* how far it looks (m) */
 } LxBakeSettings;
 LxBakeSettings lx_bake_settings_defaults(void);
 LxBakeSettings *lx_scene_bake_settings(LxScene *s);
