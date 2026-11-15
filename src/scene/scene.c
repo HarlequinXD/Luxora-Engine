@@ -75,7 +75,7 @@ void lx_scene_destroy(LxScene *s) {
         d->sgraph = NULL;
     }
     for (int i = 1; i < s->count; i++)
-        if (s->entities[i].crowd_sim) lx_crowd_destroy(s->entities[i].crowd_sim);
+        if (s->entities[i].alive && s->entities[i].crowd_sim) lx_crowd_destroy(s->entities[i].crowd_sim);
     lx_free(s->entities);
     lx_free(s->free_slots);
     lx_free(s->order_cache);
@@ -161,7 +161,7 @@ void lx_entity_destroy(LxScene *s, LxEntity e) {
     lx_free(d->sgraph);
     d->sgraph = NULL;
     if (d->audio_voice >= 0) lx_audio_stop(s, e);
-    if (d->crowd_sim) lx_crowd_destroy(d->crowd_sim);
+    if (d->crowd_sim) { lx_crowd_destroy(d->crowd_sim); d->crowd_sim = NULL; }   /* the slot is freed, not cleared: scene_destroy would free it again */
     if ((d->comps & LX_COMP_MESH) && d->mesh.static_geometry) s->static_version++;
     unlink_from_parent(s, d);
     d->alive = false;
