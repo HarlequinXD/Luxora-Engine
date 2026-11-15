@@ -117,6 +117,13 @@ static void fz_alarm(int sig) {   /* a run that never ends: say which one */
     if (write(2, msg, sizeof msg - 1) < 0) {}
     if (write(2, g_fz_now, strlen(g_fz_now)) < 0) {}
     if (write(2, "\n", 1) < 0) {}
+    /* Also as a workflow command on stdout, so the name reaches the run's annotations. Reading a job's
+       log needs admin rights on the repository; annotations do not, so this is what makes a hang in CI
+       diagnosable by whoever is looking at the failure. */
+    static const char ann[] = "::error title=Fuzz hang::action run exceeded the watchdog: ";
+    if (write(1, ann, sizeof ann - 1) < 0) {}
+    if (write(1, g_fz_now, strlen(g_fz_now)) < 0) {}
+    if (write(1, "\n", 1) < 0) {}
     _exit(3);
 }
 #endif
@@ -169,6 +176,15 @@ static void fz_run(const LxFsmActionDesc *d, int variant, const char *dir) {
     lx_free(sb.data);
     lx_assets_clear();   /* fresh graph */
     lx_save_clear();     /* and fresh save data: keys from earlier runs must not pile up */
+    /* Audio settings are global and some actions change them, so pin them per run. Ray-traced acoustics
+     * are on by default with 256 rays a source, and they rebuild a BVH of the scene whenever its static
+     * geometry changes - which a graph duplicating itself does every frame. That is most of the cost of
+     * the sweep and none of what it is testing, so it goes off here; the acoustics have their own tests. */
+    if (lx_audio_settings()) {
+        LxAudioSettings *as = lx_audio_settings();
+        *as = lx_audio_defaults();
+        as->propagation = false;
+    }
     LxEntity o;
     LxScene *s = fz_scene(&o);
     lx_physics_settings()->gravity = lx_v3(0, -9.81f, 0);
