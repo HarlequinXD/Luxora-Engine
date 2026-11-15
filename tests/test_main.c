@@ -178,6 +178,41 @@ static LxEntity body(LxScene *s, const char *name, LxColliderShape shape, LxVec3
     return e;
 }
 
+/* walking about on a thin mesh-collider floor, with a carried model that has its own collider and the odd long
+ * frame (a hitch while falling), the character must never sink in (it did: 0.35 m and more) */
+static void test_character_no_sinking(void) {
+    printf("character never sinks into a thin floor\n");
+    LxScene *s = lx_scene_create("Sink");
+    LxEntity fl = lx_spawn_primitive(s, LX_PRIM_PLANE, "Floor", lx_v3(0, 0, 0));
+    lx_entity_set_scale(s, fl, lx_v3(40, 1, 40));
+    lx_remove_component(s, fl, LX_COMP_COLLIDER);
+    lx_add_collider(s, fl, LX_COLLIDER_MESH);
+    LxEntity p = lx_entity_create(s, "Player");
+    lx_entity_set_position(s, p, lx_v3(0, 0.01f, 0));
+    lx_add_character(s, p);
+    LxEntity body = lx_spawn_primitive(s, LX_PRIM_CAPSULE, "Model", lx_v3(0, 0.9f, 0));   /* keeps its collider */
+    lx_entity_set_parent(s, body, p);
+    uint32_t rng = 7;
+    float vy = 0, lowest = 1e9f;
+    LxVec3 dir = lx_v3(1, 0, 0);
+    for (int f = 0; f < 60 * 120; f++) {
+        rng = rng * 1664525u + 1013904223u;
+        float r = (float)(rng >> 8) / 16777216.0f;
+        float dt = 1.0f / 60 * (0.3f + r * 1.4f);
+        if (f % 97 == 13) dt = 0.1f + r * 0.3f;   /* a hitch */
+        if (f % 90 == 0) dir = lx_v3(sinf(r * 6.283f), 0, cosf(r * 6.283f));
+        LxVec3 pos = lx_entity_world_position(s, p);
+        if (fabsf(pos.x) > 15) dir.x = pos.x > 0 ? -fabsf(dir.x) : fabsf(dir.x);
+        if (fabsf(pos.z) > 15) dir.z = pos.z > 0 ? -fabsf(dir.z) : fabsf(dir.z);
+        bool g = lx_character_grounded(s, p);
+        vy = g ? (f % 61 == 0 ? 25.0f : -2.0f) : vy - 20 * dt;
+        lx_character_move(s, p, lx_v3(dir.x * 6 * dt, vy * dt, dir.z * 6 * dt));
+        lowest = lx_minf(lowest, lx_entity_world_position(s, p).y);
+    }
+    CHECK(lowest > -0.02f, "never below the floor (lowest feet %.3f)", lowest);
+    lx_scene_destroy(s);
+}
+
 static void test_physics(void) {
     printf("physics\n");
     /* resting sphere and box */
@@ -2343,6 +2378,7 @@ int main(void) {
     test_reflection_probe();
     test_icon_images();
     test_physics();
+    test_character_no_sinking();
     test_game_ui();
     test_gameplay();
     test_jpeg();

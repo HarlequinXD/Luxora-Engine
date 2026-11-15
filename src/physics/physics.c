@@ -1454,6 +1454,18 @@ static Body char_body(const CharCtx *k, LxVec3 feet) {
     return b;
 }
 
+/* the character's own colliders: on it or on anything it carries (its model, a hit box, a held sword) */
+static bool char_own(const CharCtx *k, const Body *b) {
+    if (b->index == k->self) return true;
+    for (int i = b->index, guard = 0; i > 0 && guard < 64; guard++) {
+        LxEntity p = k->s->entities[i].parent;
+        if (!p) return false;
+        i = (int)(p & LX_INDEX_MASK);
+        if (i == k->self) return true;
+    }
+    return false;
+}
+
 /* pushes the capsule out of everything it overlaps; returns flags, slides `motion` along what it hit */
 static int char_resolve(CharCtx *k, LxVec3 *feet, LxVec3 *motion, bool allow_step, bool push_bodies) {
     int flags = 0;
@@ -1463,7 +1475,7 @@ static int char_resolve(CharCtx *k, LxVec3 *feet, LxVec3 *motion, bool allow_ste
         bool any = false;
         for (int i = 0; i < k->w->nb; i++) {
             Body *b = &k->w->bodies[i];
-            if (b->index == k->self || b->trigger || !aabb_overlap(cap.box, b->box)) continue;
+            if (b->trigger || !aabb_overlap(cap.box, b->box) || char_own(k, b)) continue;
             if (!layers_collide(0, b->layer)) continue;
             collide(k->w, &cap, b, &m);
             for (int c = 0; c < m.count; c++) {
@@ -1526,7 +1538,8 @@ int lx_character_move(LxScene *s, LxEntity e, LxVec3 disp) {
     bool was_grounded = ch->grounded;
     float len = lx_len3(disp);
     int steps = (int)ceilf(len / lx_maxf(k.radius * 0.5f, 0.01f));
-    steps = steps < 1 ? 1 : (steps > 32 ? 32 : steps);
+    steps = steps < 1 ? 1 : (steps > 256 ? 256 : steps);   /* never more than half the radius at a time: a long frame
+                                                              mustn't push the capsule through a thin floor */
     LxVec3 motion = scl(disp, 1.0f / (float)steps);
     int flags = 0;
     for (int i = 0; i < steps; i++) {
@@ -1536,10 +1549,22 @@ int lx_character_move(LxScene *s, LxEntity e, LxVec3 disp) {
     }
     /* stick to the ground going down slopes and stairs */
     if (was_grounded && !(flags & LX_CHAR_GROUNDED) && disp.y <= 0) {
-        LxVec3 probe = sub(feet, lx_v3(0, k.step_height + 0.05f, 0)), m0 = lx_v3(0, 0, 0);
-        int f = char_resolve(&k, &probe, &m0, false, false);
-        bool straight_down = fabsf(probe.x - feet.x) + fabsf(probe.z - feet.z) < 1e-3f;   /* never snap sideways off a ledge */
-        if ((f & LX_CHAR_GROUNDED) && straight_down && probe.y < feet.y) { feet = probe; flags |= LX_CHAR_GROUNDED; }
+        /* feel down in small steps: one deep probe could put the capsule's bottom through a thin floor (a plane, a
+         * mesh collider), and that floor then pushes it further down instead of up */
+        float reach = k.step_height + 0.05f, inc = lx_maxf(k.radius * 0.4f, 0.01f), went = 0;
+        LxVec3 probe = feet;
+        while (went < reach) {
+            float dy = lx_minf(inc, reach - went);
+            went += dy;
+            probe.y -= dy;
+            LxVec3 m0 = lx_v3(0, 0, 0);
+            int f = char_resolve(&k, &probe, &m0, false, false);
+            if (fabsf(probe.x - feet.x) + fabsf(probe.z - feet.z) >= 1e-3f) break;   /* never snap sideways off a ledge */
+            if (f & LX_CHAR_GROUNDED) {
+                if (probe.y < feet.y) { feet = probe; flags |= LX_CHAR_GROUNDED; }
+                break;
+            }
+        }
     }
     d = lx_entity_data(s, e);
     LxQuat rot = lx_entity_world_rotation(s, e);
