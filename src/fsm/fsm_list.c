@@ -31,13 +31,27 @@ static void l_clear(LxFsmCtx *c) {
 static const LxFsmActionDesc A_L_CLEAR = {"List Clear", "List", "Removes every item from a list.", "clear {0}",
     {PARR("List")}, 0, 0, LX_FSM_ONCE, l_clear, l_clear, NULL};
 
+/* A list long enough for any game, and short enough that resizing to it is instant. A graph that works
+ * out a silly length (a bad sum, a stray multiply) then asks for it would otherwise sit there allocating
+ * billions of items, which looks exactly like the game hanging. */
+#define FSM_LIST_MAX 1048576
+
 static void l_resize(LxFsmCtx *c) {
     LxArray a = fsm_list(c, 0);
-    if (lx_array_valid(a)) lx_array_resize(a, lx_fsm_int(c, 1) < 0 ? 0 : lx_fsm_int(c, 1));
+    if (!lx_array_valid(a)) return;
+    int want = lx_fsm_int(c, 1);
+    if (want < 0) want = 0;
+    if (want > FSM_LIST_MAX) {
+        LX_WARN("List Resize: %d items is more than a list may hold; using %d", want, FSM_LIST_MAX);
+        want = FSM_LIST_MAX;
+    }
+    lx_array_resize(a, want);
+    lx_fsm_set_int(c, 2, lx_array_length(a));
 }
 static const LxFsmActionDesc A_L_RESIZE = {"List Resize", "List", "Makes a list exactly this long, adding empty items or cutting the end off.",
     "resize {0} to {1}",
-    {PARR("List"), P("Length", LX_FSM_INT, "0")}, 0, 0, LX_FSM_ONCE, l_resize, l_resize, NULL};
+    {PARR("List"), P("Length", LX_FSM_INT, "0"), POPT("Store Length", LX_FSM_INT)},
+    0, 0, LX_FSM_ONCE, l_resize, l_resize, NULL};
 
 /* ==========================================================================================
  *  adding and removing

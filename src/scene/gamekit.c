@@ -362,7 +362,7 @@ bool lx_inventory_save(const char *slot) {
     }
     snprintf(key, sizeof key, "%s.inventory", slot && slot[0] ? slot : "game");
     lx_save_set_string(key, text);
-    return lx_save_write();
+    return true;   /* stored; the engine writes the save data out at the end of the frame */
 }
 bool lx_inventory_load(const char *slot) {
     char key[96];
@@ -392,7 +392,6 @@ void lx_checkpoint_set(LxScene *s, LxEntity e) {
     lx_save_set_float("checkpoint.y", p.y);
     lx_save_set_float("checkpoint.z", p.z);
     lx_save_set_float("checkpoint.yaw", lx_entity_euler(s, e).y);
-    lx_save_write();
 }
 bool lx_checkpoint_get(LxVec3 *pos, float *yaw, char *scene, size_t cap) {
     if (!lx_save_has("checkpoint.x")) return false;
@@ -423,7 +422,9 @@ int lx_globals_save(const char *slot) {
         lx_save_set_string(key, text);
         n++;
     }
-    lx_save_write();
+    /* No write from here: setting the values marks the save data dirty and the engine writes it out at
+       the end of the frame. Writing the whole file per call made saving every frame cost a full rewrite
+       each time. Call lx_save_write() yourself if you need it on disk this instant. */
     return n;
 }
 int lx_globals_load(const char *slot) {

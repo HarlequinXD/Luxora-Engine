@@ -121,13 +121,17 @@ static void fz_alarm(int sig) {   /* a run that never ends: say which one */
 }
 #endif
 static char g_fz_first[400];
+/* the slowest run of the whole sweep, reported at the end: an action that takes seconds with awkward
+   parameters is a bug even where no watchdog fires, so it should not need a CI failure to notice. */
+static double g_fz_slowest;
+static char g_fz_slowest_name[200];
 
 /* one graph: state A runs the action, state B runs it again (FINISHED/GO go back and forth) */
 static void fz_run(const LxFsmActionDesc *d, int variant, const char *dir) {
     snprintf(g_fz_now, sizeof g_fz_now, "%s (variant %d)", d->name, variant);
-    /* LUXORA_FUZZ_TRACE=1 names each run before it starts, so a crash says which action did it.
-       On Windows there is no alarm handler, so this is the only way to find the culprit. */
+    /* LUXORA_FUZZ_TRACE=1 names each run before it starts, so a crash says which action did it. */
     if (getenv("LUXORA_FUZZ_TRACE")) { fprintf(stderr, "FUZZ %s\n", g_fz_now); fflush(stderr); }
+    double fz_t0 = lx_time();
 #if !defined(_WIN32)
     alarm(getenv("LUXORA_FUZZ_ALARM") ? (unsigned)atoi(getenv("LUXORA_FUZZ_ALARM")) : 20);
 #endif
@@ -164,6 +168,7 @@ static void fz_run(const LxFsmActionDesc *d, int variant, const char *dir) {
     lx_file_write(path, sb.data, sb.len);
     lx_free(sb.data);
     lx_assets_clear();   /* fresh graph */
+    lx_save_clear();     /* and fresh save data: keys from earlier runs must not pile up */
     LxEntity o;
     LxScene *s = fz_scene(&o);
     lx_physics_settings()->gravity = lx_v3(0, -9.81f, 0);
@@ -194,6 +199,11 @@ static void fz_run(const LxFsmActionDesc *d, int variant, const char *dir) {
     }
     lx_scene_stop_simulation(s);
     lx_scene_destroy(s);
+    double fz_took = lx_time() - fz_t0;
+    if (fz_took > g_fz_slowest) {
+        g_fz_slowest = fz_took;
+        lx_strcpy(g_fz_slowest_name, sizeof g_fz_slowest_name, g_fz_now);
+    }
 #if !defined(_WIN32)
     alarm(0);
 #endif
@@ -235,6 +245,12 @@ static void test_fsm_fuzz(void) {
         for (int v = 0; v < variants; v++) { fz_run(d, v, dir); runs++; }
     }
     CHECK(g_fz_broken == 0, "%d of %d action runs left the scene broken; first: %s", g_fz_broken, runs, g_fz_first);
+    /* The watchdog that stops a true hang only exists where alarm() does, and only at 20s. This catches
+       the near misses everywhere, well before that. The heaviest honest run is a spawn storm - a graph
+       duplicating an object that duplicates in turn, until the per-frame budget stops it - which costs a
+       second or two; anything an order of magnitude past that is a runaway, not work. */
+    CHECK(g_fz_slowest < 10.0, "the slowest of %d action runs was %.2fs (%s)", runs, g_fz_slowest, g_fz_slowest_name);
+    printf("  slowest action run: %.3fs (%s)\n", g_fz_slowest, g_fz_slowest_name);
     lx_physics_settings()->gravity = lx_v3(0, -9.81f, 0);
     lx_time_set_scale(1);
     lx_assets_clear();
@@ -538,6 +554,17 @@ static void test_fsm_semantics(void) {
     sem_begin(ONE("[action]\ntype = List Get\np0 = $arr\np1 = 99\np2 = $f\np3 = NO\n"));
     sem_run(2, DT);
     CHECK(!strcmp(sst(), "No"), "List Get past the end takes the Out Of Range event rather than crashing (%s)", sst());
+    sem_end();
+
+    /* an absurd length must be capped, not spend minutes allocating billions of items */
+    sem_begin(ONE("[action]\ntype = List Resize\np0 = $arr\np1 = 2000000000\np2 = $i\n"));
+    {
+        double t0 = lx_time();
+        sem_run(2, DT);
+        double took = lx_time() - t0;
+        CHECK(sv("i") > 0 && sv("i") <= 1048576 && took < 5.0,
+              "List Resize caps a silly length and returns promptly (%g items in %.2fs)", sv("i"), took);
+    }
     sem_end();
 
     sem_begin(ONE("[action]\ntype = String Split\np0 = a,b,c\np1 = ,\np2 = $sarr\np3 = false\np4 = $i\n"
