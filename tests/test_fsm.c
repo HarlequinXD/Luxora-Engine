@@ -816,6 +816,90 @@ static void test_fsm_playmaker(void) {
     }
     sem_end();
 
+    /* ---- the game kit (actions6.c / gamekit.c) ---- */
+    lx_inventory_clear();
+    sem_begin(ONE("[action]\ntype = Inventory Add\np0 = Key\np1 = 2\n[action]\ntype = Inventory Remove\np0 = Key\np1 = 1\np4 = $i\n"
+                  "[action]\ntype = Apply Damage\np0 = $f\np1 = -50\np2 = 30\n"
+                  "[action]\ntype = Format Time\nupdate = once\np0 = 125.5\np1 = m:ss\np2 = $s\n"
+                  "[action]\ntype = Inventory Has\np0 = Key\np1 = 1\np3 = YES\np4 = NO\n"));
+    sem_run(1, DT);
+    CHECK(sv("i") == 1 && !strcmp(sst(), "Yes") && NEAR(sv("f"), 30, 1e-4f) && !strcmp(svs("s"), "2:05"), "Inventory Add / Remove / Has, Apply Damage heals up to max, Format Time (%g %s %g %s)",
+          sv("i"), sst(), sv("f"), svs("s"));
+    sem_end();
+    CHECK(lx_inventory_count("Key") == 1 && !lx_inventory_remove("Key", 5) && lx_inventory_count("Key") == 1, "lx_inventory: not enough means nothing is taken");
+    lx_inventory_save("t");
+    lx_inventory_clear();
+    CHECK(lx_inventory_load("t") && lx_inventory_count("Key") == 1, "lx_inventory: save and load");
+    lx_inventory_clear();
+    /* line of sight: the Owner (facing +Z) and Enemy1 (at -2 0.5 1, in front-left) with nothing between */
+    sem_begin(ONE("[action]\ntype = Line Of Sight\nupdate = once\np0 = Owner\np1 = name:Enemy1\np2 = 20\np3 = 160\np4 = 0.3\np5 = 0\np6 = YES\np7 = NO\n"));
+    sem_run(1, DT);
+    bool saw = !strcmp(sst(), "Yes");
+    sem_end();
+    sem_begin(ONE("[action]\ntype = Line Of Sight\nupdate = once\np0 = Owner\np1 = name:Enemy1\np2 = 1\np3 = 160\np4 = 0.3\np5 = 0\np6 = YES\np7 = NO\n"));
+    sem_run(1, DT);
+    CHECK(saw && !strcmp(sst(), "No"), "Line Of Sight: sees it, but not beyond its range");
+    sem_end();
+    /* shooting and blast damage reach a script-less target as a message (graphs get it as an event) */
+    sem_begin(ONE("[action]\ntype = Shoot Ray\np0 = name:Cam\np2 = 0 -0.33 -1\np3 = 50\np5 = 7\np8 = YES\np9 = NO\np10 = $o\n"));
+    lx_entity_set_euler(g_ss, lx_entity_find(g_ss, "Cam"), lx_v3(0, 0, 0));
+    sem_run(1, DT);
+    CHECK(!strcmp(sst(), "Yes") && svo("o") != 0, "Shoot Ray hits something in front of the camera");
+    sem_end();
+    sem_begin(ONE("[action]\ntype = Area Damage\np0 = Owner\np2 = 6\np3 = 40\np7 = $i\n"));
+    sem_run(1, DT);
+    CHECK(sv("i") >= 3, "Area Damage reaches the objects around (%g)", sv("i"));
+    sem_end();
+    /* patrol between two waypoints */
+    sem_begin(ONE("[action]\ntype = Patrol\np0 = Owner\np1 = name:Points\np2 = 4\np3 = 0\np4 = Once\np6 = YES\np7 = $i\n"));
+    {
+        LxEntity pts = lx_entity_create(g_ss, "Points"), a = lx_entity_create(g_ss, "A"), b = lx_entity_create(g_ss, "B");
+        lx_entity_set_parent(g_ss, a, pts); lx_entity_set_parent(g_ss, b, pts);
+        lx_entity_set_position(g_ss, a, lx_v3(3, 0, 3)); lx_entity_set_position(g_ss, b, lx_v3(3, 0, 6));
+        lx_remove_component(g_ss, g_so, LX_COMP_RIGIDBODY);
+        sem_run(150, DT);
+        LxVec3 p = lx_entity_world_position(g_ss, g_so);
+        CHECK(!strcmp(sst(), "Yes") && NEAR(p.x, 3, 0.4f) && NEAR(p.z, 6, 0.4f), "Patrol walks the waypoints in order, then finishes (%.2f %.2f, %s)", p.x, p.z, sst());
+    }
+    sem_end();
+    /* a spawner with a total */
+    sem_begin(ONE("[action]\ntype = Spawner\np0 = Prefabs/Box.lxprefab\np1 = Owner\np3 = 0.1\np4 = 2\np5 = 3\np9 = $i\n"));
+    sem_run(30, DT);
+    int boxes = 0;
+    for (int k = 0; k < lx_scene_entity_count(g_ss); k++) boxes += !strcmp(lx_entity_name(g_ss, lx_scene_entity_at(g_ss, k)), "Box");
+    CHECK(boxes == 2 && sv("i") == 2, "Spawner keeps Max Alive at once (%d)", boxes);
+    sem_end();
+    /* dialogue: a click finishes typing, the next turns the page, the last closes it */
+    sem_begin(ONE("[action]\ntype = Dialogue\np0 = Guide\np1 = One|Two\np2 = 10\np3 = YES\n"));
+    lx_game_ui_begin_frame(0, 0, 1280, 720, true);
+    pm_frame(); pm_step();   /* the dialogue opens */
+    for (int k = 0; k < 4; k++) {   /* finish page 1, next page, finish page 2, close */
+        pm_frame(); pm_step();
+        pm_frame(); g_lx_input.keys[LX_KEY_ENTER] = true; pm_step();
+        pm_frame(); g_lx_input.keys[LX_KEY_ENTER] = false; pm_step();
+    }
+    CHECK(!strcmp(sst(), "Yes"), "Dialogue: Enter skips, turns the page and closes (%s)", sst());
+    sem_end();
+    sem_begin(ONE("[action]\ntype = Choice Menu\np0 = Pick\np1 = Left\np2 = NO\np3 = Right\np4 = YES\np9 = $i\n"));
+    pm_frame(); pm_step();
+    pm_frame(); g_lx_input.keys[LX_KEY_DOWN] = true; pm_step();
+    pm_frame(); g_lx_input.keys[LX_KEY_DOWN] = false; pm_step();
+    pm_frame(); g_lx_input.keys[LX_KEY_ENTER] = true; pm_step();
+    pm_frame(); g_lx_input.keys[LX_KEY_ENTER] = false; pm_step();
+    CHECK(!strcmp(sst(), "Yes") && sv("i") == 1, "Choice Menu: Down then Enter picks the second (%s)", sst());
+    sem_end();
+    /* checkpoints and the whole-save of the globals */
+    sem_begin(ONE("[action]\ntype = Checkpoint\np0 = Owner\np1 = Set\np4 = false\n"));
+    sem_run(1, DT);
+    lx_entity_set_position(g_ss, g_so, lx_v3(9, 9, 9));
+    CHECK(lx_checkpoint_respawn(g_ss, g_so) && NEAR(lx_entity_world_position(g_ss, g_so).x, 0, 0.3f), "Checkpoint, then respawn there");
+    sem_end();
+    {
+        char fmt[32];
+        lx_format_time(fmt, sizeof fmt, 3725.25f, 1);
+        CHECK(!strcmp(fmt, "1:02:05"), "lx_format_time h:mm:ss (%s)", fmt);
+    }
+
     /* ---- keys: a press on the entering frame belongs to the state before ---- */
     sem_begin(ONE("[action]\ntype = Get Key Down\np0 = Space\np1 = YES\n[action]\ntype = Get Key\np0 = Space\np1 = $b\n"));
     pm_frame(); g_lx_input.keys[LX_KEY_SPACE] = true; pm_step();

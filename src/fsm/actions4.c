@@ -44,23 +44,8 @@ static bool under(LxScene *s, LxEntity root, LxEntity e) {
 }
 static LxVec3 flat(LxVec3 v) { return lx_v3(v.x, 0, v.z); }
 
-/* what's under a point of the game UI canvas: colliders first, then plain meshes (objects without a collider) */
-static bool pick_at(LxScene *s, LxVec2 canvas, float dist, LxRaycastHit *hit) {
-    LxVec3 o, d;
-    memset(hit, 0, sizeof *hit);
-    if (!lx_ui_canvas_ray(s, canvas, &o, &d)) return false;
-    if (!(dist > 0)) dist = 1000;
-    if (lx_physics_raycast(s, o, d, dist, LX_ALL_LAYERS, hit)) return true;
-    float t = 0;
-    LxRay ray = {o, d};
-    LxEntity e = lx_scene_raycast(s, ray, dist, &t);
-    if (!e) return false;
-    hit->entity = e;
-    hit->point = lx_add3(o, lx_scale3(d, t));
-    hit->normal = lx_scale3(d, -1);
-    hit->distance = t;
-    return true;
-}
+/* what's under a point of the game UI canvas: the game kit's lx_pick_at (colliders, then plain meshes) */
+static bool pick_at(LxScene *s, LxVec2 canvas, float dist, LxRaycastHit *hit) { return lx_pick_at(s, canvas, dist, hit); }
 
 /* ======================================================================
  *  Input: keys. On the frame the state is entered a press or release belongs to the state before

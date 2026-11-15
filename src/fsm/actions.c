@@ -853,4 +853,6 @@ void lx_fsm_register_builtin_actions(void) {
     lx_fsm_register_playmaker_actions();
     extern void lx_fsm_register_array_actions(void);
     lx_fsm_register_array_actions();
+    extern void lx_fsm_register_gamekit_actions(void);
+    lx_fsm_register_gamekit_actions();
 }

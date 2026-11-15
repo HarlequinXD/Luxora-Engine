@@ -530,6 +530,7 @@ void lx_gameplay_begin_frame(LxScene *s, float dt, float unscaled_dt) {
     g->game_time += dt;
     g->unscaled_dt = unscaled_dt;
     update_timers(s, dt);
+    lx_gamekit_frame(s, dt, unscaled_dt);   /* music fades, faded scene changes */
 }
 
 void lx_gameplay_after_update(LxScene *s, float dt) { update_tweens(s, dt); }
