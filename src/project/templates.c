@@ -283,6 +283,7 @@ static bool fps_template(const char *assets, LxScene *s) {
         l->intensity = 0;
         l->range = 6;
         l->cast_shadows = false;
+        l->contribute_gi = false;   /* a flash for a frame: not worth re-solving the bounce light for */
     }
     static const float en[][3] = {{-8, -6, 0}, {6, -8, 1}, {12, 2, 0}, {-14, 4, 1}, {0, -16, 0}, {16, -16, 1}};
     for (int i = 0; i < 6; i++) {

@@ -60,6 +60,7 @@ static void enemy_start(LxBehaviourCtx *ctx) {
         l->intensity = 0;
         l->range = 6;
         l->cast_shadows = false;
+        l->contribute_gi = false;   /* a flash: no bounce light */
     }
     e->cooldown = randf(0.3f, 1.0f);
     go(e, IDLE);

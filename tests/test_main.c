@@ -506,6 +506,22 @@ static void test_gi_convergence(void) {
     int ox = (int)((-6 - v->origin.x) / v->cell_size.x), oz = (int)((-6 - v->origin.z) / v->cell_size.z);
     float near_l = v->sh[((size_t)(cz * v->res[1] + y) * v->res[0] + cx) * 12], far_l = v->sh[((size_t)(oz * v->res[1] + y) * v->res[0] + ox) * 12];
     CHECK(near_l > far_l * 2.0f, "GI follows a moved light within 30 frames (%g vs %g)", near_l, far_l);
+    /* a character walking about and a flickering lamp must not keep the whole scene noisy (the game templates did) */
+    lx_entity_set_position(s, lamp, lx_v3(0, 4, 0));
+    for (int f = 0; f < 300; f++) lx_gi_update(s, &g);
+    float still = gi_flicker(s, &g);
+    LxEntity walker = lx_spawn_primitive(s, LX_PRIM_CAPSULE, "Walker", lx_v3(-5, 1, 0));
+    lx_add_character(s, walker);
+    lx_get_mesh(s, walker)->static_geometry = false;
+    float noisy = 0;
+    for (int f = 0; f < 400; f++) {
+        lx_entity_set_position(s, walker, lx_v3(-5 + (float)(f % 200) * 0.05f, 1, 0));
+        lx_get_light(s, lamp)->intensity = 200 * (0.995f + 0.005f * sinf((float)f));   /* a slight flicker: the change itself stays small */
+        lx_gi_update(s, &g);
+        if (f == 399) noisy = gi_flicker(s, &g);
+    }
+    CHECK(lx_gi_moving_triangles() > 0 && noisy < early * 0.5f, "moving characters and flickering lights don't keep the GI noisy (%.4f; 8 frames in: %.4f)", noisy, early);
+    (void)still;
     lx_gi_shutdown();
     lx_scene_destroy(s);
 }

@@ -126,10 +126,24 @@ static bool takes(LxScene *s, int i, bool moving) {
     bool can_be_static = lx_entity_can_be_static(s, lx_entity_make((uint32_t)i, d->generation & 0xfffu), NULL);
     if (!moving) return d->mesh.static_geometry && can_be_static;
     if (can_be_static) return false;
-    for (LxEntity p = d->parent; p; p = lx_entity_data(s, p)->parent)   /* hidden by an inactive parent */
-        if (!lx_entity_data(s, p)->active) return false;
+    for (LxEntity p = d->parent; p; p = lx_entity_data(s, p)->parent) {
+        LxEntityData *pd = lx_entity_data(s, p);
+        if (!pd->active) return false;                    /* hidden by an inactive parent */
+        if (pd->comps & LX_COMP_CAMERA) return false;     /* a first person gun or hands: in front of the eye, not in the world */
+    }
+    /* small things (pickups, eyes, swords) change the bounce light too little to be worth re-solving it every time
+     * they move: only things bigger than about 0.8 m (characters, vehicles, doors) */
+    const LxMesh *m = lx_skin_mesh_of(d);
+    if (m) {
+        LxVec3 e = lx_sub3(m->bounds.max, m->bounds.min);
+        LxVec3 sc = lx_v3(lx_len3(lx_v3(d->world.m[0], d->world.m[1], d->world.m[2])), lx_len3(lx_v3(d->world.m[4], d->world.m[5], d->world.m[6])),
+                          lx_len3(lx_v3(d->world.m[8], d->world.m[9], d->world.m[10])));
+        float size = lx_maxf(e.x * sc.x, lx_maxf(e.y * sc.y, e.z * sc.z));
+        if (size < 0.8f) return false;
+    }
     return true;
 }
+bool lx_gi_moving_takes(LxScene *s, int i) { return takes(s, i, true); }
 /* the triangles it uses: static geometry its full detail; moving objects their current pose (skinned meshes are
  * deformed on the CPU every frame) at their lowest level of detail, to keep the per-frame build cheap */
 static const LxMeshLod *build_lod(LxEntityData *d, bool moving) {

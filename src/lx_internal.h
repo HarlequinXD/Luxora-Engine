@@ -446,6 +446,7 @@ typedef struct LxHit {
 
 void lx_bvh_build_from_scene(LxBvh *bvh, LxScene *s);
 void lx_bvh_build_moving(LxBvh *b, LxScene *s);
+bool lx_gi_moving_takes(LxScene *s, int entity_index);   /* a moving object big enough (and not a camera's view model) for GI */
 bool lx_bvh_refit_moving(LxBvh *b, LxScene *s);   /* same objects, new poses: refit (false: build again) */   /* moving objects' current triangles (GI, rebuilt as they move) */
 void lx_bvh_free(LxBvh *bvh);
 bool lx_bvh_intersect(const LxBvh *bvh, LxRay ray, float tmax, LxHit *hit);

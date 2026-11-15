@@ -31,7 +31,8 @@ static struct {
     float *accum;        /* temporally accumulated SH */
     float *filtered;     /* accum after a light spatial denoise (what the renderer samples) */
     float *scratch;
-    uint64_t light_hash, prev_light_hash; /* changes when any light or the sky changes */
+    uint64_t light_hash, prev_light_hash; /* changes when any light, the sky or the settings change */
+    uint64_t soft_hash, prev_moving_hash; /* small changes: moving objects, lights' brightness (flickers); as last blended */
     float *frame;        /* this frame's estimate */
     int res[3], cells;
     LxVec3 origin, cell_size;
@@ -132,9 +133,7 @@ static uint64_t moving_signature(LxScene *s, uint64_t *set) {
     uint64_t h = 1469598103934665603ull, hs = h;
     for (int i = 1; i < s->count; i++) {
         LxEntityData *d = &s->entities[i];
-        if (!d->alive || !d->active || !(d->comps & LX_COMP_MESH)) continue;
-        LxEntity e = lx_entity_make((uint32_t)i, d->generation & 0xfffu);
-        if (lx_entity_can_be_static(s, e, NULL)) continue;
+        if (!lx_gi_moving_takes(s, i)) continue;   /* the same objects the moving BVH takes */
         const LxMesh *m = lx_skin_mesh_of(d);
         if (!m) continue;
         int32_t q[19];
@@ -293,12 +292,15 @@ static void gather_emitters(LxScene *s) {
         G.total_power += e.power;
     }
     /* lighting signature: any change restarts the fast-adapt phase of accumulation */
-    uint64_t h = 1469598103934665603ull ^ (uint64_t)G.emitter_count;
+    uint64_t h = 1469598103934665603ull ^ (uint64_t)G.emitter_count, tint = 1469598103934665603ull;
     for (int i = 0; i < G.emitter_count; i++) {
         const Emitter *e = &G.emitters[i];
-        float f[11] = {(float)e->kind, e->pos.x, e->pos.y, e->pos.z, e->dir.x, e->dir.y, e->dir.z, e->color.x, e->color.y, e->color.z, e->cos_cone};
-        h = hash_floats(h, f, 11);
+        float f[8] = {(float)e->kind, e->pos.x, e->pos.y, e->pos.z, e->dir.x, e->dir.y, e->dir.z, e->cos_cone};
+        h = hash_floats(h, f, 8);
+        float c[3] = {e->color.x, e->color.y, e->color.z};   /* a flickering or fading light: a small change */
+        tint = hash_floats(tint, c, 3);
     }
+    G.soft_hash = (G.moving_hash ^ tint) * 1099511628211ull;
     float env[7] = {s->env.sky_zenith.x, s->env.sky_zenith.y, s->env.sky_zenith.z, s->env.sky_horizon.x, s->env.sky_horizon.y,
                     s->env.sky_horizon.z, s->env.ambient_intensity};
     G.light_hash = hash_floats(h, env, 7);
@@ -542,7 +544,6 @@ static int prepare(LxScene *s, const LxGraphicsSettings *g, bool gpu) {
         G.scene_version++;   /* the GPU re-uploads and resizes too */
     }
     gather_emitters(s);
-    G.light_hash = (G.light_hash ^ G.moving_hash) * 1099511628211ull;   /* something moved: GI refreshes */
     {   /* graphics settings changes (bounces, intensity...) count as a lighting change too */
         const uint8_t *gb = (const uint8_t *)g;
         uint64_t h = G.light_hash;
@@ -559,7 +560,8 @@ static int prepare(LxScene *s, const LxGraphicsSettings *g, bool gpu) {
     /* Converged: nothing has changed since enough photons were traced, so tracing more only burns every
      * core for no visible difference. Stop until a light, the sky or the geometry changes. */
     static const double SETTLED = 24e6;
-    if (G.light_hash == G.prev_light_hash && G.frame_count >= 8 && (G.settled_photons >= SETTLED || G.frame_count >= 1024.0f) &&
+    if (G.light_hash == G.prev_light_hash && G.soft_hash == G.prev_moving_hash && G.frame_count >= 8 &&
+        (G.settled_photons >= SETTLED || G.frame_count >= 1024.0f) &&
         (gpu || G.filtered)) {
         G.photons_last = 0;
         G.volume.sh = G.filtered;
@@ -576,13 +578,22 @@ static int prepare(LxScene *s, const LxGraphicsSettings *g, bool gpu) {
 /* Progressive accumulation: while the lighting is unchanged every frame gets equal weight
  * (a true running average), so noise keeps falling as 1/sqrt(frames) up to a long history.
  * When a light, the sky or the geometry changes, the history is shortened to 1/responsiveness
- * frames so the solution follows quickly, then it lengthens again and the noise settles. */
+ * frames so the solution follows quickly, then it lengthens again and the noise settles.
+ * Characters and other moving objects only change the light around them, and in a game something is
+ * always moving: they shorten the history much less (else the whole scene would stay as noisy as a
+ * dozen frames of photons for as long as anything walks about). */
+static float history_cap(const LxGraphicsSettings *g, bool lights_changed) {
+    float fast = 1.0f / lx_clampf(g->gi_responsiveness, 0.01f, 1.0f);
+    return lights_changed ? fast : lx_maxf(fast * 5.0f, 64.0f);
+}
 static float next_blend(const LxGraphicsSettings *g) {
     static const float MAX_HISTORY = 1024.0f;
-    if (G.light_hash != G.prev_light_hash) {
-        float fast = 1.0f / lx_clampf(g->gi_responsiveness, 0.01f, 1.0f);
-        if (G.frame_count > fast) G.frame_count = fast;
+    bool lit = G.light_hash != G.prev_light_hash, moved = G.soft_hash != G.prev_moving_hash;
+    if (lit || moved) {
+        float cap = history_cap(g, lit);
+        if (G.frame_count > cap) G.frame_count = cap;
         G.prev_light_hash = G.light_hash;
+        G.prev_moving_hash = G.soft_hash;
         G.settled_photons = 0;
     }
     G.frame_count = lx_minf(G.frame_count + 1.0f, MAX_HISTORY);
@@ -682,7 +693,7 @@ static struct {
     float cell;
     int res;
     uint32_t scene_version;
-    uint64_t light_hash;
+    uint64_t light_hash, moving_hash;
     float frame_count;
     double settled;
 } C[LX_GI_CASCADES];
@@ -736,7 +747,7 @@ bool lx_gi_gpu_frame(LxScene *s, const LxGraphicsSettings *g, int photon_multipl
             for (int a = 0; a < 3; a++) cf->shift[a] = o[a] - C[l].origin[a];
         }
         cf->origin = lx_v3(o[0] * cell, o[1] * cell, o[2] * cell);
-        if (reset) { C[l].frame_count = 0; C[l].settled = 0; C[l].light_hash = 0; }
+        if (reset) { C[l].frame_count = 0; C[l].settled = 0; C[l].light_hash = 0; C[l].moving_hash = 0; }
         if (cf->shifted) C[l].settled = 0;   /* new cells at the edge: keep tracing */
         C[l].on = true;
         C[l].cell = cell;
@@ -744,11 +755,12 @@ bool lx_gi_gpu_frame(LxScene *s, const LxGraphicsSettings *g, int photon_multipl
         C[l].scene_version = G.scene_version;
         memcpy(C[l].origin, o, sizeof o);
         /* trace unless settled: the same rule as the scene grid, per cascade */
-        bool changed = C[l].light_hash != G.light_hash;
+        bool lit = C[l].light_hash != G.light_hash, moved = C[l].moving_hash != G.soft_hash, changed = lit || moved;
         if (changed) {
-            float fast = 1.0f / lx_clampf(g->gi_responsiveness, 0.01f, 1.0f);
-            if (C[l].frame_count > fast) C[l].frame_count = fast;
+            float cap = history_cap(g, lit);
+            if (C[l].frame_count > cap) C[l].frame_count = cap;
             C[l].light_hash = G.light_hash;
+            C[l].moving_hash = G.soft_hash;
             C[l].settled = 0;
         }
         cf->show = C[l].frame_count >= 2;
@@ -787,6 +799,7 @@ float *lx_gi_cpu_reference(LxScene *s, const LxGraphicsSettings *g, int frames, 
     gg.gi_enabled = true;
     for (int i = 0; i < frames; i++) {
         G.prev_light_hash = G.light_hash;   /* never "converged" or "changed": plain averaging */
+        G.prev_moving_hash = G.soft_hash;
         G.settled_photons = 0;
         lx_gi_update(s, &gg);
     }
