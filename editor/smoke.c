@@ -1183,9 +1183,9 @@ static void s_bake_setup(void) {
     l->intensity = 3;
     l->mode = LX_LIGHT_BAKED;
     l->shadow_radius = 0.5f;
-    lx_entity_set_euler(s, sun, lx_v3(-40, 30, 0));
+    lx_entity_set_euler(s, sun, lx_v3(40, 210, 0));
     lx_scene_update_transforms(s);
-    g_bake_sun = lx_norm3(lx_mat4_dir(lx_entity_world_matrix(s, sun), lx_v3(0, 0, -1)));
+    g_bake_sun = lx_norm3(lx_mat4_dir(lx_entity_world_matrix(s, sun), lx_v3(0, 0, 1)));
     /* a Baked Lighting Volume, and two moving balls in it: one in the box's baked shadow, one in the open */
     LxEntity vol = lx_entity_create(s, "Volume");
     lx_add_bake_volume(s, vol);

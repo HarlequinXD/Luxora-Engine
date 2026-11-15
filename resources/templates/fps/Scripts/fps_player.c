@@ -65,7 +65,7 @@ static void interact(LxBehaviourCtx *ctx, Player *p) {
     if (!p->cam) return;
     LxScene *s = ctx->scene;
     LxVec3 from = lx_entity_world_position(s, p->cam);
-    LxVec3 dir = lx_quat_rotate(lx_entity_world_rotation(s, p->cam), lx_v3(0, 0, -1));
+    LxVec3 dir = lx_quat_rotate(lx_entity_world_rotation(s, p->cam), lx_v3(0, 0, 1));
     LxRaycastHit hit;
     LxEntity target = 0;
     if (lx_physics_raycast_ignore(s, from, dir, 2.6f, LX_ALL_LAYERS, ctx->self, &hit)) target = tagged_up(s, hit.entity, "Interactable");
@@ -103,7 +103,7 @@ static void player_update(LxBehaviourCtx *ctx, float dt) {
         if (p->cam) {
             float k = clampf(p->dead_t / 0.8f, 0, 1);
             lx_entity_set_position(s, p->cam, lx_v3(0, EYE_STAND - 1.2f * k * k, 0));
-            lx_entity_set_euler(s, p->cam, lx_v3(p->pitch * (1 - k) - 15 * k, 0, 70 * k));
+            lx_entity_set_euler(s, p->cam, lx_v3(-p->pitch * (1 - k) + 15 * k, 0, 70 * k));
         }
         return;
     }
@@ -143,7 +143,7 @@ static void player_update(LxBehaviourCtx *ctx, float dt) {
     g_game.sprinting = sprint && amount > 0.1f;
     float speed = p->crouched ? ctx->params[P_CROUCH] : g_game.sprinting ? ctx->params[P_SPRINT] : ctx->params[P_WALK];
     if (g_game.aiming) speed *= 0.6f;
-    LxVec3 fwd = forward_of_yaw(p->yaw), right = lx_v3(-fwd.z, 0, fwd.x);
+    LxVec3 fwd = forward_of_yaw(p->yaw), right = right_of(fwd);
     LxVec3 want = lx_scale3(lx_add3(lx_scale3(fwd, move.y), lx_scale3(right, move.x)), speed);
     float accel = p->grounded ? 14.0f : 3.0f;   /* snappy on the ground, a little air control */
     p->vel = lx_lerp3(p->vel, want, smooth(accel, dt));
@@ -173,11 +173,11 @@ static void player_update(LxBehaviourCtx *ctx, float dt) {
         p->land = approach(p->land, 0, dt * 2.5f);
         float bob = ctx->params[P_BOB] * p->bob_amount * (g_game.aiming ? 0.2f : 1.0f);
         float eye = EYE_STAND + (EYE_CROUCH - EYE_STAND) * p->crouch;
-        LxVec3 off = lx_v3(cosf(p->bob_t * 0.5f) * 0.035f * bob, fabsf(sinf(p->bob_t * 0.5f)) * 0.05f * bob - sinf(p->land * 3.1416f) * 0.18f, 0);
+        LxVec3 off = lx_v3(-cosf(p->bob_t * 0.5f) * 0.035f * bob, fabsf(sinf(p->bob_t * 0.5f)) * 0.05f * bob - sinf(p->land * 3.1416f) * 0.18f, 0);
         float sh = g_game.shake;
         LxVec3 jitter = lx_v3(randf(-1, 1) * sh * 1.6f, randf(-1, 1) * sh * 1.6f, randf(-1, 1) * sh * 2.5f);
         lx_entity_set_position(s, p->cam, lx_v3(off.x, eye + off.y, 0));
-        lx_entity_set_euler(s, p->cam, lx_v3(p->pitch + jitter.x, jitter.y, jitter.z + cosf(p->bob_t * 0.5f) * 0.6f * bob));
+        lx_entity_set_euler(s, p->cam, lx_v3(-p->pitch + jitter.x, jitter.y, jitter.z + cosf(p->bob_t * 0.5f) * 0.6f * bob));   /* + pitch = up: -X turn */
         LxCamera *cam = lx_get_camera(s, p->cam);
         float base = ctx->params[P_FOV] > 0 ? ctx->params[P_FOV] : 72;
         float target = g_game.aiming ? base * 0.68f : g_game.sprinting ? base + 8 : base;

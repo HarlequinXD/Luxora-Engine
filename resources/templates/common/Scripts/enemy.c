@@ -54,7 +54,7 @@ static void enemy_start(LxBehaviourCtx *ctx) {
     if (ctx->params[P_RANGED] > 0) {   /* a light for the muzzle flash */
         e->muzzle = lx_entity_create(s, "Muzzle Flash");
         lx_entity_set_parent(s, e->muzzle, ctx->self);
-        lx_entity_set_position(s, e->muzzle, lx_v3(0.35f, 1.3f, -0.7f));
+        lx_entity_set_position(s, e->muzzle, lx_v3(-0.35f, 1.3f, 0.7f));   /* front right (+Z ahead, -X right) */
         LxLight *l = lx_add_light(s, e->muzzle, LX_LIGHT_POINT);
         l->color = lx_v3(1, 0.45f, 0.2f);
         l->intensity = 0;

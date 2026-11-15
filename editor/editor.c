@@ -661,9 +661,9 @@ LxEntity ed_create(const char *what) {
         e = lx_entity_create(s, what);
         lx_entity_set_position(s, e, lx_v3(at.x, 1.5f, at.z));
         if (!strcmp(what, "Camera")) lx_add_camera(s, e);
-        else if (!strcmp(what, "Directional Light")) { lx_add_light(s, e, LX_LIGHT_DIRECTIONAL); lx_entity_set_euler(s, e, lx_v3(-50, -30, 0)); lx_entity_set_position(s, e, lx_v3(at.x, 6, at.z)); }
+        else if (!strcmp(what, "Directional Light")) { lx_add_light(s, e, LX_LIGHT_DIRECTIONAL); lx_entity_set_euler(s, e, lx_v3(50, 150, 0)); lx_entity_set_position(s, e, lx_v3(at.x, 6, at.z)); }
         else if (!strcmp(what, "Point Light")) { lx_add_light(s, e, LX_LIGHT_POINT); lx_entity_set_position(s, e, lx_v3(at.x, 2.5f, at.z)); }
-        else if (!strcmp(what, "Spot Light")) { lx_add_light(s, e, LX_LIGHT_SPOT); lx_entity_set_position(s, e, lx_v3(at.x, 4, at.z)); lx_entity_set_euler(s, e, lx_v3(-90, 0, 0)); }
+        else if (!strcmp(what, "Spot Light")) { lx_add_light(s, e, LX_LIGHT_SPOT); lx_entity_set_position(s, e, lx_v3(at.x, 4, at.z)); lx_entity_set_euler(s, e, lx_v3(90, 0, 0)); }
         else if (!strcmp(what, "Audio Source")) lx_add_audio_source(s, e, "");
         else if (!strcmp(what, "Reflection Probe")) { lx_add_reflection_probe(s, e); lx_entity_set_position(s, e, lx_v3(at.x, 2.0f, at.z)); }
         else if (!strcmp(what, "Baked Lighting Volume")) { lx_add_bake_volume(s, e); ed_bake_volume_fit(e); }

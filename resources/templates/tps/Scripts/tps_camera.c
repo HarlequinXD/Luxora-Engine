@@ -61,8 +61,8 @@ static void cam_late(LxBehaviourCtx *ctx, float dt) {
     c->pivot = lx_lerp3(c->pivot, target_pivot, ctx->params[P_FOLLOW] > 0 ? smooth(ctx->params[P_FOLLOW], dt) : 1);
 
     /* place it, pulled in by anything between the player and the camera */
-    LxQuat q = lx_quat_euler_deg(lx_v3(-c->pitch, c->yaw, 0));
-    LxVec3 back = lx_quat_rotate(q, lx_v3(0, 0, 1)), side = lx_quat_rotate(q, lx_v3(1, 0, 0));
+    LxQuat q = lx_quat_euler_deg(lx_v3(c->pitch, c->yaw, 0));   /* + pitch: looking down */
+    LxVec3 back = lx_quat_rotate(q, lx_v3(0, 0, -1)), side = lx_quat_rotate(q, lx_v3(-1, 0, 0));   /* forward +Z, right -X */
     LxVec3 pivot = lx_madd3(c->pivot, side, ctx->params[P_SHOULDER]);
     float want = ctx->params[P_DIST];
     LxRaycastHit hit;

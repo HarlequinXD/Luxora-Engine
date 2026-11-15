@@ -428,7 +428,7 @@ static void test_gi(void) {
     lx_entity_set_scale(s, wall, lx_v3(6, 4, 0.5f));
     lx_strcpy(lx_get_mesh(s, wall)->material, LX_REF_MAX, "builtin:red");
     LxEntity sun = lx_entity_create(s, "Sun");
-    lx_entity_set_euler(s, sun, lx_v3(-60, 0, 0));
+    lx_entity_set_euler(s, sun, lx_v3(60, 180, 0));
     lx_add_light(s, sun, LX_LIGHT_DIRECTIONAL)->intensity = 3.0f;
     s->env.ambient_intensity = 0.0f; /* only the sun: every bit of GI must come from bounces */
     LxGraphicsSettings g = lx_graphics_defaults(1);
@@ -1011,7 +1011,7 @@ static void test_lightmapper(void) {
     L->color = lx_v3(1, 1, 1);
     L->mode = LX_LIGHT_BAKED;
     L->shadow_radius = 0;
-    lx_entity_set_euler(s, sun, lx_v3(-90, 0, 0));   /* pointing straight down */
+    lx_entity_set_euler(s, sun, lx_v3(90, 180, 0));   /* pointing straight down */
     s->env.ambient_intensity = 0;
     LxVec3 up = lx_v3(0, 1, 0);
 
@@ -1060,12 +1060,12 @@ static void test_lightmapper(void) {
     lx_lightmap_bake_free(b);
 
     /* tilted 60 degrees: cos 60 = half */
-    lx_entity_set_euler(s, sun, lx_v3(-30, 0, 0));
+    lx_entity_set_euler(s, sun, lx_v3(30, 180, 0));
     b = lm_bake_cpu(s);
     open = lm_probe(b, s, floor, lx_v3(6, 0, 6), 2.0f, up, NULL);
     CHECK(fabsf(open.y - 1.5f) < 0.05f, "a sun 30 degrees above the horizon gives half (%.3f)", open.y);
     lx_lightmap_bake_free(b);
-    lx_entity_set_euler(s, sun, lx_v3(-90, 0, 0));
+    lx_entity_set_euler(s, sun, lx_v3(90, 180, 0));
 
     /* Mixed and Realtime suns put no direct light in the lightmap */
     L = lx_get_light(s, sun);
@@ -1181,7 +1181,7 @@ static void test_bake_volumes(void) {
     L->color = lx_v3(1, 1, 1);
     L->mode = LX_LIGHT_BAKED;
     L->shadow_radius = 0;
-    lx_entity_set_euler(s, sun, lx_v3(-90, 0, 0));
+    lx_entity_set_euler(s, sun, lx_v3(90, 180, 0));
     LxEntity ve = lx_entity_create(s, "Volume");
     LxBakeVolume *bv = lx_add_bake_volume(s, ve);
     bv->size = lx_v3(16, 3, 16);
@@ -1262,7 +1262,7 @@ static void test_gi_headroom(void) {
     LxEntity ground = lx_spawn_primitive(s, LX_PRIM_PLANE, "Ground", lx_v3(0, 0, 0));
     lx_entity_set_scale(s, ground, lx_v3(4, 1, 4));
     LxEntity sun = lx_entity_create(s, "Sun");
-    lx_entity_set_euler(s, sun, lx_v3(-50, 30, 0));
+    lx_entity_set_euler(s, sun, lx_v3(50, 210, 0));
     lx_add_light(s, sun, LX_LIGHT_DIRECTIONAL)->intensity = 3;
     LxEntity hero = lx_spawn_primitive(s, LX_PRIM_CAPSULE, "Hero", lx_v3(0, 0.9f, 0));
     lx_entity_set_scale(s, hero, lx_v3(0.5f, 0.9f, 0.5f));

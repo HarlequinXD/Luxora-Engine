@@ -68,12 +68,14 @@ static inline float angle_delta(float from, float to) {
     float d = fmodf(to - from + 540.0f, 360.0f) - 180.0f;
     return d;
 }
-/* yaw (degrees, around Y) that faces along a flat direction; Luxora's forward is -Z */
-static inline float yaw_of(LxVec3 dir) { return atan2f(-dir.x, -dir.z) * (180.0f / 3.14159265f); }
+/* yaw (degrees, around Y) that faces along a flat direction. Forward is +Z (like Unity); with +Y up, an
+ * object's right is its -X. */
+static inline float yaw_of(LxVec3 dir) { return atan2f(dir.x, dir.z) * (180.0f / 3.14159265f); }
 static inline LxVec3 forward_of_yaw(float yaw) {
     float r = yaw * (3.14159265f / 180.0f);
-    return lx_v3(-sinf(r), 0, -cosf(r));
+    return lx_v3(sinf(r), 0, cosf(r));
 }
+static inline LxVec3 right_of(LxVec3 forward) { return lx_v3(-forward.z, 0, forward.x); }
 static inline LxVec3 flat(LxVec3 v) { return lx_v3(v.x, 0, v.z); }
 
 /* the top of a hierarchy: a bullet that hits an enemy's arm damages the enemy */

@@ -73,7 +73,7 @@ static void fly_update(LxBehaviourCtx *c, float dt) {
     s->pitch = lx_clampf(s->pitch + ly * look * rate, -89.0f, 89.0f);
     lx_entity_set_euler(c->scene, c->self, lx_v3(s->pitch, s->yaw, 0));
     LxQuat q = lx_entity_rotation(c->scene, c->self);
-    LxVec3 fwd = lx_quat_rotate(q, lx_v3(0, 0, -1)), right = lx_quat_rotate(q, lx_v3(1, 0, 0));
+    LxVec3 fwd = lx_quat_rotate(q, lx_v3(0, 0, 1)), right = lx_quat_rotate(q, lx_v3(-1, 0, 0));
     LxVec2 mv = lx_axis2("MoveX", "MoveY");
     float up = (lx_key_down(LX_KEY_E) ? 1.0f : 0.0f) - (lx_key_down(LX_KEY_Q) ? 1.0f : 0.0f);
     LxVec3 p = lx_entity_position(c->scene, c->self);

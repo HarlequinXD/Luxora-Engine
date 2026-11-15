@@ -351,7 +351,7 @@ static void translate(LxFsmCtx *c) {
     set_world_pos(c->scene, e, lx_add3(lx_entity_world_position(c->scene, e), v));
 }
 static const LxFsmActionDesc A_TRANSLATE = {"Translate", "Transform", "Moves an object by an amount (per second when Every Frame).", "Move {0} by {1}",
-    {POBJ("Object"), P("Vector", LX_FSM_VEC3, "0 0 -1"), PENUM("Space", SPACE, "0"), P("Per Second", LX_FSM_BOOL, "true")}, 0, 0, LX_FSM_EVERY_FRAME, translate, translate, NULL};
+    {POBJ("Object"), P("Vector", LX_FSM_VEC3, "0 0 1"), PENUM("Space", SPACE, "0"), P("Per Second", LX_FSM_BOOL, "true")}, 0, 0, LX_FSM_EVERY_FRAME, translate, translate, NULL};
 
 static void set_rotation(LxFsmCtx *c) { LxEntity e = obj(c, 0); if (e) lx_entity_set_euler(c->scene, e, lx_fsm_vec3(c, 1)); }
 static const LxFsmActionDesc A_SET_ROTATION = {"Set Rotation", "Transform", "Sets an object's rotation in degrees (X, Y, Z).", "Rotate {0} to {1}°",
@@ -572,7 +572,7 @@ static void raycast(LxFsmCtx *c) {
     else ev(c, 6);
 }
 static const LxFsmActionDesc A_RAYCAST = {"Raycast", "Physics", "Casts a ray and reports what it hits.", "Ray from {0} along {2}, {4} m: hit → {5}",
-    {POBJ("From Object"), P("Offset", LX_FSM_VEC3, "0 0 0"), P("Direction", LX_FSM_VEC3, "0 0 -1"), PENUM("Space", SPACE, "0"), P("Distance", LX_FSM_FLOAT, "50"),
+    {POBJ("From Object"), P("Offset", LX_FSM_VEC3, "0 0 0"), P("Direction", LX_FSM_VEC3, "0 0 1"), PENUM("Space", SPACE, "0"), P("Distance", LX_FSM_FLOAT, "50"),
      PEV("Hit Event"), PEV("Miss Event"), POPT("Store Did Hit", LX_FSM_BOOL), POPT("Store Hit Object", LX_FSM_OBJECT), POPT("Store Hit Point", LX_FSM_VEC3), POPT("Store Distance", LX_FSM_FLOAT)},
     0, 0, LX_FSM_ONCE, raycast, raycast, NULL};
 
@@ -723,11 +723,11 @@ static const LxFsmActionDesc A_INPUT_ACTION = {"Input Action Event", "Input", "U
 static void get_axis(LxFsmCtx *c) {
     LxVec2 v = lx_axis2(lx_fsm_string(c, 0), lx_fsm_string(c, 1));
     float k = lx_fsm_float(c, 2);
-    lx_fsm_set_vec3(c, 3, lx_v3(v.x * k, 0, -v.y * k));
+    lx_fsm_set_vec3(c, 3, lx_v3(-v.x * k, 0, v.y * k));   /* forward is +Z, right is -X (as a camera looking along +Z sees it) */
     lx_fsm_set_float(c, 4, v.x);
     lx_fsm_set_float(c, 5, v.y);
 }
-static const LxFsmActionDesc A_GET_AXIS = {"Get Axis", "Input", "Reads two Input Manager axes as a movement vector on the ground (X, -Z).", "{3} = ({0}, {1}) × {2}",
+static const LxFsmActionDesc A_GET_AXIS = {"Get Axis", "Input", "Reads two Input Manager axes as a movement vector on the ground: up is +Z (forward), right is -X. Get Axis Vector can follow the camera.", "{3} = ({0}, {1}) × {2}",
     {P("Horizontal Axis", LX_FSM_STRING, "MoveX"), P("Vertical Axis", LX_FSM_STRING, "MoveY"), P("Multiplier", LX_FSM_FLOAT, "5"), POPT("Store Vector", LX_FSM_VEC3), POPT("Store X", LX_FSM_FLOAT), POPT("Store Y", LX_FSM_FLOAT)},
     0, 0, LX_FSM_EVERY_FRAME, get_axis, get_axis, NULL};
 static void mouse_event(LxFsmCtx *c) {

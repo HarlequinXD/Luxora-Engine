@@ -27,7 +27,7 @@ typedef struct Weapon {
     bool reloading;
 } Weapon;
 
-static const LxVec3 AIM_POS = {0.0f, -0.165f, -0.36f};
+static const LxVec3 AIM_POS = {0.0f, -0.165f, 0.36f};   /* in front of the camera (+Z), centred */
 
 static void weapon_start(LxBehaviourCtx *ctx) {
     Weapon *w = ctx->state;
@@ -62,7 +62,7 @@ static void shoot(LxBehaviourCtx *ctx, Weapon *w) {
     LxQuat q = lx_entity_world_rotation(s, w->cam);
     float spread = g_game.spread;
     float a = randf(0, 6.2832f), r = randf(0, 1) * spread * (3.14159f / 180);
-    LxVec3 dir = lx_quat_rotate(q, lx_norm3(lx_v3(cosf(a) * r, sinf(a) * r, -1)));
+    LxVec3 dir = lx_quat_rotate(q, lx_norm3(lx_v3(cosf(a) * r, sinf(a) * r, 1)));
     LxVec3 from = lx_entity_world_position(s, w->cam);
     LxRaycastHit hit;
     if (lx_physics_raycast_ignore(s, from, dir, ctx->params[P_RANGE], LX_ALL_LAYERS, w->player, &hit)) {
@@ -138,12 +138,12 @@ static void weapon_update(LxBehaviourCtx *ctx, float dt) {
     float bob = clampf(speed / 6, 0, 1) * (1 - 0.85f * w->aim) * (airborne ? 0 : 1);
     w->kick = approach(w->kick, 0, dt * 9);
     LxVec3 pos = lx_lerp3(w->hip, AIM_POS, w->aim);
-    pos = lx_add3(pos, lx_v3(w->sway.x + cosf(w->bob_t) * 0.012f * bob, w->sway.y - fabsf(sinf(w->bob_t)) * 0.016f * bob, w->kick * 0.06f));
+    pos = lx_add3(pos, lx_v3(-w->sway.x + cosf(w->bob_t) * 0.012f * bob, w->sway.y - fabsf(sinf(w->bob_t)) * 0.016f * bob, -w->kick * 0.06f));   /* right is -X, back is -Z */
     float dip = w->reloading ? sinf(3.14159f * clampf(w->reload_t / reload_len, 0, 1)) : 0;
     if (g_game.sprinting) dip = fmaxf(dip, 0.5f);
     pos.y -= dip * 0.12f;
     lx_entity_set_position(s, ctx->self, pos);
-    lx_entity_set_euler(s, ctx->self, lx_v3(w->kick * 6 - dip * 30, w->sway.x * 120 + dip * 18, dip * 20));
+    lx_entity_set_euler(s, ctx->self, lx_v3(-w->kick * 6 + dip * 30, -w->sway.x * 120 - dip * 18, dip * 20));   /* muzzle up is a -X turn */
 }
 
 LX_SCRIPT_REGISTER(fps_weapon) {

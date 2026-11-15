@@ -164,6 +164,7 @@ bool lx_camera_view(LxScene *s, LxEntity cam, int w, int h, LxRenderView *out) {
     if (!d || !(d->comps & LX_COMP_CAMERA)) return false;
     memset(out, 0, sizeof *out);
     LxMat4 world = lx_entity_world_matrix(s, cam);
+    for (int k = 0; k < 3; k++) { world.m[k] = -world.m[k]; world.m[8 + k] = -world.m[8 + k]; }   /* cameras look along +Z */
     out->view = lx_mat4_inverse(world);
     out->proj = lx_mat4_perspective(d->camera.fov_deg * LX_DEG2RAD, h > 0 ? (float)w / (float)h : 1, d->camera.near_clip, d->camera.far_clip);
     out->eye = lx_v3(world.m[12], world.m[13], world.m[14]);

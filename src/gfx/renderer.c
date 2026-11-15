@@ -3219,7 +3219,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
         LxEntityData *d = &s->entities[i];
         if (!d->alive || !d->active || !(d->comps & LX_COMP_LIGHT)) continue;
         const LxLight *l = &d->light;
-        LxVec3 dir = lx_norm3(lx_mat4_dir(d->world, lx_v3(0, 0, -1)));
+        LxVec3 dir = lx_norm3(lx_mat4_dir(d->world, lx_v3(0, 0, 1)));
         LxVec3 col = lx_scale3(l->color, l->intensity);
         if (l->type == LX_LIGHT_DIRECTIONAL) {
             if (l->intensity > best_sun) {
@@ -3767,7 +3767,10 @@ bool lx_camera_view(LxScene *s, LxEntity cam, int w, int h, LxRenderView *out) {
     if (!d || !(d->comps & LX_COMP_CAMERA)) return false;
     LxMat4 world = lx_entity_world_matrix(s, cam);
     memset(out, 0, sizeof *out);
-    out->view = lx_mat4_inverse(world);
+    /* cameras look along their +Z; the view looks down -Z: turn the camera half round first */
+    LxMat4 turned = world;
+    for (int k = 0; k < 3; k++) { turned.m[k] = -turned.m[k]; turned.m[8 + k] = -turned.m[8 + k]; }
+    out->view = lx_mat4_inverse(turned);
     float aspect = h > 0 ? (float)w / (float)h : 1.0f;
     const LxCamera *c = &d->camera;
     if (c->orthographic) {

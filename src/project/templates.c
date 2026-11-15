@@ -88,7 +88,7 @@ static void arena(LxScene *s, bool tps) {
     env->fog_density = 0.008f;
     LxEntity sun = lx_entity_find(s, "Directional Light");
     if (sun) {
-        lx_entity_set_euler(s, sun, lx_v3(-38, -40, 0));
+        lx_entity_set_euler(s, sun, lx_v3(38, 140, 0));
         LxLight *l = lx_get_light(s, sun);
         l->color = lx_v3(1.0f, 0.88f, 0.74f);
         l->intensity = 3.2f;
@@ -185,7 +185,7 @@ static LxEntity enemy(LxScene *s, const char *name, LxVec3 at, bool ranged) {
     col->height = 1.8f;
     LxEntity body = prim(s, LX_PRIM_CAPSULE, "Body", lx_v3(0, 0.9f, 0), lx_v3(0.9f, 0.9f, 0.9f), ranged ? "Materials/Enemy Ranged.lxmat" : "Materials/Enemy.lxmat", false);
     lx_entity_set_parent(s, body, e);
-    LxEntity eye = prim(s, LX_PRIM_SPHERE, "Eye", lx_v3(0, 0.45f, -0.42f), lx_v3(0.35f, 0.18f, 0.12f), "Materials/Glow Red.lxmat", false);
+    LxEntity eye = prim(s, LX_PRIM_SPHERE, "Eye", lx_v3(0, 0.45f, 0.42f), lx_v3(0.35f, 0.18f, 0.12f), "Materials/Glow Red.lxmat", false);
     lx_entity_set_parent(s, eye, body);
     /* Health, Speed, Sight Range, Attack Reach, Attack Damage, Score, Ranged, Seconds Between Attacks */
     const float melee[] = {60, 3.2f, 14, 1.7f, 10, 100, 0, 1.1f};
@@ -248,6 +248,7 @@ static bool fps_template(const char *assets, LxScene *s) {
     LxEntity cam = lx_entity_find(s, "Main Camera");
     LxEntity p = lx_entity_create(s, "Player");
     lx_entity_set_position(s, p, lx_v3(0, 0, 16));
+    lx_entity_set_euler(s, p, lx_v3(0, 180, 0));   /* facing into the yard (-Z) */
     lx_entity_set_tag(s, p, "Player");
     LxCharacterController *cc = lx_add_character(s, p);
     cc->radius = 0.4f;
@@ -261,22 +262,22 @@ static bool fps_template(const char *assets, LxScene *s) {
         lx_entity_set_euler(s, cam, lx_v3(0, 0, 0));
         lx_get_camera(s, cam)->fov_deg = 72;
         lx_get_camera(s, cam)->near_clip = 0.05f;   /* the gun is close */
-        LxEntity gun = prim(s, LX_PRIM_CUBE, "Gun", lx_v3(0.24f, -0.22f, -0.46f), lx_v3(0.08f, 0.11f, 0.5f), "Materials/Gun.lxmat", false);
+        LxEntity gun = prim(s, LX_PRIM_CUBE, "Gun", lx_v3(-0.24f, -0.22f, 0.46f), lx_v3(0.08f, 0.11f, 0.5f), "Materials/Gun.lxmat", false);
         lx_entity_set_parent(s, gun, cam);
         lx_entity_set_tag(s, gun, "Weapon");
         /* Damage, Shots Per Second, Reload Seconds, Range, Spread, Recoil, Automatic */
         const float wp[] = {25, 8, 1.3f, 120, 0.9f, 1.4f, 1};
         behave(s, gun, "FPS Weapon", wp, 7);
-        LxEntity barrel = prim(s, LX_PRIM_CYLINDER, "Barrel", lx_v3(0, 0.02f, -0.62f), lx_v3(0.5f, 0.35f, 0.5f), "Materials/Metal.lxmat", false);
+        LxEntity barrel = prim(s, LX_PRIM_CYLINDER, "Barrel", lx_v3(0, 0.02f, 0.62f), lx_v3(0.5f, 0.35f, 0.5f), "Materials/Metal.lxmat", false);
         lx_entity_set_euler(s, barrel, lx_v3(90, 0, 0));
         lx_entity_set_parent(s, barrel, gun);
-        LxEntity sight = prim(s, LX_PRIM_CUBE, "Sight", lx_v3(0, 0.62f, -0.1f), lx_v3(0.3f, 0.25f, 0.15f), "Materials/Metal.lxmat", false);
+        LxEntity sight = prim(s, LX_PRIM_CUBE, "Sight", lx_v3(0, 0.62f, 0.1f), lx_v3(0.3f, 0.25f, 0.15f), "Materials/Metal.lxmat", false);
         lx_entity_set_parent(s, sight, gun);
-        LxEntity mag = prim(s, LX_PRIM_CUBE, "Magazine", lx_v3(0, -0.75f, 0.1f), lx_v3(0.7f, 0.8f, 0.2f), "Materials/Gun.lxmat", false);
+        LxEntity mag = prim(s, LX_PRIM_CUBE, "Magazine", lx_v3(0, -0.75f, -0.1f), lx_v3(0.7f, 0.8f, 0.2f), "Materials/Gun.lxmat", false);
         lx_entity_set_parent(s, mag, gun);
         LxEntity ml = lx_entity_create(s, "Muzzle Light");
         lx_entity_set_parent(s, ml, cam);
-        lx_entity_set_position(s, ml, lx_v3(0.24f, -0.16f, -1.0f));
+        lx_entity_set_position(s, ml, lx_v3(-0.24f, -0.16f, 1.0f));
         LxLight *l = lx_add_light(s, ml, LX_LIGHT_POINT);
         l->color = lx_v3(1, 0.7f, 0.35f);
         l->intensity = 0;
@@ -308,6 +309,7 @@ static bool tps_template(const char *assets, LxScene *s) {
     storeroom(s);
     LxEntity p = lx_entity_create(s, "Player");
     lx_entity_set_position(s, p, lx_v3(0, 0, 14));
+    lx_entity_set_euler(s, p, lx_v3(0, 180, 0));   /* facing into the yard (-Z) */
     lx_entity_set_tag(s, p, "Player");
     LxCharacterController *cc = lx_add_character(s, p);
     cc->radius = 0.4f;
@@ -317,12 +319,12 @@ static bool tps_template(const char *assets, LxScene *s) {
     behave(s, p, "TPS Player", pp, 8);
     LxEntity body = prim(s, LX_PRIM_CAPSULE, "Body", lx_v3(0, 0.9f, 0), lx_v3(0.8f, 0.9f, 0.8f), "Materials/Player.lxmat", false);
     lx_entity_set_parent(s, body, p);
-    LxEntity visor = prim(s, LX_PRIM_CUBE, "Visor", lx_v3(0, 0.42f, -0.36f), lx_v3(0.55f, 0.16f, 0.2f), "Materials/Metal.lxmat", false);
+    LxEntity visor = prim(s, LX_PRIM_CUBE, "Visor", lx_v3(0, 0.42f, 0.36f), lx_v3(0.55f, 0.16f, 0.2f), "Materials/Metal.lxmat", false);
     lx_entity_set_parent(s, visor, body);
     LxEntity sword = lx_entity_create(s, "Sword");   /* a pivot at the hand: the blade swings around it */
     lx_entity_set_parent(s, sword, p);
-    lx_entity_set_position(s, sword, lx_v3(0.45f, 1.0f, -0.1f));
-    LxEntity blade = prim(s, LX_PRIM_CUBE, "Blade", lx_v3(0, 0, -0.55f), lx_v3(0.06f, 0.12f, 1.1f), "Materials/Blade.lxmat", false);
+    lx_entity_set_position(s, sword, lx_v3(-0.45f, 1.0f, 0.1f));   /* the right hand: -X */
+    LxEntity blade = prim(s, LX_PRIM_CUBE, "Blade", lx_v3(0, 0, 0.55f), lx_v3(0.06f, 0.12f, 1.1f), "Materials/Blade.lxmat", false);
     lx_entity_set_parent(s, blade, sword);
     LxEntity guard = prim(s, LX_PRIM_CUBE, "Guard", lx_v3(0, 0, -0.02f), lx_v3(0.32f, 0.06f, 0.06f), "Materials/Gold.lxmat", false);
     lx_entity_set_parent(s, guard, sword);

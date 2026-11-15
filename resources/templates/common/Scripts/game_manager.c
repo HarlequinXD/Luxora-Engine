@@ -105,24 +105,23 @@ static void draw_hud(LxBehaviourCtx *ctx, Manager *m) {
     lx_ui_anchor(LX_ANCHOR_TOP_RIGHT);
     snprintf(text, sizeof text, "SCORE  %d", g_game.score);
     lx_ui_font(LX_FONT_BOLD);
-    lx_ui_text(-48 - lx_ui_text_width(42, text), 40, 42, LX_COLOR_WHITE, "%s", text);
+    lx_ui_text(-48, 84, 42, LX_COLOR_WHITE, "%s", text);
     if (ctx->params[0] == GOAL_COINS) snprintf(text, sizeof text, "Coins  %d / %d", g_game.coins, g_game.coins_total);
     else snprintf(text, sizeof text, "Enemies left  %d", g_game.enemies_left);
-    lx_ui_text(-48 - lx_ui_text_width(32, text), 96, 32, LX_RGBA(255, 220, 160, 255), "%s", text);
+    lx_ui_text(-48, 140, 32, LX_RGBA(255, 220, 160, 255), "%s", text);
     /* ammo, bottom right */
     if (m->fps_hud > 0) {
         lx_ui_anchor(LX_ANCHOR_BOTTOM_RIGHT);
         lx_ui_font(LX_FONT_BOLD);
-        snprintf(text, sizeof text, "%d", g_game.ammo);
+        snprintf(text, sizeof text, "%d", g_game.ammo);   /* right anchored: x is how far the right edge is from the screen's */
         uint32_t c = g_game.ammo == 0 ? LX_RGBA(240, 80, 70, 255) : LX_COLOR_WHITE;
-        float w = lx_ui_text_width(72, text);
-        lx_ui_text(-180 - w, -128, 72, c, "%s", text);
+        lx_ui_text(-150, -150, 72, c, "%s", text);
         snprintf(text, sizeof text, "/ %d", g_game.reserve);
-        lx_ui_text(-170, -104, 40, LX_RGBA(220, 220, 220, 200), "%s", text);
+        lx_ui_text(-48, -126, 40, LX_RGBA(220, 220, 220, 200), "%s", text);
         if (g_game.reloading) {
-            bar(-330, -40, 280, 8, g_game.reload_progress, LX_RGBA(255, 210, 120, 255), LX_RGBA(30, 30, 30, 180));
-            lx_ui_text(-330, -76, 26, LX_RGBA(255, 210, 120, 255), "RELOADING");
-        } else if (g_game.ammo == 0 && g_game.reserve > 0) lx_ui_text(-330, -76, 26, LX_RGBA(240, 80, 70, 255), "PRESS R TO RELOAD");
+            bar(-48, -48, 280, 8, g_game.reload_progress, LX_RGBA(255, 210, 120, 255), LX_RGBA(30, 30, 30, 180));
+            lx_ui_text(-48, -84, 26, LX_RGBA(255, 210, 120, 255), "RELOADING");
+        } else if (g_game.ammo == 0 && g_game.reserve > 0) lx_ui_text(-48, -84, 26, LX_RGBA(240, 80, 70, 255), "PRESS R TO RELOAD");
         lx_ui_anchor(LX_ANCHOR_TOP_LEFT);
         draw_crosshair();
     }

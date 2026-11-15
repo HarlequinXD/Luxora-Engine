@@ -124,7 +124,7 @@ char *lx_scene_serialize(const LxScene *s) {
     LxStrBuf sb = {0};
     const LxEnvironment *e = &s->env;
     clean_value(((LxScene *)s)->name);
-    lx_sb_printf(&sb, "# Luxora scene v1\n[scene]\nname = %s\n", s->name);
+    lx_sb_printf(&sb, "# Luxora scene v1\n[scene]\nname = %s\naxes = +z\n", s->name);
     lx_sb_printf(&sb, "sky_zenith = %g %g %g\nsky_horizon = %g %g %g\nground = %g %g %g\n", e->sky_zenith.x, e->sky_zenith.y,
                  e->sky_zenith.z, e->sky_horizon.x, e->sky_horizon.y, e->sky_horizon.z, e->ground_color.x, e->ground_color.y,
                  e->ground_color.z);
@@ -146,7 +146,7 @@ char *lx_entity_serialize(const LxScene *s, LxEntity root) {
     const LxEntityData *d = lx_entity_data(s, root);
     if (!d) return NULL;
     LxStrBuf sb = {0};
-    lx_sb_printf(&sb, "# Luxora prefab v1\n[prefab]\nname = %s\n", d->name);
+    lx_sb_printf(&sb, "# Luxora prefab v1\n[prefab]\nname = %s\naxes = +z\n", d->name);
     int next_id = 1;
     write_entity(&sb, s, root, 0, &next_id, true);
     return sb.data;
@@ -158,20 +158,26 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
     const char *cur = text;
     char k[96], v[1024];
     int r;
-    bool in_scene = false;
+    bool in_scene = false, in_header = false, old_axes = false;   /* old files: cameras and lights faced -Z */
     LxEntity cur_e = 0;
+    LxEntity *made = NULL;
+    int made_n = 0, made_cap = 0;
     LxEntity *ids = NULL;
     int ids_cap = 0;
     while ((r = lx_kv_next(&cur, k, sizeof k, v, sizeof v))) {
         if (r == 2) {
             in_scene = !strcmp(k, "scene");
+            in_header = in_scene || !strcmp(k, "prefab");
+            if (in_header) old_axes = true;   /* until the header says "axes = +z" */
             if (!strcmp(k, "entity")) {
                 cur_e = lx_entity_create(s, "Entity");
+                LX_VEC_PUSH(made, made_n, made_cap, cur_e);
                 if (attach) lx_entity_set_parent(s, cur_e, attach);
                 if (!first_root) first_root = cur_e;
             } else cur_e = 0;
             continue;
         }
+        if (in_header && !strcmp(k, "axes")) { old_axes = strcmp(v, "+z") != 0; continue; }
         if (in_scene) {
             LxEnvironment *e = &s->env;
             if (!strcmp(k, "name")) lx_strcpy(s->name, sizeof s->name, v);
@@ -368,6 +374,15 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
         }
     }
     lx_free(ids);
+    /* files from before +Z became forward: turn cameras and lights half round so they still look the same way */
+    if (old_axes)
+        for (int i = 0; i < made_n; i++) {
+            LxEntityData *d = lx_entity_data(s, made[i]);
+            if (!d || !(d->comps & (LX_COMP_CAMERA | LX_COMP_LIGHT))) continue;
+            LxQuat q = lx_entity_rotation(s, made[i]);
+            lx_entity_set_rotation(s, made[i], lx_quat_norm(lx_quat_mul(q, lx_quat_axis_angle(lx_v3(0, 1, 0), LX_PI))));
+        }
+    lx_free(made);
     lx_scene_update_transforms(s);
     return first_root;
 }

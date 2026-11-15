@@ -34,7 +34,7 @@ static void fp_look_update(LxFsmCtx *c) {
     if (!body) return;
     if (!s->have) {
         s->yaw = lx_entity_euler(c->scene, body).y;
-        s->pitch = head ? lx_entity_euler(c->scene, head).x : 0;
+        s->pitch = head ? -lx_entity_euler(c->scene, head).x : 0;
         s->have = true;
     }
     LxVec2 in = look_input(c, 4, 5, c->dt);
@@ -43,13 +43,14 @@ static void fp_look_update(LxFsmCtx *c) {
     s->yaw = fmodf(s->yaw - in.x * sens, 360.0f);
     float lo = lx_fsm_float(c, 6), hi = lx_fsm_float(c, 7);
     if (lo > hi) { float t = lo; lo = hi; hi = t; }
-    s->pitch = lx_clampf(s->pitch + in.y * sens, lx_maxf(lo, -89.5f), lx_minf(hi, 89.5f));
+    s->pitch = lx_clampf(s->pitch + in.y * sens, lx_maxf(lo, -89.5f), lx_minf(hi, 89.5f));   /* + = looking up */
     LxVec3 be = lx_entity_euler(c->scene, body);
     lx_entity_set_euler(c->scene, body, lx_v3(be.x, s->yaw, be.z));
+    /* +Z forward: tipping +Z up is a negative turn about X */
     if (head && head != body) {
         LxVec3 he = lx_entity_euler(c->scene, head);
-        lx_entity_set_euler(c->scene, head, lx_v3(s->pitch, he.y, he.z));
-    } else if (head == body) lx_entity_set_euler(c->scene, body, lx_v3(s->pitch, s->yaw, be.z));
+        lx_entity_set_euler(c->scene, head, lx_v3(-s->pitch, he.y, he.z));
+    } else if (head == body) lx_entity_set_euler(c->scene, body, lx_v3(-s->pitch, s->yaw, be.z));
 }
 static const LxFsmActionDesc A_FP_LOOK = {"First Person Look", "Character",
     "Mouse / right stick look: turns the body left and right and tilts the camera (a child of the body) up and down. "
@@ -79,13 +80,13 @@ static void walk_update(LxFsmCtx *c) {
     if (len > 1) { in.x /= len; in.y /= len; }
     /* directions on the ground, from the Relative To object (camera or body); none = the world */
     LxEntity rel = obj(c, 3);
-    LxVec3 fwd = lx_v3(0, 0, -1), right = lx_v3(1, 0, 0);
+    LxVec3 fwd = lx_v3(0, 0, 1), right = lx_v3(-1, 0, 0);   /* +Z forward: right is -X */
     if (rel) {
         LxQuat q = lx_entity_world_rotation(c->scene, rel);
-        fwd = lx_quat_rotate(q, lx_v3(0, 0, -1));
+        fwd = lx_quat_rotate(q, lx_v3(0, 0, 1));
         fwd.y = 0;
-        if (lx_len3sq(fwd) < 1e-6f) fwd = lx_quat_rotate(q, lx_v3(0, 1, 0)), fwd.y = 0, fwd = lx_neg3(fwd);   /* looking straight down */
-        fwd = lx_len3sq(fwd) > 1e-8f ? lx_norm3(fwd) : lx_v3(0, 0, -1);
+        if (lx_len3sq(fwd) < 1e-6f) fwd = lx_quat_rotate(q, lx_v3(0, 1, 0)), fwd.y = 0;   /* looking straight down: its up points ahead */
+        fwd = lx_len3sq(fwd) > 1e-8f ? lx_norm3(fwd) : lx_v3(0, 0, 1);
         right = lx_v3(-fwd.z, 0, fwd.x);
     }
     float speed = lx_maxf(0, lx_fsm_float(c, 4)) * (run[0] && lx_action_down(run) ? lx_maxf(0, lx_fsm_float(c, 6)) : 1.0f);
@@ -144,7 +145,7 @@ static void tp_cam_update(LxFsmCtx *c) {
     float want_dist = lx_clampf(lx_fsm_float(c, 2), 0.5f, 100.0f);
     if (!s->have) {
         LxVec3 off = lx_sub3(lx_entity_world_position(c->scene, cam), pivot);
-        s->yaw = lx_len3sq(off) > 1e-4f ? atan2f(off.x, off.z) * LX_RAD2DEG : lx_entity_euler(c->scene, target).y;
+        s->yaw = lx_len3sq(off) > 1e-4f ? atan2f(-off.x, -off.z) * LX_RAD2DEG : lx_entity_euler(c->scene, target).y;   /* the way it looks */
         s->pitch = 15;
         s->dist = want_dist;
         s->pivot = pivot;
@@ -160,8 +161,8 @@ static void tp_cam_update(LxFsmCtx *c) {
     float k = lx_clampf(1 - expf(-lx_maxf(0, lx_fsm_float(c, 9)) * dt), 0, 1);
     if (lx_fsm_float(c, 9) <= 0) k = 1;
     s->pivot = lx_lerp3(s->pivot, pivot, k);
-    LxQuat q = lx_quat_euler_deg(lx_v3(-s->pitch, s->yaw, 0));
-    LxVec3 back = lx_quat_rotate(q, lx_v3(0, 0, 1));
+    LxQuat q = lx_quat_euler_deg(lx_v3(s->pitch, s->yaw, 0));   /* + pitch: +Z tips down */
+    LxVec3 back = lx_quat_rotate(q, lx_v3(0, 0, -1));
     /* don't go through walls: pull in to what's between the character and the camera */
     float dist = want_dist;
     if (lx_fsm_bool(c, 10)) {

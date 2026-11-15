@@ -277,7 +277,7 @@ static void gather_emitters(LxScene *s) {
         e.kind = (int)d->light.type;
         e.color = lx_scale3(d->light.color, d->light.intensity);
         e.pos = lx_v3(d->world.m[12], d->world.m[13], d->world.m[14]);
-        e.dir = lx_norm3(lx_mat4_dir(d->world, lx_v3(0, 0, -1)));
+        e.dir = lx_norm3(lx_mat4_dir(d->world, lx_v3(0, 0, 1)));
         if (e.kind == LX_LIGHT_DIRECTIONAL) {
             /* power = irradiance x area of the scene seen from the light */
             float proj = fabsf(e.dir.y) * ext.x * ext.z + fabsf(e.dir.x) * ext.y * ext.z + fabsf(e.dir.z) * ext.x * ext.y;

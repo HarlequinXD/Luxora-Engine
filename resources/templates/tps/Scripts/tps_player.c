@@ -24,9 +24,9 @@ typedef struct Combo { float length, hit_at, power; LxVec3 from, to; } Combo;
 static const Combo COMBO[3] = {
     {0.42f, 0.16f, 1.0f, {-10, -75, 0}, {-15, 85, 0}},     /* right to left */
     {0.42f, 0.16f, 1.0f, {-10, 85, 0}, {-15, -80, 0}},     /* back again */
-    {0.62f, 0.27f, 1.9f, {95, 0, 0}, {-50, 0, 0}},         /* overhead */
+    {0.62f, 0.27f, 1.9f, {-95, 0, 0}, {50, 0, 0}},         /* overhead: up (-X turn) to down */
 };
-static const LxVec3 SWORD_REST = {-25, 10, 0};
+static const LxVec3 SWORD_REST = {25, 10, 0};   /* pointing ahead and a little down */
 
 typedef struct Player {
     bool started;
@@ -60,7 +60,7 @@ static bool target_ok(LxScene *s, LxEntity e) { return e && lx_entity_valid(s, e
 static LxEntity pick_target(LxBehaviourCtx *ctx, Player *p) {
     LxScene *s = ctx->scene;
     LxVec3 me = lx_entity_world_position(s, ctx->self);
-    LxVec3 look = p->cam ? flat(lx_quat_rotate(lx_entity_world_rotation(s, p->cam), lx_v3(0, 0, -1))) : forward_of_yaw(p->yaw);
+    LxVec3 look = p->cam ? flat(lx_quat_rotate(lx_entity_world_rotation(s, p->cam), lx_v3(0, 0, 1))) : forward_of_yaw(p->yaw);
     if (lx_len3sq(look) > 1e-6f) look = lx_norm3(look);
     LxEntity best = 0;
     float best_score = 1e9f;
@@ -173,12 +173,12 @@ static void player_update(LxBehaviourCtx *ctx, float dt) {
     /* ---- input, relative to the camera ---- */
     LxVec2 in = playing ? lx_axis2("MoveX", "MoveY") : lx_v2(0, 0);
     float amount = fminf(1, sqrtf(in.x * in.x + in.y * in.y));
-    LxVec3 cf = lx_v3(0, 0, -1);
+    LxVec3 cf = lx_v3(0, 0, 1);
     if (p->cam) {
-        cf = flat(lx_quat_rotate(lx_entity_world_rotation(s, p->cam), lx_v3(0, 0, -1)));
+        cf = flat(lx_quat_rotate(lx_entity_world_rotation(s, p->cam), lx_v3(0, 0, 1)));
         cf = lx_len3sq(cf) > 1e-6f ? lx_norm3(cf) : forward_of_yaw(p->yaw);
     }
-    LxVec3 cr = lx_v3(-cf.z, 0, cf.x);
+    LxVec3 cr = right_of(cf);
     LxVec3 dir = lx_add3(lx_scale3(cf, in.y), lx_scale3(cr, in.x));
 
     /* ---- lock-on ---- */

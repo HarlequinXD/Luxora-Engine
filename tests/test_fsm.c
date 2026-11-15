@@ -78,6 +78,7 @@ static LxScene *fz_scene(LxEntity *owner_out) {
     LxEntity cam = lx_entity_create(s, "Cam");
     lx_add_camera(s, cam)->priority = 5;
     lx_entity_set_position(s, cam, lx_v3(0, 3, 8));
+    lx_entity_set_euler(s, cam, lx_v3(0, 180, 0));   /* looking back at the origin (-Z) */
     *owner_out = o;
     return s;
 }
@@ -673,6 +674,25 @@ static void test_fsm_playmaker(void) {
     lx_input_begin_frame();
     lx_input_begin_frame();
 
+    /* ---- +Z is forward (like Unity); old files' cameras and lights are turned to keep looking the same way ---- */
+    {
+        LxQuat q = lx_quat_look(lx_v3(0, 0, 1), lx_v3(0, 1, 0));
+        LxVec3 f = lx_quat_rotate(lx_quat_look(lx_v3(1, 0, 0), lx_v3(0, 1, 0)), lx_v3(0, 0, 1));
+        CHECK(fabsf(q.w) > 0.9999f && VEQ(f, 1, 0, 0, 1e-5f), "lx_quat_look points +Z along the direction");
+        const char *old = "[scene]\nname = Old\n[entity]\nid = 1\nparent = 0\nname = Cam\nactive = 1\nposition = 0 0 0\nrotation = 0 0 0 1\nscale = 1 1 1\n"
+                          "camera.fov = 60\n[entity]\nid = 2\nparent = 0\nname = Box\nactive = 1\nposition = 0 0 0\nrotation = 0 0 0 1\nscale = 1 1 1\n";
+        LxScene *os = lx_scene_deserialize(old);
+        LxVec3 cf = lx_entity_forward(os, lx_entity_find(os, "Cam")), bf = lx_entity_forward(os, lx_entity_find(os, "Box"));
+        char *again = lx_scene_serialize(os);
+        LxScene *ns = lx_scene_deserialize(again);
+        LxVec3 cf2 = lx_entity_forward(ns, lx_entity_find(ns, "Cam"));
+        CHECK(VEQ(cf, 0, 0, -1, 1e-4f) && VEQ(bf, 0, 0, 1, 1e-4f) && VEQ(cf2, 0, 0, -1, 1e-4f),
+              "an old scene's camera keeps looking along -Z (now its forward); other objects aren't turned; saving keeps it");
+        lx_free(again);
+        lx_scene_destroy(ns);
+        lx_scene_destroy(os);
+    }
+
     /* ---- logic, maths, text ---- */
     sem_begin(ONE("[action]\ntype = Bool Operator\np0 = true\np1 = false\np2 = XOR\np3 = $b\n"
                   "[action]\ntype = Float Remap\np0 = 5\np1 = 0\np2 = 10\np3 = 100\np4 = 200\np6 = $f\n"
@@ -713,12 +733,12 @@ static void test_fsm_playmaker(void) {
     CHECK(half > 3 && half < 7 && NEAR(svv("v").x, 10, 1e-4f) && !strcmp(sst(), "Yes"), "Vector3 Interpolate goes there over time (%g then %g)", half, svv("v").x);
     sem_end();
 
-    /* ---- transform and objects (the fuzz scene: Owner at 0 1 0 facing -Z, Char at 2 1 0, two Enemies) ---- */
+    /* ---- transform and objects (the fuzz scene: Owner at 0 1 0 facing +Z, Char at 2 1 0 - to its left, two Enemies) ---- */
     sem_begin(ONE("[action]\ntype = Get Angle To Target\np0 = Owner\np1 = name:Char\np2 = 0 0 0\np3 = true\np4 = $f\n"
                   "[action]\ntype = Transform Point\np0 = Owner\np1 = 0 0 -2\np2 = Local Point To World\np3 = $v\n"
                   "[action]\ntype = Get Root\np0 = name:Child\np1 = $o\n"));
     sem_run(1, DT);
-    CHECK(NEAR(sv("f"), 90, 0.5f) && VEQ(svv("v"), 0, 1, -2, 1e-3f) && svo("o") == g_so, "Get Angle To Target (+ = right), Transform Point, Get Root (%g)", sv("f"));
+    CHECK(NEAR(sv("f"), -90, 0.5f) && VEQ(svv("v"), 0, 1, -2, 1e-3f) && svo("o") == g_so, "Get Angle To Target (- = left), Transform Point, Get Root (%g)", sv("f"));
     sem_end();
     sem_begin("[event]\nname = LOOP\n[event]\nname = END\n[state]\nname = A\ntransition = LOOP > B\ntransition = END > Done\n"
               "[action]\ntype = Get Next With Tag\np0 = Enemy\np1 = $i\np2 = $o\np3 = LOOP\np4 = END\n"
@@ -732,7 +752,7 @@ static void test_fsm_playmaker(void) {
     sem_run(3, DT);
     float part = sv("f");
     sem_run(60, DT);
-    LxVec3 fw = lx_quat_rotate(lx_entity_world_rotation(g_ss, g_so), lx_v3(0, 0, -1));
+    LxVec3 fw = lx_quat_rotate(lx_entity_world_rotation(g_ss, g_so), lx_v3(0, 0, 1));
     CHECK(part > 5 && part < 89 && VEQ(fw, 1, 0, 0, 0.03f) && !strcmp(sst(), "Yes"), "Smooth Look At Direction turns gradually, then finishes (%g, %.2f %.2f %.2f, %s)", part, fw.x, fw.y, fw.z, sst());
     sem_end();
 
@@ -817,7 +837,7 @@ static void test_fsm_playmaker(void) {
 
     /* ---- axis vector relative to the camera: Cam turned to look along -X, W walks along -X ---- */
     sem_begin(ONE("[action]\ntype = Get Axis Vector\nupdate = every_frame\np0 = MoveX\np1 = MoveY\np2 = 2\np3 = Ground (XZ)\np4 = Camera\np6 = $v\np7 = $f\n"));
-    lx_entity_set_euler(g_ss, lx_entity_find(g_ss, "Cam"), lx_v3(-30, 90, 0));
+    lx_entity_set_euler(g_ss, lx_entity_find(g_ss, "Cam"), lx_v3(30, -90, 0));   /* looking along -X, a little down */
     pm_frame(); g_lx_input.keys[LX_KEY_W] = true; pm_step();
     pm_frame(); pm_step();
     CHECK(VEQ(svv("v"), -2, 0, 0, 1e-3f) && NEAR(sv("f"), 2, 1e-3f), "Get Axis Vector: forward is where the camera looks, flat on the ground (%g %g %g)", svv("v").x, svv("v").y, svv("v").z);
@@ -1096,7 +1116,7 @@ static void test_templates(void) {
         /* lock on: the camera turns to keep the target in view */
         tp_tap(s, &g_lx_input.keys[LX_KEY_TAB]);
         for (int i = 0; i < 90; i++) tp_frame(s);
-        LxVec3 camf = lx_quat_rotate(lx_entity_world_rotation(s, lx_entity_find(s, "Main Camera")), lx_v3(0, 0, -1));
+        LxVec3 camf = lx_quat_rotate(lx_entity_world_rotation(s, lx_entity_find(s, "Main Camera")), lx_v3(0, 0, 1));
         LxVec3 to = lx_sub3(lx_entity_world_position(s, e1), lx_entity_world_position(s, lx_entity_find(s, "Main Camera")));
         CHECK(lx_dot3(lx_norm3(lx_v3(camf.x, 0, camf.z)), lx_norm3(lx_v3(to.x, 0, to.z))) > 0.9f, "TPS: lock-on keeps the enemy in view");
         /* dying ends the game, and pickups don't bring you back */
@@ -1142,7 +1162,7 @@ static void test_axis_into_character_move(void) {
         lx_input_begin_frame();
         lx_input_update(1.0f / 60);
         LxVec3 p = lx_entity_world_position(s, e);
-        CHECK(p.x > 4 && p.x < 6, "holding D moves it right at 5 m/s, %s a Character Controller (x %.2f)", with_cc ? "with" : "without", p.x);
+        CHECK(p.x < -4 && p.x > -6, "holding D moves it right (-X, as a camera looking along +Z sees it) at 5 m/s, %s a Character Controller (x %.2f)", with_cc ? "with" : "without", p.x);
         lx_scene_stop_simulation(s);
         lx_scene_destroy(s);
     }

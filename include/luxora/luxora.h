@@ -513,7 +513,7 @@ LxVec3 lx_entity_scale(const LxScene *s, LxEntity e);
 void lx_entity_set_scale(LxScene *s, LxEntity e, LxVec3 sc);
 LxMat4 lx_entity_world_matrix(LxScene *s, LxEntity e);
 LxVec3 lx_entity_world_position(LxScene *s, LxEntity e);
-LxVec3 lx_entity_forward(LxScene *s, LxEntity e); /* -Z in world */
+LxVec3 lx_entity_forward(LxScene *s, LxEntity e); /* +Z in world (cameras look and lights shine this way) */
 LxVec3 lx_entity_right(LxScene *s, LxEntity e);
 void lx_scene_update_transforms(LxScene *s);
 LxQuat lx_entity_world_rotation(LxScene *s, LxEntity e);
@@ -1258,4 +1258,93 @@ const LxProject *lx_active_project(void);
 #ifdef __cplusplus
 }
 #endif
+/* ===================================================================
+ *  Game kit: building blocks for game logic. The State Graph actions are built on these, so a script can
+ *  do anything a graph can.
+ * =================================================================== */
+/* looking, aiming, finding */
+bool lx_pick_at(LxScene *s, LxVec2 canvas, float max_dist, LxRaycastHit *hit);   /* through the main camera: colliders, then meshes */
+bool lx_mouse_pick(LxScene *s, float max_dist, LxRaycastHit *hit);              /* what's under the mouse pointer / first finger */
+float lx_entity_angle_to(LxScene *s, LxEntity e, LxVec3 point, bool flat);     /* degrees to turn to face it; flat: + right, - left */
+LxVec3 lx_entity_transform_point(LxScene *s, LxEntity e, LxVec3 local);        /* its own space -> the world */
+LxVec3 lx_entity_inverse_transform_point(LxScene *s, LxEntity e, LxVec3 world);
+LxVec3 lx_entity_transform_direction(LxScene *s, LxEntity e, LxVec3 local);
+LxVec3 lx_entity_inverse_transform_direction(LxScene *s, LxEntity e, LxVec3 world);
+/* turn to face a direction at `speed` (0 = at once); returns the degrees still to go */
+float lx_entity_turn_towards(LxScene *s, LxEntity e, LxVec3 direction, LxVec3 up, bool keep_vertical, float speed, float dt);
+void lx_entity_face_camera(LxScene *s, LxEntity e, bool upright);              /* billboards, name tags */
+/* can `from` see `target`: in range, inside the view angle (degrees, 360 = all round), nothing in between */
+bool lx_line_of_sight(LxScene *s, LxEntity from, LxEntity target, float range, float view_angle, float eye_height, float target_height);
+LxEntity lx_find_closest_with_tag(LxScene *s, LxVec3 from, const char *tag, float max_dist, float *out_dist);
+int lx_count_with_tag(LxScene *s, const char *tag);
+LxEntity lx_random_with_tag(LxScene *s, const char *tag);
+
+/* combat: "Damage" (or any message) goes to the top object of whatever is hit */
+bool lx_shoot_ray(LxScene *s, LxVec3 from, LxVec3 dir, float range, float spread_deg, float damage, const char *message,
+                  const char *impact_prefab, LxEntity shooter, LxRaycastHit *hit);
+int lx_area_damage(LxScene *s, LxVec3 center, float radius, float damage, bool falloff, const char *message, const char *tag, LxEntity sender);
+/* a projectile: put lx_projectile_update on the bullet; it flies along its forward (+Z), falls with gravity,
+   hits the first collider not tagged ignore_tag, and removes itself. Returns 0 flying, 1 hit (hit filled), 2 timed out */
+typedef struct LxProjectile { LxVec3 velocity; float age; bool started, done; } LxProjectile;
+int lx_projectile_update(LxScene *s, LxEntity e, LxProjectile *p, float speed, float gravity, float lifetime, float damage,
+                         const char *message, const char *ignore_tag, const char *impact_prefab, float dt, LxRaycastHit *hit);
+LxEntity lx_fire_projectile(LxScene *s, const char *prefab, LxEntity from, LxVec3 offset, float spread_deg);
+
+/* moving characters and objects (with a Character Controller: gravity and collisions; without: straight there) */
+bool lx_walk_to(LxScene *s, LxEntity e, LxVec3 point, float speed, float stop_distance, float turn_speed, float *vy, float dt);   /* true when there */
+typedef struct LxPatrol { int index, step; float wait, vy; bool done; } LxPatrol;
+typedef enum LxPatrolMode { LX_PATROL_LOOP, LX_PATROL_PING_PONG, LX_PATROL_ONCE } LxPatrolMode;
+#define LX_PATROL_REACHED 1
+#define LX_PATROL_FINISHED 2
+/* follows the children of `waypoints` in order; returns LX_PATROL_ flags for this frame */
+int lx_patrol_update(LxScene *s, LxEntity e, LxEntity waypoints, LxPatrol *p, float speed, float wait_seconds, LxPatrolMode mode, float dt);
+typedef struct LxWander { LxVec3 home, target; float wait, vy; bool started, moving; } LxWander;
+bool lx_wander_update(LxScene *s, LxEntity e, LxWander *w, float radius, float speed, float min_wait, float max_wait, float dt);   /* true on arriving */
+/* spawning: keeps up to max_alive copies alive, one every `interval` seconds, `total` in all (0 = forever).
+   At `at` (or one of its children), within `radius`. Returns the new object this frame, or 0. */
+typedef struct LxSpawner { LxEntity alive[64]; int alive_count, spawned; float timer; } LxSpawner;
+LxEntity lx_spawner_update(LxScene *s, LxSpawner *sp, const char *prefab, LxEntity at, float radius, float interval, int max_alive, int total, float dt);
+
+/* inventory: item names and counts, kept through scene changes */
+int lx_inventory_add(const char *item, int count);       /* the new count */
+bool lx_inventory_remove(const char *item, int count);   /* false (and nothing removed) when there aren't enough */
+int lx_inventory_count(const char *item);
+int lx_inventory_size(void);                              /* different items held */
+const char *lx_inventory_item(int index, int *count);
+void lx_inventory_clear(void);
+bool lx_inventory_save(const char *slot);                 /* into the save data */
+bool lx_inventory_load(const char *slot);
+
+/* checkpoints and saving the global variables */
+void lx_checkpoint_set(LxScene *s, LxEntity e);
+bool lx_checkpoint_get(LxVec3 *position, float *yaw, char *scene, size_t scene_cap);
+bool lx_checkpoint_respawn(LxScene *s, LxEntity e);       /* false when there's none for this scene */
+int lx_globals_save(const char *slot);                    /* every global variable; returns how many */
+int lx_globals_load(const char *slot);
+
+/* time and the world */
+void lx_date_time(int out[7]);                            /* year, month, day, hour, minute, second, weekday (0 = Sunday) */
+void lx_format_time(char *out, size_t cap, float seconds, int style);   /* 0 "m:ss", 1 "h:mm:ss", 2 "m:ss.cc" */
+void lx_day_night_apply(LxScene *s, LxEntity sun, float hour);           /* sun angle and colour, sky, ambient for 0..24 */
+
+/* music (one track at a time, crossfaded) and scene changes behind a fade */
+void lx_music_play(LxScene *s, const char *clip, float volume, float fade_seconds);
+void lx_music_stop(float fade_seconds);
+const char *lx_music_current(void);
+void lx_load_scene_faded(const char *ref, float seconds, LxVec4 color);
+
+/* game UI helpers (call every frame while they should show) */
+void lx_ui_bar_over(LxScene *s, LxVec3 world, float value01, float width, float height, uint32_t fill, uint32_t back);
+void lx_ui_marker(LxScene *s, LxVec3 world, const char *label, uint32_t color, bool clamp_to_edge, bool show_distance);
+void lx_ui_prompt(const char *text);                     /* "[E]  Open" near the bottom: the key for the player's device */
+typedef struct LxDialogue { float t; int page; bool started, done; } LxDialogue;
+/* a dialogue box at the bottom, typed out; pages separated by '|'. Interact / Jump / Enter / a click skips or turns
+   the page. Returns true on the frame the last page is closed. */
+bool lx_ui_dialogue(LxDialogue *d, const char *speaker, const char *text, float chars_per_second, float dt);
+typedef struct LxChoice { int selected; bool started; float stick; } LxChoice;
+/* a menu of up to 8 options (arrow keys / stick / mouse, confirm with Interact / Jump / Enter / a click): the picked index, or -1 */
+int lx_ui_choice(LxChoice *c, const char *title, const char *const *options, int count);
+/* an object the player can use: in range (and facing it), shows the prompt; true when Interact is pressed */
+bool lx_interactable_update(LxScene *s, LxEntity e, LxEntity player, float distance, bool need_facing, const char *prompt);
+
 #endif

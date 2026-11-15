@@ -128,9 +128,10 @@ LX_INLINE LxQuat lx_quat_from_basis(LxVec3 x, LxVec3 y, LxVec3 z) {
     }
     return lx_quat_norm(q);
 }
-/* Rotation that makes local -Z (forward) point along `forward`. */
+/* Rotation that makes local +Z (forward, like Unity) point along `forward`. Luxora is right-handed with +Y up,
+ * so an object facing +Z has its right side towards -X. */
 LX_INLINE LxQuat lx_quat_look(LxVec3 forward, LxVec3 up) {
-    LxVec3 z = lx_scale3(lx_norm3(forward), -1.0f);
+    LxVec3 z = lx_norm3(forward);
     LxVec3 x = lx_cross3(up, z);
     if (lx_dot3(x, x) < 1e-8f) x = lx_cross3(lx_v3(0, 0, 1), z);
     x = lx_norm3(x);

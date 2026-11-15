@@ -151,7 +151,7 @@ static void vec_angle(LxFsmCtx *c) {
     lx_fsm_set_float(c, 2, acosf(d) * LX_RAD2DEG);
 }
 static const LxFsmActionDesc A_VEC_ANGLE = {"Vector3 Angle", "Math", "The angle between two directions, in degrees.", "{2} = angle {0} ∠ {1}",
-    {P("From", LX_FSM_VEC3, "0 0 -1"), P("To", LX_FSM_VEC3, "1 0 0"), POUT("Store Angle", LX_FSM_FLOAT)}, 0, 0, LX_FSM_ONCE, vec_angle, vec_angle, NULL};
+    {P("From", LX_FSM_VEC3, "0 0 1"), P("To", LX_FSM_VEC3, "1 0 0"), POUT("Store Angle", LX_FSM_FLOAT)}, 0, 0, LX_FSM_ONCE, vec_angle, vec_angle, NULL};
 static void vec_add(LxFsmCtx *c) {
     LxVec3 d = lx_fsm_vec3(c, 1);
     if (lx_fsm_bool(c, 2)) d = lx_scale3(d, c->dt);
@@ -175,8 +175,8 @@ static void get_directions(LxFsmCtx *c) {
     LxEntity e = obj(c, 0);
     if (!e) return;
     LxQuat q = lx_entity_world_rotation(c->scene, e);
-    lx_fsm_set_vec3(c, 1, lx_quat_rotate(q, lx_v3(0, 0, -1)));
-    lx_fsm_set_vec3(c, 2, lx_quat_rotate(q, lx_v3(1, 0, 0)));
+    lx_fsm_set_vec3(c, 1, lx_quat_rotate(q, lx_v3(0, 0, 1)));
+    lx_fsm_set_vec3(c, 2, lx_quat_rotate(q, lx_v3(-1, 0, 0)));
     lx_fsm_set_vec3(c, 3, lx_quat_rotate(q, lx_v3(0, 1, 0)));
 }
 static const LxFsmActionDesc A_GET_DIRECTIONS = {"Get Directions", "Transform", "Which way an object faces: forward, right and up.", "{1} = forward of {0}",

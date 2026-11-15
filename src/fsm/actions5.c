@@ -369,7 +369,7 @@ static void quat_rotate_vec(LxFsmCtx *c) {
 }
 static const LxFsmActionDesc A_QUAT_ROTATE = {"Quaternion Rotate Vector", "Math/Quaternion", "Turns a vector by a rotation; also gives the rotation's angles in degrees.",
     "{2} = {1} rotated by {0}",
-    {P("Rotation", LX_FSM_QUAT, "0 0 0"), P("Vector", LX_FSM_VEC3, "0 0 -1"), POPT("Store Vector", LX_FSM_VEC3), POPT("Store Euler Angles", LX_FSM_VEC3)}, 0, 0, LX_FSM_ONCE, quat_rotate_vec, quat_rotate_vec, NULL};
+    {P("Rotation", LX_FSM_QUAT, "0 0 0"), P("Vector", LX_FSM_VEC3, "0 0 1"), POPT("Store Vector", LX_FSM_VEC3), POPT("Store Euler Angles", LX_FSM_VEC3)}, 0, 0, LX_FSM_ONCE, quat_rotate_vec, quat_rotate_vec, NULL};
 static void obj_quat(LxFsmCtx *c) {
     LxEntity e = obj(c, 0);
     if (!e) return;

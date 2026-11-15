@@ -46,13 +46,13 @@ LxScene *lx_scene_create_default(const char *name) {
     LxScene *s = lx_scene_create(name);
     LxEntity cam = lx_entity_create(s, "Main Camera");
     lx_entity_set_position(s, cam, lx_v3(0, 1.6f, 6.0f));
-    lx_entity_set_euler(s, cam, lx_v3(-8.0f, 0, 0));
+    lx_entity_set_euler(s, cam, lx_v3(8.0f, 180.0f, 0));   /* looking back along -Z at the origin, a little down */
     lx_add_camera(s, cam);
     lx_add_audio_listener(s, cam);
 
     LxEntity light = lx_entity_create(s, "Directional Light");
     lx_entity_set_position(s, light, lx_v3(0, 6, 0));
-    lx_entity_set_euler(s, light, lx_v3(-50.0f, -30.0f, 0));
+    lx_entity_set_euler(s, light, lx_v3(50.0f, 150.0f, 0));
     lx_add_light(s, light, LX_LIGHT_DIRECTIONAL);
 
     LxEntity cube = lx_entity_create(s, "Cube");
@@ -390,10 +390,10 @@ LxVec3 lx_entity_world_position(LxScene *s, LxEntity e) {
     return lx_v3(m.m[12], m.m[13], m.m[14]);
 }
 LxVec3 lx_entity_forward(LxScene *s, LxEntity e) {
-    return lx_norm3(lx_mat4_dir(lx_entity_world_matrix(s, e), lx_v3(0, 0, -1)));
+    return lx_norm3(lx_mat4_dir(lx_entity_world_matrix(s, e), lx_v3(0, 0, 1)));
 }
 LxVec3 lx_entity_right(LxScene *s, LxEntity e) {
-    return lx_norm3(lx_mat4_dir(lx_entity_world_matrix(s, e), lx_v3(1, 0, 0)));
+    return lx_norm3(lx_mat4_dir(lx_entity_world_matrix(s, e), lx_v3(-1, 0, 0)));   /* +Z forward, +Y up: right is -X */
 }
 
 /* ---------------- components ---------------- */

@@ -142,13 +142,13 @@ static const LxFsmActionDesc A_GET_AXIS_VALUE = {"Get Axis Value", "Input", "Rea
 static void get_axis_vector(LxFsmCtx *c) {
     LxVec2 a = lx_axis2(lx_fsm_string(c, 0), lx_fsm_string(c, 1));
     float k = lx_fsm_float(c, 2);
-    LxVec3 right = lx_v3(1, 0, 0), fwd = lx_v3(0, 0, -1), up = lx_v3(0, 1, 0);
+    LxVec3 right = lx_v3(-1, 0, 0), fwd = lx_v3(0, 0, 1), up = lx_v3(0, 1, 0);   /* +Z forward: right is -X */
     int plane = lx_fsm_int(c, 3), rel = lx_fsm_int(c, 4);
     if (rel != 0) {
         LxEntity e = rel == 1 ? (lx_fsm_is_none(c, 5) ? lx_scene_main_camera(c->scene) : obj(c, 5)) : obj(c, 5);
         if (e) {
             LxQuat q = lx_entity_world_rotation(c->scene, e);
-            LxVec3 r = lx_quat_rotate(q, lx_v3(1, 0, 0)), f = lx_quat_rotate(q, lx_v3(0, 0, -1)), u = lx_quat_rotate(q, lx_v3(0, 1, 0));
+            LxVec3 r = lx_quat_rotate(q, lx_v3(-1, 0, 0)), f = lx_quat_rotate(q, lx_v3(0, 0, 1)), u = lx_quat_rotate(q, lx_v3(0, 1, 0));
             if (plane == 0) {   /* on the ground: the camera's forward flattened (looking down still walks forward) */
                 LxVec3 ff = flat(f);
                 if (lx_len3sq(ff) < 1e-6f) ff = flat(u);
@@ -493,7 +493,7 @@ static void vec_rotate_towards(LxFsmCtx *c) {
 }
 static const LxFsmActionDesc A_VEC_ROTATE_TOWARDS = {"Vector3 Rotate Towards", "Math/Vector3", "Turns a direction towards another at a set speed (homing missiles, slow turns).",
     "turn {0} towards {1} at {2}°/s",
-    {POUT("Vector Variable", LX_FSM_VEC3), P("Target Direction", LX_FSM_VEC3, "0 0 -1"), P("Degrees Per Second", LX_FSM_FLOAT, "90"),
+    {POUT("Vector Variable", LX_FSM_VEC3), P("Target Direction", LX_FSM_VEC3, "0 0 1"), P("Degrees Per Second", LX_FSM_FLOAT, "90"),
      PT("Length Change Per Second", LX_FSM_FLOAT, "1", "how fast its length moves to the target's length")}, 0, 0, LX_FSM_EVERY_FRAME, vec_rotate_towards, vec_rotate_towards, NULL};
 
 typedef struct { float t; bool have; LxVec3 from; LxVec4 cfrom; } InterpState;
@@ -760,7 +760,7 @@ static void angle_to_target(LxFsmCtx *c) {
     if (!e) return;
     LxVec3 p = lx_entity_world_position(c->scene, e);
     LxVec3 tp = t ? lx_add3(lx_entity_world_position(c->scene, t), lx_fsm_vec3(c, 2)) : lx_fsm_vec3(c, 2);
-    LxVec3 f = lx_quat_rotate(lx_entity_world_rotation(c->scene, e), lx_v3(0, 0, -1)), to = lx_sub3(tp, p);
+    LxVec3 f = lx_quat_rotate(lx_entity_world_rotation(c->scene, e), lx_v3(0, 0, 1)), to = lx_sub3(tp, p);
     float ang;
     if (lx_fsm_bool(c, 3)) {
         f = flat(f); to = flat(to);
@@ -795,7 +795,7 @@ static void transform_point(LxFsmCtx *c) {
 }
 static const LxFsmActionDesc A_TRANSFORM_POINT = {"Transform Point", "Transform", "Converts a point or direction between an object's own space and the world (\"2 m in front of the player\").",
     "{3} = {1} {2} of {0}",
-    {POBJ("Object"), P("Vector", LX_FSM_VEC3, "0 0 -2"),
+    {POBJ("Object"), P("Vector", LX_FSM_VEC3, "0 0 2"),
      PENUM("Convert", "Local Point To World|World Point To Local|Local Direction To World|World Direction To Local", "Local Point To World"), POUT("Store Result", LX_FSM_VEC3)},
     0, 0, LX_FSM_EVERY_FRAME, transform_point, transform_point, NULL};
 
@@ -837,7 +837,7 @@ static const LxFsmActionDesc A_SMOOTH_LOOK_DIR = {"Smooth Look At Direction", "T
     "Turns an object smoothly to face a direction - where it's moving, or a stick's vector from Get Axis Vector. "
     "Directions shorter than Min Magnitude are ignored, so it keeps facing the last way when the stick is let go.",
     "Turn {0} to face {1} (speed {6})",
-    {POBJ("Object"), P("Target Direction", LX_FSM_VEC3, "0 0 -1"), PT("Min Magnitude", LX_FSM_FLOAT, "0.1", "shorter directions are ignored"),
+    {POBJ("Object"), P("Target Direction", LX_FSM_VEC3, "0 0 1"), PT("Min Magnitude", LX_FSM_FLOAT, "0.1", "shorter directions are ignored"),
      PT("Up Vector", LX_FSM_VEC3, "0 1 0", "which way is up for the object"), PT("Keep Vertical", LX_FSM_BOOL, "true", "only turn left and right (ignores the direction's height)"),
      PENUM("Space", "Self|World", "World"), PT("Speed", LX_FSM_FLOAT, "8", "how fast it turns; 0 = at once"), PT("Finish Tolerance", LX_FSM_FLOAT, "1", "degrees"),
      PEV("Finish Event"), POPT("Store Angle Left", LX_FSM_FLOAT)},

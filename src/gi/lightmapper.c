@@ -491,7 +491,7 @@ LxLightmapBake *lx_lightmap_prepare(LxScene *s) {
         L.mode = d->light.mode;
         L.color = lx_scale3(d->light.color, d->light.intensity);
         L.pos = lx_v3(d->world.m[12], d->world.m[13], d->world.m[14]);
-        L.dir = lx_norm3(lx_mat4_dir(d->world, lx_v3(0, 0, -1)));
+        L.dir = lx_norm3(lx_mat4_dir(d->world, lx_v3(0, 0, 1)));
         L.range = d->light.range > 0.01f ? d->light.range : 0.01f;
         L.cos_outer = cosf(d->light.spot_angle_deg * 0.5f * LX_DEG2RAD);
         float soft = lx_maxf(0.0f, d->light.shadow_radius);
