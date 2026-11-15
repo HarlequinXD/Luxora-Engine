@@ -33,7 +33,7 @@ static void an_play(LxFsmCtx *c) {
 static const LxFsmActionDesc A_AN_PLAY = {"Play Animation", "Animator", "Plays a clip on an object's Animator, blending out of whatever was playing.",
     "play {1} on {0}",
     {POBJT("Object", "the Animator on it, or on the first model below it"),
-     PASSETT("Clip", "clip", "\"Models/Hero.fbx#Run\", or \"#0\" for the first clip"),
+     PASSETT("Clip", "animation", "\"Models/Hero.fbx#Run\", or \"#0\" for the first clip"),
      PT("Fade Seconds", LX_FSM_FLOAT, "0.2", "how long to blend out of the old clip"),
      PIN_OPT("Speed", LX_FSM_FLOAT), PT("Restart If Same", LX_FSM_BOOL, "false", "play from the start even if this clip is already running"),
      PIN_OPT("Loop", LX_FSM_BOOL), PEV("No Animator Event")},

@@ -190,7 +190,11 @@ static void fz_run(const LxFsmActionDesc *d, int variant, const char *dir) {
         if (f == 22) lx_fsm_system_event(s, o, "TRIGGER_ENTER", lx_entity_find(s, "Char"), 0);
         if (f == 30 && variant % 4 == 3 && lx_entity_valid(s, o)) lx_entity_destroy(s, o);   /* the owner itself goes */
         ok = fz_scene_sane(s, why, sizeof why);
-        if (lx_scene_entity_count(s) > 300) break;   /* a graph copying itself: the spawn budget keeps it finite */
+        /* A graph that copies itself - Duplicate Object on the owner, whose copy runs the same graph -
+         * grows until the per-frame spawn budget and this cap stop it. The owner is a heavy object
+         * (camera, light, audio, animator, collider, rigidbody), and simulating a hundred of them for
+         * the rest of the run is already far more than the spawn path needs to be exercised by. */
+        if (lx_scene_entity_count(s) > 100) break;
     }
     if (!ok) {
         g_fz_broken++;
@@ -200,6 +204,8 @@ static void fz_run(const LxFsmActionDesc *d, int variant, const char *dir) {
     lx_scene_stop_simulation(s);
     lx_scene_destroy(s);
     double fz_took = lx_time() - fz_t0;
+    /* name anything heading towards the watchdog, so a CI log says which action it was */
+    if (fz_took > 5.0) { fprintf(stderr, "SLOW %6.2fs  %s\n", fz_took, g_fz_now); fflush(stderr); }
     if (fz_took > g_fz_slowest) {
         g_fz_slowest = fz_took;
         lx_strcpy(g_fz_slowest_name, sizeof g_fz_slowest_name, g_fz_now);

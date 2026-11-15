@@ -97,6 +97,14 @@ static const char *const *kind_exts(const char *k) {
     return none;
 }
 
+/* Does the picker know how to list this kind? An action whose asset parameter names a kind that is not
+ * here opens an empty browser, which looks like a broken picker, so the smoke test checks them all. */
+bool ed_picker_kind_known(const char *k) {
+    if (!k || !k[0]) return false;
+    if (!strcmp(k, "object") || !strcmp(k, "file")) return true;
+    return kind_exts(k)[0] != NULL;
+}
+
 static PickItem *add(const char *value, const char *label, const char *sub, UiIcon icon) {
     if (P.count >= PICK_MAX) return NULL;
     PickItem it;

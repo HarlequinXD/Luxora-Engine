@@ -277,6 +277,7 @@ UiNode *ed_slot(UiNode *parent, char *buf, int cap, const char *kind);   /* set 
 void ed_slot_set_context(UiNode *slot, const char *model_ref);          /* animation slots: this character's clips first */
 void ed_slot_name(const char *kind, const char *value, char *out, size_t cap);
 bool ed_picker_open_now(void);
+bool ed_picker_kind_known(const char *kind);   /* false = the picker cannot list it, so the browser would be empty */
 int ed_picker_item_count(void);           /* smoke test helpers */
 int ed_picker_tile_count(void);
 bool ed_picker_choose(const char *value);

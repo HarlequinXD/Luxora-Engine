@@ -682,6 +682,25 @@ static void s_sg_add(void) {
     if (b) ui_test_click(ED.ui, b, false);
     SMOKE_CHECK(sg_action_count() == g_sg_actions + 1, "the action was added (%d)", sg_action_count());
 }
+/* every asset parameter of every built-in action must name a kind the picker can list */
+static void s_action_asset_kinds(void) {
+    int checked = 0, bad = 0;
+    char first[160] = "";
+    for (int i = 0; i < lx_fsm_action_count(); i++) {
+        const LxFsmActionDesc *d = lx_fsm_action_at(i);
+        for (int k = 0; d && k < LX_FSM_MAX_PARAMS && d->params[k].name; k++) {
+            if (d->params[k].type != LX_FSM_ASSET) continue;
+            checked++;
+            if (ed_picker_kind_known(d->params[k].options)) continue;
+            bad++;
+            if (!first[0])
+                snprintf(first, sizeof first, "%s / %s wants \"%s\"", d->name, d->params[k].name,
+                         d->params[k].options ? d->params[k].options : "(none)");
+        }
+    }
+    SMOKE_CHECK(bad == 0, "all %d asset parameters name a kind the picker can list (%d bad%s%s)", checked, bad,
+                first[0] ? ": " : "", first);
+}
 static void s_sg_saved(void) {
     char path[LX_PATH_MAX];
     lx_asset_path(path, sizeof path, "Graphs/Patroller.lxgraph");
@@ -1012,6 +1031,7 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {312, s_sg_long_check, "the Add button is still in view"},
     {313, s_sg_add, "add the action to the selected state"},
     {314, s_sg_saved, "saved; undo; close the browser"},
+    {315, s_action_asset_kinds, "every action's asset parameters name a kind the picker can list"},
     {315, s_sg_play, "play"},
     {330, s_sg_playing, "the State Graph runs"},
     {331, s_sg_load, "the game loads a scene"},
