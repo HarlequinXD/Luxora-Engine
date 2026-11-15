@@ -1,4 +1,4 @@
-/* State Graph editor, laid out like PlayMaker: a big graph view with an object/graph toolbar, the
+/* State Graph editor: a big graph view with an object/graph toolbar, the
  * FSM / State / Events / Variables inspector on the right, a bottom bar (Debug, Hints, Errors,
  * Action Browser) and the Action Browser as a floating window.
  *
@@ -361,6 +361,8 @@ static void draw_state(UiCtx *ui, const LxGraph *g, int i, const LxFsmRun *run) 
         float tw = ui_text_width(ui, tf, st->name);
         ui_draw_text(ui, tf, x + (w - tw) * 0.5f, y + (th - ui_line_height(ui, tf)) * 0.5f, st->name, UI_HEX(0xffffff));
         if (st->sequence) ui_draw_icon(ui, UI_ICON_LIST, x + w - 18 * s, y + (th - 12 * s) * 0.5f, 12 * s, ui_alpha(UI_HEX(0xffffff), 0.7f));
+        /* a red dot on the left of the title bar: entering this state pauses Play mode */
+        if (st->breakpoint) ui_draw_circle(ui, x + 10 * s, y + th * 0.5f, 4.5f * s, UI_HEX(0xe5484d), 12);
     }
     /* event rows */
     UiFont ef = GE.zoom >= 0.8f ? UI_FONT_BODY : UI_FONT_SMALL;
@@ -834,6 +836,13 @@ static void m_toggle_sequence(UiNode *n) {
     g->states[g_menu_state].sequence = !g->states[g_menu_state].sequence;
     ge_commit(true, NULL);
 }
+static void m_toggle_breakpoint(UiNode *n) {
+    LX_UNUSED(n);
+    LxGraph *g = ge_graph();
+    if (!g || g_menu_state < 0 || g_menu_state >= g->state_count) return;
+    g->states[g_menu_state].breakpoint = !g->states[g_menu_state].breakpoint;
+    ge_commit(true, NULL);
+}
 static void m_color_pick(UiNode *n) {
     LxGraph *g = ge_graph();
     if (!g) return;
@@ -1033,6 +1042,8 @@ static void open_context_menu(Hit h, float mx, float my) {
         mitem(p, "Add Action...", UI_ICON_PLUS, m_add_action);
         UiNode *sq = mitem(p, "Sequence (one action at a time)", UI_ICON_LIST, m_toggle_sequence);
         if (g->states[h.state].sequence) { sq->icon = UI_ICON_CHECK; sq->icon_color = COL_START; }
+        UiNode *bp = mitem(p, "Breakpoint (pause Play here)", UI_ICON_NONE, m_toggle_breakpoint);
+        if (g->states[h.state].breakpoint) { bp->icon = UI_ICON_CHECK; bp->icon_color = UI_HEX(0xe5484d); }
         subitem(p, "Color", m_colors);
         ui_menu_separator(ED.ui, p);
         mitem(p, "Rename...", UI_ICON_NONE, m_rename)->hint[0] = 0;

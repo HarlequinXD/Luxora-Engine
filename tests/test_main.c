@@ -2289,9 +2289,9 @@ static void test_state_graph(void) {
                        "[variable]\nname = laps\ntype = int\nvalue = 0\n"
                        "[state]\nname = S\ntransition = TWO > C\ntransition = OTHER > Bad\n"
                        "[action]\ntype = Int Switch\np0 = $n\np1 = 0\np2 = ZERO\np3 = 1\np4 = ONE\np5 = 2\np6 = TWO\np7 = 3\np8 = THREE\np9 = OTHER\n"
-                       "[state]\nname = C\ntransition = AT_ZERO > R\n[action]\ntype = Countdown\nupdate = every_frame\np0 = $t\np1 = AT_ZERO\n"
-                       "[state]\nname = R\ntransition = DONE > End\n[action]\ntype = Counter\np0 = $laps\np1 = 5\n"
-                       "[action]\ntype = Repeat Event\nupdate = every_frame\np0 = 0.1\np1 = TICK\np2 = 3\np3 = DONE\n"
+                       "[state]\nname = C\ntransition = AT_ZERO > R\n[action]\ntype = Countdown Timer\nupdate = every_frame\np0 = $t\np4 = AT_ZERO\n"
+                       "[state]\nname = R\ntransition = DONE > End\n[action]\ntype = Int Add\np0 = $laps\np1 = 1\n"
+                       "[action]\ntype = Wait\nupdate = every_frame\np0 = 0.3\np1 = DONE\n"
                        "[state]\nname = Bad\n[state]\nname = End\n";
     lx_path_join(path, sizeof path, dir, "Flow.lxgraph");
     lx_file_write(path, flow, strlen(flow));
@@ -2303,8 +2303,9 @@ static void test_state_graph(void) {
     CHECK(!strcmp(lx_fsm_current_state(s, f, 0), "R") && NEAR(lx_fsm_get_var_float(s, f, 0, "laps"), 1, 1e-4f), "Countdown reaches zero; Counter counts (%s)",
           lx_fsm_current_state(s, f, 0));
     for (int i = 0; i < 8; i++) lx_scene_simulate(s, 0.05f);
-    CHECK(!strcmp(lx_fsm_current_state(s, f, 0), "End"), "Repeat Event stops after 3 and sends DONE (%s)", lx_fsm_current_state(s, f, 0));
-    CHECK(lx_fsm_action_count() >= 150, "about 150 built-in actions (%d)", lx_fsm_action_count());
+    CHECK(!strcmp(lx_fsm_current_state(s, f, 0), "End"), "the Wait in R finishes and sends DONE (%s)", lx_fsm_current_state(s, f, 0));
+    /* a name collision between two built-in actions would silently drop one, so the count would fall */
+    CHECK(lx_fsm_action_count() >= 480, "the whole built-in action library is registered (%d)", lx_fsm_action_count());
 
     /* a runaway loop is stopped, not hung */
     const char *loop = "[graph]\nstart = A\n[state]\nname = A\ntransition = FINISHED > B\n[state]\nname = B\ntransition = FINISHED > A\n";
@@ -2411,7 +2412,7 @@ int main(void) {
     test_state_graph();
     test_fsm_fuzz();
     test_fsm_semantics();
-    test_fsm_playmaker();
+    test_fsm_action_library();
     test_templates();
     test_axis_into_character_move();
 #if LUXORA_SCRIPT_COMPILER

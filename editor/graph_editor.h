@@ -1,4 +1,4 @@
-/* State Graph editor (PlayMaker layout): shared state between the graph view (graph_editor.c)
+/* State Graph editor: shared state between the graph view (graph_editor.c)
  * and its inspector + Action Browser (graph_inspector.c). */
 #ifndef ED_GRAPH_EDITOR_H
 #define ED_GRAPH_EDITOR_H

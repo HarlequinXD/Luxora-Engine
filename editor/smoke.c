@@ -658,18 +658,18 @@ static void s_sg_picked(void) {
     UiNode *it = n ? find_node(w[0], NULL, "Translate") : NULL;
     SMOKE_CHECK(it && it->bg == UI_HEX(0x2b4a86) && it->bg_hover != 0, "the clicked action is highlighted, also under the mouse");
 }
-/* a long description (Character Walk) mustn't push the Add button out of the details panel */
+/* a long description (Character Move) mustn't push the Add button out of the details panel */
 static void s_sg_long(void) {
     UiNode *w[8];
     int n = ui_window_nodes(ED.ui, w, 8);
-    UiNode *it = n ? find_node(w[0], NULL, "Character Walk") : NULL;
+    UiNode *it = n ? find_node(w[0], NULL, "Character Move") : NULL;
     if (it) ui_test_click(ED.ui, it, false);
 }
 static void s_sg_long_check(void) {
     UiNode *w[8];
     int n = ui_window_nodes(ED.ui, w, 8);
     UiNode *b = n ? find_node(w[0], NULL, "Add Action To State") : NULL, *win = n ? w[0] : NULL;
-    SMOKE_CHECK(!strcmp(GE.ab_sel, "Character Walk") && b && win && b->h > 0 && b->y + b->h <= win->y + win->h - 2,
+    SMOKE_CHECK(!strcmp(GE.ab_sel, "Character Move") && b && win && b->h > 0 && b->y + b->h <= win->y + win->h - 2,
                 "the Add button stays in view under a long description (button bottom %.0f, window bottom %.0f)", b ? b->y + b->h : -1, win ? win->y + win->h : -1);
     UiNode *it = n ? find_node(w[0], NULL, "Translate") : NULL;   /* back to Translate for the next steps */
     if (it) ui_test_click(ED.ui, it, false);

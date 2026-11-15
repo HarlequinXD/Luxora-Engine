@@ -619,7 +619,7 @@ void lx_scene_simulate(LxScene *s, float dt);
 void lx_scene_stop_simulation(LxScene *s);
 
 /* ===================================================================
- *  State Graphs: visual state machines (.lxgraph assets) in the spirit of PlayMaker.
+ *  State Graphs: visual state machines (.lxgraph assets).
  *  A graph has states; a state runs a list of actions; events move it to another state.
  *  Objects run graphs through the State Graph component (several per object).
  * =================================================================== */

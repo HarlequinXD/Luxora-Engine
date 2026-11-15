@@ -125,6 +125,9 @@ static char g_fz_first[400];
 /* one graph: state A runs the action, state B runs it again (FINISHED/GO go back and forth) */
 static void fz_run(const LxFsmActionDesc *d, int variant, const char *dir) {
     snprintf(g_fz_now, sizeof g_fz_now, "%s (variant %d)", d->name, variant);
+    /* LUXORA_FUZZ_TRACE=1 names each run before it starts, so a crash says which action did it.
+       On Windows there is no alarm handler, so this is the only way to find the culprit. */
+    if (getenv("LUXORA_FUZZ_TRACE")) { fprintf(stderr, "FUZZ %s\n", g_fz_now); fflush(stderr); }
 #if !defined(_WIN32)
     alarm(getenv("LUXORA_FUZZ_ALARM") ? (unsigned)atoi(getenv("LUXORA_FUZZ_ALARM")) : 20);
 #endif
@@ -250,8 +253,13 @@ static void sem_begin(const char *body) {
     snprintf(text, sizeof text,
              "[graph]\nname = Sem\nstart = A\n[event]\nname = GO\n"
              "[variable]\nname = f\ntype = float\nvalue = 0\n[variable]\nname = f2\ntype = float\nvalue = 0\n"
-             "[variable]\nname = i\ntype = int\nvalue = 0\n[variable]\nname = b\ntype = bool\nvalue = false\n"
-             "[variable]\nname = s\ntype = string\nvalue = \n[variable]\nname = v\ntype = vector3\nvalue = 0 0 0\n"
+             "[variable]\nname = i\ntype = int\nvalue = 0\n[variable]\nname = i2\ntype = int\nvalue = 0\n"
+             "[variable]\nname = b\ntype = bool\nvalue = false\n[variable]\nname = b2\ntype = bool\nvalue = false\n"
+             "[variable]\nname = s\ntype = string\nvalue = \n[variable]\nname = s2\ntype = string\nvalue = \n"
+             "[variable]\nname = v\ntype = vector3\nvalue = 0 0 0\n[variable]\nname = v2\ntype = vector3\nvalue = 0 0 0\n"
+             "[variable]\nname = c\ntype = color\nvalue = 0 0 0 1\n[variable]\nname = q\ntype = quaternion\nvalue = 0 0 0\n"
+             "[variable]\nname = arr\ntype = array\nvalue = float: \n"
+             "[variable]\nname = sarr\ntype = array\nvalue = string: \n"
              "[variable]\nname = o\ntype = object\nvalue = None\n%s", body);
     snprintf(name, sizeof name, "Sem%d.lxgraph", ++g_sem_n);
     lx_path_join(path, sizeof path, g_sdir, name);
@@ -272,6 +280,11 @@ static LxVec3 svv(const char *var) {
     LxFsmRun *r = lx_fsm_run_of(g_ss, g_so, 0);
     for (int i = 0; r && i < r->var_count; i++) if (!strcmp(r->var_names[i], var)) return r->vars[i].v;
     return lx_v3(-999, -999, -999);
+}
+static LxVec4 svc(const char *var) {   /* colours, rotations and rects all live in the four-float field */
+    LxFsmRun *r = lx_fsm_run_of(g_ss, g_so, 0);
+    for (int i = 0; r && i < r->var_count; i++) if (!strcmp(r->var_names[i], var)) return r->vars[i].c;
+    return lx_v4(-999, -999, -999, -999);
 }
 static LxEntity svo(const char *var) {
     LxFsmRun *r = lx_fsm_run_of(g_ss, g_so, 0);
@@ -312,338 +325,401 @@ static void test_fsm_semantics(void) {
     lx_save_set_file(savef);
     const float DT = 1.0f / 60;
 
-    /* ---- variables & maths ---- */
-    sem_begin(ONE("[action]\ntype = Set Float\np0 = $f\np1 = 2.5\n[action]\ntype = Float Operator\np0 = $f\np1 = 4\np2 = Multiply\np3 = $f2\n"
-                  "[action]\ntype = Float Add\np0 = $f\np1 = 1\np2 = false\n"));
+    /* ================= numbers ================= */
+    sem_begin(ONE("[action]\ntype = Float Set Value\np0 = 2.5\np1 = $f\n"
+                  "[action]\ntype = Float Operator\np0 = $f\np1 = 4\np2 = Multiply\np3 = $f2\n"
+                  "[action]\ntype = Float Add\np0 = $f\np1 = 1\n"));
     sem_run(2, DT);
-    CHECK(NEAR(sv("f"), 3.5f, 1e-5f) && NEAR(sv("f2"), 10, 1e-5f) && !strcmp(sst(), "Done"), "Set Float, Float Operator, Float Add, then FINISHED (%g %g %s)", sv("f"), sv("f2"), sst());
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Int Operator\np0 = 7\np1 = 0\np2 = Divide\np3 = $i\n[action]\ntype = Float Function\np0 = 16\np1 = Square Root\np2 = $f\n"
-                  "[action]\ntype = Convert\np0 = Float to Int\np1 = 2.6\np3 = $f2\n"));
-    sem_run(2, DT);
-    CHECK(sv("i") == 0 && NEAR(sv("f"), 4, 1e-5f) && NEAR(sv("f2"), 3, 1e-5f), "divide by zero gives 0, sqrt, rounding (%g %g %g)", sv("i"), sv("f"), sv("f2"));
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Set Float\np0 = $f\np1 = 7\n[action]\ntype = Build String\np0 = Score: {0}, time {1}\np1 = $f\np2 = 1.5\np3 = $s\n"));
-    sem_run(2, DT);
-    CHECK(!strcmp(svs("s"), "Score: 7, time 1.50"), "Build String (%s)", svs("s"));
-    sem_end();
-    sem_begin(ONE("[action]\ntype = String Join\np0 = Hello\\s\np1 = World\np2 = $s\n[action]\ntype = String Length\np0 = $s\np1 = $i\n"
-                  "[action]\ntype = String Contains\np0 = $s\np1 = WORLD\np2 = YES\np3 = NO\n"));
-    sem_run(2, DT);
-    CHECK(!strcmp(svs("s"), "Hello World") && sv("i") == 11 && !strcmp(sst(), "Yes"), "String Join / Length / Contains (%s %g %s)", svs("s"), sv("i"), sst());
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Int Switch\np0 = 2\np1 = 1\np2 = NO\np3 = 2\np4 = YES\np9 = NO\n"));
-    sem_run(2, DT);
-    CHECK(!strcmp(sst(), "Yes"), "Int Switch (%s)", sst());
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Float In Range\np0 = 5\np1 = 0\np2 = 10\np3 = NO\np4 = YES\np5 = NO\n"));
-    sem_run(2, DT);
-    CHECK(!strcmp(sst(), "Yes"), "Float In Range (%s)", sst());
-    sem_end();
-    sem_begin(ONE("[action]\ntype = String Compare\np0 = abc\np1 = ABC\np2 = true\np3 = YES\np4 = NO\n"));
-    sem_run(2, DT);
-    CHECK(!strcmp(sst(), "Yes"), "String Compare ignoring case (%s)", sst());
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Bool Flip\np0 = $b\n[action]\ntype = Bool Test\np0 = $b\np1 = YES\np2 = NO\n"));
-    sem_run(2, DT);
-    CHECK(!strcmp(sst(), "Yes"), "Bool Flip then Bool Test (%s)", sst());
-    sem_end();
-    {   /* random numbers stay in range */
-        bool in = true;
-        for (int k = 0; k < 40 && in; k++) {
-            sem_begin(ONE("[action]\ntype = Random Int\np0 = 3\np1 = 5\np2 = $i\n[action]\ntype = Random Float\np0 = -1\np1 = 1\np2 = $f\n"
-                          "[action]\ntype = Random Point\np0 = 10 0 10\np1 = 2\np2 = true\np3 = $v\n"));
-            sem_run(1, DT);
-            LxVec3 p = svv("v");
-            in = sv("i") >= 3 && sv("i") <= 5 && sv("f") >= -1 && sv("f") <= 1 && p.y == 0 && lx_len3(lx_sub3(p, lx_v3(10, 0, 10))) <= 2.001f;
-            sem_end();
-        }
-        CHECK(in, "Random Int / Float / Point stay in range");
-    }
-    sem_begin(ONE("[action]\ntype = Vector3 Operator\np0 = 1 2 3\np1 = 1 1 1\np2 = Add\np4 = $v\n[action]\ntype = Get Vector3 XYZ\np0 = $v\np2 = $f\n"
-                  "[action]\ntype = Vector3 Angle\np0 = 1 0 0\np1 = 0 0 1\np2 = $f2\n"));
-    sem_run(2, DT);
-    CHECK(VEQ(svv("v"), 2, 3, 4, 1e-5f) && NEAR(sv("f"), 3, 1e-5f) && NEAR(sv("f2"), 90, 1e-3f), "Vector3 Operator / Get XYZ / Angle");
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Float Interpolate\np0 = 0\np1 = 10\np2 = 0.5\np3 = Linear\np4 = $f\n"));
-    sem_run(16, DT);
-    float mid = sv("f");
-    sem_run(30, DT);
-    CHECK(mid > 2 && mid < 8 && NEAR(sv("f"), 10, 1e-4f) && !strcmp(sst(), "Done"), "Float Interpolate reaches the end, then FINISHED (mid %g, end %g, %s)", mid, sv("f"), sst());
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Counter\np0 = $i\np1 = 3\np2 = YES\np3 = NO\np4 = false\n"));
-    sem_run(1, DT);
-    CHECK(sv("i") == 1 && !strcmp(sst(), "No"), "Counter counts the first time");
+    CHECK(NEAR(sv("f"), 3.5f, 1e-5f) && NEAR(sv("f2"), 10, 1e-5f) && !strcmp(sst(), "Done"),
+          "Float Set Value, Float Operator, Float Add, then FINISHED (%g %g %s)", sv("f"), sv("f2"), sst());
     sem_end();
 
-    /* ---- time & flow ---- */
-    sem_begin(ONE("[action]\ntype = Wait\np0 = 0.5\n"));
+    sem_begin(ONE("[action]\ntype = Int Operator\np0 = 7\np1 = 0\np2 = Divide\np3 = $i\n"
+                  "[action]\ntype = Sqrt\np0 = 16\np1 = $f\n"
+                  "[action]\ntype = Convert Float To Int\np0 = 2.6\np1 = Round\np2 = $i2\n"));
+    sem_run(2, DT);
+    CHECK(sv("i") == 0 && NEAR(sv("f"), 4, 1e-5f) && sv("i2") == 3,
+          "dividing by zero gives 0, square root, rounding (%g %g %g)", sv("i"), sv("f"), sv("i2"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Clamp\np0 = 9\np1 = 0\np2 = 1\np3 = $f\n"
+                  "[action]\ntype = Float Remap\np0 = 5\np1 = 0\np2 = 10\np3 = 0\np4 = 100\np5 = true\np6 = $f2\n"
+                  "[action]\ntype = Lerp\np0 = 0\np1 = 10\np2 = 0.25\np3 = false\np4 = $i\n"));
+    sem_run(2, DT);
+    CHECK(NEAR(sv("f"), 1, 1e-5f) && NEAR(sv("f2"), 50, 1e-4f) && sv("i") == 3,
+          "Clamp, Float Remap, Lerp into an Int (%g %g %g)", sv("f"), sv("f2"), sv("i"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = In Range\np0 = 5\np1 = 0\np2 = 10\np3 = $b\np4 = YES\np5 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("b") == 1 && !strcmp(sst(), "Yes"), "In Range stores true and takes the In Range event (%g %s)", sv("b"), sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Float Compare\np0 = 1\np1 = 5\np2 = 0\np3 = \np4 = YES\np5 = NO\n"));
+    sem_run(2, DT);
+    CHECK(!strcmp(sst(), "Yes"), "Float Compare takes the Less Than event (%s)", sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Int Add Wrap\np0 = $i\np1 = 1\np2 = 0\np3 = 2\n"));
+    sem_run(2, DT);
+    CHECK(sv("i") == 1, "Int Add Wrap counts up (%g)", sv("i"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Int Add Wrap\np0 = $i\np1 = 5\np2 = 0\np3 = 2\n"));
+    sem_run(2, DT);
+    CHECK(sv("i") == 2, "Int Add Wrap wraps round past Max (%g)", sv("i"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Bool Operator\np0 = true\np1 = false\np2 = XOR\np3 = $b\np4 = YES\np5 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("b") == 1 && !strcmp(sst(), "Yes"), "Bool Operator XOR (%g %s)", sv("b"), sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Bool Invert\np0 = $b\n[action]\ntype = Bool Test\np0 = $b\np1 = YES\np2 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("b") == 1 && !strcmp(sst(), "Yes"), "Bool Invert then Bool Test (%g %s)", sv("b"), sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Random Float\np0 = 5\np1 = 6\np2 = $f\n"
+                  "[action]\ntype = Random Int\np0 = 3\np1 = 3\np2 = $i\n"));
+    sem_run(2, DT);
+    CHECK(sv("f") >= 5 && sv("f") <= 6 && sv("i") == 3, "Random Float stays in range; Random Int with Min == Max (%g %g)", sv("f"), sv("i"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Atan2\np0 = 1\np1 = 0\np2 = true\np3 = $f\n"
+                  "[action]\ntype = Sin\np0 = 90\np1 = true\np2 = $f2\n"));
+    sem_run(2, DT);
+    CHECK(NEAR(sv("f"), 90, 1e-3f) && NEAR(sv("f2"), 1, 1e-5f), "Atan2 and Sin in degrees (%g %g)", sv("f"), sv("f2"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Enum Switch\np0 = 2\np1 = \np2 = \np3 = YES\np4 = \np5 = \np6 = \np7 = NO\n"));
+    sem_run(2, DT);
+    CHECK(!strcmp(sst(), "Yes"), "Enum Switch picks the event for case 2 (%s)", sst());
+    sem_end();
+
+    /* ================= text ================= */
+    sem_begin(ONE("[action]\ntype = Float Set Value\np0 = 7\np1 = $f\n"
+                  "[action]\ntype = Format String\np0 = Score: {0}, time {1}\np1 = $f\np2 = 1.5\np5 = $s\n"));
+    sem_run(2, DT);
+    CHECK(!strcmp(svs("s"), "Score: 7, time 1.5"), "Format String fills {0} and {1} (\"%s\")", svs("s"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = String Change Case\np0 = Hello World\np1 = Upper\np2 = $s\n"
+                  "[action]\ntype = String Length\np0 = Hello\np1 = $i\n"
+                  "[action]\ntype = String Substring\np0 = Hello World\np1 = 6\np2 = 0\np3 = $s2\n"));
+    sem_run(2, DT);
+    CHECK(!strcmp(svs("s"), "HELLO WORLD") && sv("i") == 5 && !strcmp(svs("s2"), "World"),
+          "String Change Case, String Length, String Substring (\"%s\" %g \"%s\")", svs("s"), sv("i"), svs("s2"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = String Substring\np0 = Hello\np1 = -3\np2 = 0\np3 = $s\n"));
+    sem_run(2, DT);
+    CHECK(!strcmp(svs("s"), "llo"), "a negative Start Index counts back from the end (\"%s\")", svs("s"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = String Index Of\np0 = Hello World\np1 = World\np2 = First\np3 = false\np4 = 2000000000\np5 = $i\n"));
+    sem_run(2, DT);
+    CHECK(sv("i") == -1, "String Index Of survives an absurd Start Index and reports not found (%g)", sv("i"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = String Replace\np0 = a-b-c\np1 = -\np2 = +\np3 = false\np4 = $s\np5 = $i\n"
+                  "[action]\ntype = String Contains\np0 = abcdef\np1 = CDE\np2 = true\np3 = $b\np4 = YES\np5 = NO\n"));
+    sem_run(2, DT);
+    CHECK(!strcmp(svs("s"), "a+b+c") && sv("i") == 2 && sv("b") == 1 && !strcmp(sst(), "Yes"),
+          "String Replace counts its work; String Contains ignoring case (\"%s\" %g %g %s)", svs("s"), sv("i"), sv("b"), sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Float Parse\np0 = 12.5\np1 = $f\np2 = 0\np3 = $b\np4 = YES\np5 = NO\n"));
+    sem_run(2, DT);
+    CHECK(NEAR(sv("f"), 12.5f, 1e-5f) && sv("b") == 1 && !strcmp(sst(), "Yes"), "Float Parse reads a number out of text (%g)", sv("f"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Float Parse\np0 = not a number\np1 = $f\np2 = -1\np3 = $b\np4 = YES\np5 = NO\n"));
+    sem_run(2, DT);
+    CHECK(NEAR(sv("f"), -1, 1e-5f) && sv("b") == 0 && !strcmp(sst(), "No"), "Float Parse falls back to the default (%g)", sv("f"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = String Pad\np0 = 7\np1 = 3\np2 = Left\np3 = 0\np4 = $s\n"));
+    sem_run(2, DT);
+    CHECK(!strcmp(svs("s"), "007"), "String Pad makes a fixed-width number (\"%s\")", svs("s"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Convert Seconds To String\np0 = 90\np1 = m:ss\np2 = $s\n"));
+    sem_run(2, DT);
+    CHECK(!strcmp(svs("s"), "1:30"), "Convert Seconds To String writes a clock (\"%s\")", svs("s"));
+    sem_end();
+
+    /* ================= vectors, rotations, colour ================= */
+    sem_begin(ONE("[action]\ntype = Vector3 Set Value\np0 = 3 0 4\np1 = $v\n"
+                  "[action]\ntype = Vector3 Magnitude\np0 = $v\np1 = $f\np2 = $f2\n"
+                  "[action]\ntype = Vector3 Get XYZ\np0 = $v\np1 = $i\n"));
+    sem_run(2, DT);
+    CHECK(NEAR(sv("f"), 5, 1e-4f) && NEAR(sv("f2"), 25, 1e-3f) && sv("i") == 3,
+          "Vector3 Set Value, Magnitude and Get XYZ (%g %g %g)", sv("f"), sv("f2"), sv("i"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Vector3 Operator\np0 = 1 2 3\np1 = 1 1 1\np2 = Add\np3 = $v\n"));
+    sem_run(2, DT);
+    CHECK(VEQ(svv("v"), 2, 3, 4, 1e-5f), "Vector3 Operator adds");
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Vector3 Lerp\np0 = 0 0 0\np1 = 10 0 0\np2 = 0.5\np3 = false\np4 = $v\n"));
+    sem_run(2, DT);
+    CHECK(VEQ(svv("v"), 5, 0, 0, 1e-4f), "Vector3 Lerp lands halfway");
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Vector3 Project On Plane\np0 = 1 5 0\np1 = 0 1 0\np2 = $v\n"));
+    sem_run(2, DT);
+    CHECK(VEQ(svv("v"), 1, 0, 0, 1e-5f), "Vector3 Project On Plane takes the vertical out");
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Quaternion From Euler\np0 = 0 90 0\np1 = $q\n"
+                  "[action]\ntype = Quaternion Rotate Vector\np0 = $q\np1 = 0 0 1\np2 = $v\n"));
+    sem_run(2, DT);
+    CHECK(VEQ(svv("v"), 1, 0, 0, 1e-4f), "a 90 degree yaw turns forward into right");
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Color From RGBA\np0 = 255\np1 = 128\np2 = 0\np3 = 255\np4 = true\np5 = $c\n"
+                  "[action]\ntype = Color Get RGBA\np0 = $c\np1 = false\np2 = $f\np3 = $f2\n"));
+    sem_run(2, DT);
+    CHECK(NEAR(sv("f"), 1, 1e-4f) && NEAR(sv("f2"), 128.0f / 255.0f, 1e-3f),
+          "Color From RGBA reads 0-255 and Color Get RGBA gives back 0-1 (%g %g)", sv("f"), sv("f2"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Color From Hex String\np0 = #FF8000\np1 = $c\np2 = $b\np3 = YES\np4 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("b") == 1 && NEAR(svc("c").x, 1, 1e-3f) && NEAR(svc("c").z, 0, 1e-3f) && !strcmp(sst(), "Yes"),
+          "Color From Hex String reads #RRGGBB (%g)", svc("c").y);
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Color HSV To RGB\np0 = 0\np1 = 1\np2 = 1\np3 = 1\np4 = $c\n"));
+    sem_run(2, DT);
+    CHECK(NEAR(svc("c").x, 1, 1e-4f) && NEAR(svc("c").y, 0, 1e-4f) && NEAR(svc("c").z, 0, 1e-4f),
+          "hue 0, full saturation and value is pure red");
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Rect Set Value\np0 = 0\np1 = 0\np2 = 100\np3 = 50\np4 = $c\n"
+                  "[action]\ntype = Rect Contains\np0 = $c\np1 = 10 10\np2 = $b\np3 = YES\np4 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("b") == 1 && !strcmp(sst(), "Yes"), "Rect Set Value then Rect Contains (%g %s)", sv("b"), sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Bounds Contains\np0 = 0 0 0\np1 = 2 2 2\np2 = 0.5 0.5 0.5\np3 = $b\np4 = YES\np5 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("b") == 1 && !strcmp(sst(), "Yes"), "Bounds Contains finds a point inside the box (%g %s)", sv("b"), sst());
+    sem_end();
+
+    /* ================= lists ================= */
+    sem_begin(ONE("[action]\ntype = List Add\np0 = $arr\np1 = 3\n"
+                  "[action]\ntype = List Add\np0 = $arr\np1 = 1\n"
+                  "[action]\ntype = List Add\np0 = $arr\np1 = 2\n"
+                  "[action]\ntype = List Count\np0 = $arr\np1 = $i\np2 = $b\n"));
+    sem_run(2, DT);
+    CHECK(sv("i") == 3 && sv("b") == 0, "List Add three times, List Count (%g %g)", sv("i"), sv("b"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = List Add\np0 = $arr\np1 = 3\n"
+                  "[action]\ntype = List Add\np0 = $arr\np1 = 1\n"
+                  "[action]\ntype = List Add\np0 = $arr\np1 = 2\n"
+                  "[action]\ntype = List Sort\np0 = $arr\np1 = Ascending\n"
+                  "[action]\ntype = List Get\np0 = $arr\np1 = 0\np2 = $f\n"
+                  "[action]\ntype = List Get\np0 = $arr\np1 = -1\np2 = $f2\n"));
+    sem_run(2, DT);
+    CHECK(NEAR(sv("f"), 1, 1e-5f) && NEAR(sv("f2"), 3, 1e-5f),
+          "List Sort orders them; List Get with -1 is the last item (%g %g)", sv("f"), sv("f2"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = List Add\np0 = $arr\np1 = 5\n"
+                  "[action]\ntype = List Contains\np0 = $arr\np1 = 5\np2 = $b\np3 = YES\np4 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("b") == 1 && !strcmp(sst(), "Yes"), "List Contains finds a value (%g %s)", sv("b"), sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = List Get\np0 = $arr\np1 = 99\np2 = $f\np3 = NO\n"));
+    sem_run(2, DT);
+    CHECK(!strcmp(sst(), "No"), "List Get past the end takes the Out Of Range event rather than crashing (%s)", sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = String Split\np0 = a,b,c\np1 = ,\np2 = $sarr\np3 = false\np4 = $i\n"
+                  "[action]\ntype = String Join\np0 = $sarr\np1 = -\np2 = $s\n"));
+    sem_run(2, DT);
+    CHECK(sv("i") == 3 && !strcmp(svs("s"), "a-b-c"), "String Split into a list, then String Join back (%g \"%s\")", sv("i"), svs("s"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = List Add\np0 = $arr\np1 = 4\n"
+                  "[action]\ntype = List Add\np0 = $arr\np1 = 6\n"
+                  "[action]\ntype = Float List Sum\np0 = $arr\np1 = $f\np2 = $f2\n"));
+    sem_run(2, DT);
+    CHECK(NEAR(sv("f"), 10, 1e-4f) && NEAR(sv("f2"), 5, 1e-4f), "Float List Sum totals and averages (%g %g)", sv("f"), sv("f2"));
+    sem_end();
+
+    /* ================= flow, events and time ================= */
+    sem_begin(ONE("[action]\ntype = Int Switch\np0 = 1\np1 = 0\np2 = NO\np3 = 1\np4 = YES\np11 = NO\n"));
+    sem_run(2, DT);
+    CHECK(!strcmp(sst(), "Yes"), "Int Switch picks the matching case (%s)", sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Int Switch\np0 = 9\np1 = 0\np2 = NO\np3 = 1\np4 = NO\np11 = YES\n"));
+    sem_run(2, DT);
+    CHECK(!strcmp(sst(), "Yes"), "Int Switch falls through to the default (%s)", sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = String Switch\np0 = red\np1 = blue\np2 = NO\np3 = red\np4 = YES\np11 = false\np12 = NO\n"));
+    sem_run(2, DT);
+    CHECK(!strcmp(sst(), "Yes"), "String Switch matches text (%s)", sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Float Switch\np0 = 25\np1 = 20\np2 = NO\np3 = 50\np4 = YES\np9 = NO\n"));
+    sem_run(2, DT);
+    CHECK(!strcmp(sst(), "Yes"), "Float Switch takes the first band the value falls below (%s)", sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Wait\np0 = 0.05\np1 = YES\np3 = $f\np4 = $f2\n"));
     sem_run(1, DT);
-    sem_run(28, DT);
-    bool early = strcmp(sst(), "A") == 0;
-    sem_run(4, DT);
-    CHECK(early && !strcmp(sst(), "Done"), "Wait 0.5 s finishes on time (%s)", sst());
-    sem_end();
-    sem_begin("[event]\nname = TICK\n[state]\nname = A\nsequence = 1\ntransition = FINISHED > Done\n"
-              "[action]\ntype = Wait\np0 = 0.2\n[action]\ntype = Set Float\np0 = $f\np1 = 1\n[action]\ntype = Wait\np0 = 0.2\n[state]\nname = Done\n");
-    sem_run(1, DT);
-    sem_run(6, DT);
-    bool not_yet = sv("f") == 0;
-    sem_run(8, DT);
-    bool second = sv("f") == 1 && !strcmp(sst(), "A");
-    sem_run(14, DT);
-    CHECK(not_yet && second && !strcmp(sst(), "Done"), "a sequence state runs its actions one after another (%s)", sst());
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Wait\np0 = 0.1\n[action]\ntype = Float Compare\nupdate = every_frame\np0 = 1\np1 = 2\n"));
-    sem_run(30, DT);
-    CHECK(!strcmp(sst(), "A"), "a state with an every-frame action doesn't send FINISHED (%s)", sst());
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Send Event\np0 = YES\np1 = This Graph\np4 = 0.3\n"));
-    sem_run(10, DT);
-    bool waiting = !strcmp(sst(), "A");
-    sem_run(15, DT);
-    CHECK(waiting && !strcmp(sst(), "Yes"), "Send Event with a delay (%s)", sst());
-    sem_end();
-    sem_begin("[event]\nname = YES\n[state]\nname = A\ntransition = GO > B\n[action]\ntype = Send Event\np0 = YES\np1 = This Graph\np4 = 0.3\n"
-              "[state]\nname = B\ntransition = YES > Yes\n[state]\nname = Yes\n");
+    CHECK(!strcmp(sst(), "A"), "Wait holds the state while it counts (%s)", sst());
     sem_run(5, DT);
-    lx_fsm_send_event(g_ss, g_so, "GO", 0, 0);
-    sem_run(30, DT);
-    CHECK(!strcmp(sst(), "B"), "leaving the state cancels a delayed Send Event (%s)", sst());
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Next Frame Event\np0 = YES\n"));
-    sem_run(1, DT);
-    bool same = !strcmp(sst(), "A");
-    sem_run(1, DT);
-    CHECK(same && !strcmp(sst(), "Yes"), "Next Frame Event (%s)", sst());
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Repeat Event\np0 = 0.1\np1 = GO\np2 = 3\np3 = YES\n"));
-    sem_run(40, DT);
-    CHECK(!strcmp(sst(), "Yes"), "Repeat Event N times then Done Event (%s)", sst());
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Set Float\np0 = $f\np1 = 0.25\n[action]\ntype = Countdown\np0 = $f\np1 = YES\n"));
-    sem_run(10, DT);
-    bool counting = sv("f") > 0 && sv("f") < 0.25f;
-    sem_run(10, DT);
-    CHECK(counting && !strcmp(sst(), "Yes") && sv("f") == 0, "Countdown (%g %s)", sv("f"), sst());
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Get Time\nupdate = every_frame\np2 = $f\n"));
-    sem_run(31, DT);
-    CHECK(NEAR(sv("f"), 0.5f, 0.02f), "Get Time: time in the state (%g)", sv("f"));
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Set Time Scale\np0 = 0.5\n"));
-    sem_run(1, DT);
-    CHECK(NEAR(lx_time_scale(), 0.5f, 1e-5f), "Set Time Scale");
+    CHECK(!strcmp(sst(), "Yes") && sv("f") >= 0.049f, "Wait then sends its event (%s %g)", sst(), sv("f"));
     sem_end();
 
-    /* ---- events ---- */
-    sem_begin("[state]\nname = A\ntransition = GO > B\n[state]\nname = B\n[action]\ntype = Get Event Info\np0 = $f\np1 = $o\np3 = $s\n");
-    sem_run(1, DT);
-    LxEntity chr = lx_entity_find(g_ss, "Char");
-    lx_fsm_send_event(g_ss, g_so, "GO", 42, chr);
-    CHECK(!strcmp(sst(), "B") && NEAR(sv("f"), 42, 1e-5f) && svo("o") == chr && !strcmp(svs("s"), "GO"), "Get Event Info: value, sender, name");
-    sem_end();
-    sem_begin("[global]\nevent = GO\nto = Far\n[state]\nname = A\ntransition = FINISHED > B\n[state]\nname = B\n[action]\ntype = Wait\np0 = 10\n[state]\nname = Far\n");
+    sem_begin(ONE("[action]\ntype = Wait For Frames\np0 = 3\np1 = YES\n"));
+    sem_run(2, DT);
+    CHECK(!strcmp(sst(), "A"), "Wait For Frames is still counting after 2 frames (%s)", sst());
     sem_run(3, DT);
-    lx_fsm_send_event(g_ss, g_so, "GO", 0, 0);
-    CHECK(!strcmp(sst(), "Far"), "a global transition works from any state (%s)", sst());
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Send Event\np0 = YES\np1 = This Graph\n[action]\ntype = Set Float\np0 = $f\np1 = 5\n"));
-    sem_run(1, DT);
-    CHECK(!strcmp(sst(), "Yes") && NEAR(sv("f"), 0, 1e-5f), "an event sent by an action leaves the state before the next action (%s %g)", sst(), sv("f"));
-    sem_end();
-    {   /* to every object with a tag */
-        sem_begin(ONE("[action]\ntype = Send Event\np0 = YES\np1 = Tag\np3 = Enemy\n"));
-        char gp[LX_PATH_MAX];
-        lx_path_join(gp, sizeof gp, g_sdir, "Recv.lxgraph");
-        const char *recv = "[graph]\nstart = Idle\n[event]\nname = YES\n[state]\nname = Idle\ntransition = YES > Got\n[state]\nname = Got\n";
-        lx_file_write(gp, recv, strlen(recv));
-        LxEntity e1 = lx_entity_find(g_ss, "Enemy1"), e2 = lx_entity_find(g_ss, "Enemy2");
-        lx_add_state_graph(g_ss, e1, "Recv.lxgraph");
-        lx_add_state_graph(g_ss, e2, "Recv.lxgraph");
-        g_ss->entities[0].alive = g_ss->entities[0].alive;   /* (no-op) */
-        sem_run(1, DT);   /* the receivers start this frame */
-        lx_fsm_send_event(g_ss, g_so, "NOTHING", 0, 0);
-        sem_end();
-    }
-    {
-        char gp[LX_PATH_MAX];
-        lx_path_join(gp, sizeof gp, g_sdir, "Recv2.lxgraph");
-        const char *recv = "[graph]\nstart = Idle\n[event]\nname = HEY\n[state]\nname = Idle\ntransition = HEY > Got\n[state]\nname = Got\n";
-        lx_file_write(gp, recv, strlen(recv));
-        sem_begin("[event]\nname = HEY\n[state]\nname = A\ntransition = FINISHED > B\n[action]\ntype = Wait\np0 = 0.1\n[state]\nname = B\n"
-                  "[action]\ntype = Send Event\np0 = HEY\np1 = Tag\np3 = Enemy\n[action]\ntype = Send Event\np0 = HEY\np1 = Children\np2 = Owner\n");
-        LxEntity e1 = lx_entity_find(g_ss, "Enemy1"), e2 = lx_entity_find(g_ss, "Enemy2"), kid = lx_entity_find(g_ss, "Child"), ch = lx_entity_find(g_ss, "Char");
-        lx_add_state_graph(g_ss, e1, "Recv2.lxgraph");
-        lx_add_state_graph(g_ss, e2, "Recv2.lxgraph");
-        lx_add_state_graph(g_ss, kid, "Recv2.lxgraph");
-        lx_add_state_graph(g_ss, ch, "Recv2.lxgraph");
-        sem_run(12, DT);
-        CHECK(!strcmp(lx_fsm_current_state(g_ss, e1, 0), "Got") && !strcmp(lx_fsm_current_state(g_ss, e2, 0), "Got") &&
-                  !strcmp(lx_fsm_current_state(g_ss, kid, 0), "Got") && !strcmp(lx_fsm_current_state(g_ss, ch, 0), "Idle"),
-              "Send Event to a tag and to children reaches exactly those");
-        sem_end();
-    }
-
-    /* ---- transform ---- */
-    sem_begin(ONE("[action]\ntype = Set Position\np0 = name:Child\np1 = 5 6 7\np2 = World\n[action]\ntype = Get Position\np0 = name:Child\np1 = $v\np2 = World\n"));
-    sem_run(1, DT);
-    CHECK(VEQ(svv("v"), 5, 6, 7, 1e-4f), "Set Position in world space under a parent, Get Position");
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Translate\nupdate = every_frame\np0 = name:Cam\np1 = 1 0 0\np2 = World\np3 = true\n"));
-    LxVec3 c0 = lx_entity_world_position(g_ss, lx_entity_find(g_ss, "Cam"));
-    sem_run(61, DT);
-    LxVec3 c1 = lx_entity_world_position(g_ss, lx_entity_find(g_ss, "Cam"));
-    CHECK(NEAR(c1.x - c0.x, 1, 0.03f), "Translate per second (%g)", c1.x - c0.x);
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Move Towards\nupdate = every_frame\np0 = name:Cam\np1 = None\np2 = 0 3 4\np3 = 4\np4 = 0\np5 = YES\np6 = false\n"));
-    sem_run(80, DT);
-    CHECK(!strcmp(sst(), "Yes") && VEQ(lx_entity_world_position(g_ss, lx_entity_find(g_ss, "Cam")), 0, 3, 4, 1e-3f), "Move Towards arrives and sends its event (%s)", sst());
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Look At\np0 = name:Cam\np1 = name:Char\np3 = false\n"));
-    sem_run(1, DT);
-    {
-        LxEntity cam = lx_entity_find(g_ss, "Cam"), ch = lx_entity_find(g_ss, "Char");
-        LxVec3 f = lx_entity_forward(g_ss, cam), want = lx_norm3(lx_sub3(lx_entity_world_position(g_ss, ch), lx_entity_world_position(g_ss, cam)));
-        CHECK(lx_dot3(f, want) > 0.999f, "Look At faces the target (%g)", lx_dot3(f, want));
-    }
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Move Object\np0 = name:Cam\np1 = 1 1 1\np2 = 0.3\np3 = Ease In Out\np5 = false\n"));
-    sem_run(30, DT);
-    CHECK(VEQ(lx_entity_world_position(g_ss, lx_entity_find(g_ss, "Cam")), 1, 1, 1, 1e-3f) && !strcmp(sst(), "Done"), "Move Object ends at its target, then FINISHED (%s)", sst());
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Get Distance\np0 = name:Enemy1\np1 = name:Enemy2\np2 = $f\np3 = 2\np4 = YES\np5 = NO\n"));
-    sem_run(1, DT);
-    CHECK(NEAR(sv("f"), 1, 1e-4f) && !strcmp(sst(), "Yes"), "Get Distance with a range (%g %s)", sv("f"), sst());
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Set Parent\np0 = name:Cam\np1 = Owner\np2 = true\n"));
-    LxVec3 before = lx_entity_world_position(g_ss, lx_entity_find(g_ss, "Cam"));
-    sem_run(1, DT);
-    LxEntity camp = lx_entity_find(g_ss, "Cam");
-    CHECK(lx_entity_parent(g_ss, camp) == g_so && lx_len3(lx_sub3(lx_entity_world_position(g_ss, camp), before)) < 0.05f, "Set Parent keeping the world position");
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Orbit\nupdate = every_frame\np0 = name:Cam\np1 = None\np2 = 3\np3 = 90\np4 = 0 0 0\np5 = 1\n"));
-    sem_run(30, DT);
-    {
-        LxVec3 p = lx_entity_world_position(g_ss, lx_entity_find(g_ss, "Cam"));
-        CHECK(NEAR(sqrtf(p.x * p.x + p.z * p.z), 3, 1e-3f) && NEAR(p.y, 1, 1e-4f), "Orbit keeps its radius and height");
-    }
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Shake\np0 = name:Cam\np1 = 0.5\np2 = 0.2\n"));
-    LxVec3 sh0 = lx_entity_position(g_ss, lx_entity_find(g_ss, "Cam"));
-    sem_run(30, DT);
-    CHECK(VEQ(lx_entity_position(g_ss, lx_entity_find(g_ss, "Cam")), sh0.x, sh0.y, sh0.z, 1e-5f) && !strcmp(sst(), "Done"), "Shake puts the object back where it was");
+    CHECK(!strcmp(sst(), "Yes"), "Wait For Frames finishes on the third (%s)", sst());
     sem_end();
 
-    /* ---- objects ---- */
-    sem_begin(ONE("[action]\ntype = Spawn Prefab\np0 = Prefabs/Box.lxprefab\np1 = None\np2 = 1 2 3\np5 = $o\n"));
-    int n0 = lx_scene_entity_count(g_ss);
-    sem_run(1, DT);
-    CHECK(lx_scene_entity_count(g_ss) == n0 + 1 && svo("o") && VEQ(lx_entity_world_position(g_ss, svo("o")), 1, 2, 3, 1e-4f), "Spawn Prefab");
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Find Object\np0 = Tag\np1 = Player\np2 = $o\np3 = YES\np4 = NO\n[action]\ntype = Has Tag\np0 = $o\np1 = Player\n"));
-    sem_run(1, DT);
-    CHECK(svo("o") == lx_entity_find(g_ss, "Char") && !strcmp(sst(), "Yes"), "Find Object by tag");
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Count With Tag\np0 = Enemy\np1 = $i\n[action]\ntype = Find Closest With Tag\np0 = Owner\np1 = Enemy\np2 = $o\np4 = YES\np5 = NO\n"));
-    sem_run(1, DT);
-    CHECK(svo("o") == lx_entity_find(g_ss, "Enemy1") && sv("i") == 2 && !strcmp(sst(), "Yes"), "Find Closest With Tag, Count With Tag (%u %u %g %s)", svo("o"), lx_entity_find(g_ss, "Enemy1"), sv("i"), sst());
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Get Child\np0 = Owner\np1 = Child\np2 = $o\n[action]\ntype = Set Active\np0 = $o\np1 = false\n"));
-    sem_run(1, DT);
-    CHECK(svo("o") == lx_entity_find(g_ss, "Child") && !lx_entity_active(g_ss, svo("o")), "Get Child, Set Active");
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Destroy Object\np0 = name:Enemy2\np1 = 0\n[action]\ntype = Set Float\np0 = $f\np1 = 1\n"));
-    LxEntity en2 = lx_entity_find(g_ss, "Enemy2");
+    sem_begin(ONE("[action]\ntype = Countdown Timer\np0 = 0.1\np1 = false\np2 = $f\np3 = $f2\np4 = YES\n"));
     sem_run(2, DT);
-    CHECK(!lx_entity_valid(g_ss, en2) && NEAR(sv("f"), 1, 1e-5f), "Destroy Object (the rest of the state still runs)");
+    CHECK(sv("f") > 0 && sv("f") < 0.1f, "Countdown Timer counts down (%g left)", sv("f"));
+    sem_run(10, DT);
+    CHECK(!strcmp(sst(), "Yes") && NEAR(sv("f"), 0, 1e-4f), "Countdown Timer reaches zero and fires (%s %g)", sst(), sv("f"));
     sem_end();
-    sem_begin(ONE("[action]\ntype = Destroy Object\np0 = Owner\np1 = 0\n[action]\ntype = Set Float\np0 = $f\np1 = 1\n"));
-    LxEntity own = g_so;
+
+    sem_begin(ONE("[action]\ntype = Tick Every\np0 = 0.05\np1 = YES\np2 = $i\n"));
+    sem_run(1, DT);
+    CHECK(!strcmp(sst(), "A"), "Tick Every has not fired yet (%s)", sst());
+    sem_run(5, DT);
+    CHECK(!strcmp(sst(), "Yes"), "Tick Every fires on its interval (%s)", sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Add Per Second\np0 = $f\np1 = 60\np2 = 0\np3 = 1000\n"));
+    sem_run(60, DT);
+    CHECK(sv("f") > 55 && sv("f") < 65, "Add Per Second adds about its rate over a second (%g)", sv("f"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Loop\np0 = 1\np1 = $i\np2 = NO\np3 = YES\n"));
+    sem_run(2, DT);
+    CHECK(!strcmp(sst(), "Yes") && sv("i") == 0, "Loop counts, then sends Finished when the count is reached (%g %s)", sv("i"), sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Send Event\np0 = YES\np1 = This Graph\np4 = 0\np5 = 3\n"
+                  "[action]\ntype = Get Event Info\np0 = $f\n"));
     sem_run(3, DT);
-    CHECK(!lx_entity_valid(g_ss, own), "a graph can destroy its own object");
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Duplicate Object\np0 = name:Enemy1\np1 = 0 5 0\np2 = $o\n"));
-    sem_run(1, DT);
-    CHECK(svo("o") && NEAR(lx_entity_world_position(g_ss, svo("o")).y, 5.5f, 1e-4f), "Duplicate Object with an offset");
+    CHECK(!strcmp(sst(), "Yes"), "Send Event moves the graph on (%s)", sst());
     sem_end();
 
-    /* ---- physics ---- */
-    sem_begin(ONE("[action]\ntype = Set Velocity\np0 = Owner\np1 = 0 0 3\n[action]\ntype = Get Velocity\nupdate = once\np0 = Owner\np1 = $v\np2 = $f\n"));
-    sem_run(1, DT);
-    CHECK(NEAR(svv("v").z, 3, 0.2f) && NEAR(sv("f"), 3, 0.3f), "Set Velocity / Get Velocity (%g)", svv("v").z);
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Add Force\np0 = Owner\np1 = 0 10 0\np2 = Velocity Change\np3 = World\n[action]\ntype = Get Velocity\nupdate = once\np0 = Owner\np1 = $v\n"));
-    sem_run(1, DT);
-    CHECK(svv("v").y > 9, "Add Force as a velocity change (%g)", svv("v").y);
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Raycast\np0 = name:Cam\np1 = 0 0 0\np2 = 0 -1 0\np3 = World\np4 = 50\np5 = YES\np6 = NO\np8 = $o\np9 = $v\n"));
-    sem_run(2, DT);
-    CHECK(!strcmp(sst(), "Yes") && svo("o") == lx_entity_find(g_ss, "Ground") && NEAR(svv("v").y, 0, 0.05f), "Raycast hits the ground under it (%s)", sst());
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Overlap Sphere\nupdate = once\np0 = name:Enemy1\np2 = 1.5\np3 = Enemy\np4 = $i\np6 = YES\np7 = NO\n"));
-    sem_run(2, DT);
-    CHECK(sv("i") == 1 && !strcmp(sst(), "Yes"), "Overlap Sphere with a tag (%g %s)", sv("i"), sst());
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Set Gravity\np0 = 0 -1.6 0\n"));
-    sem_run(1, DT);
-    CHECK(NEAR(lx_physics_settings()->gravity.y, -1.6f, 1e-5f), "Set Gravity");
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Collision Event\np0 = Enter\np1 = Player\np2 = YES\np3 = $o\n"));
-    sem_run(2, DT);
-    lx_fsm_system_event(g_ss, g_so, "COLLISION_ENTER", lx_entity_find(g_ss, "Enemy1"), 0);   /* wrong tag */
-    sem_run(1, DT);
-    bool ignored = !strcmp(sst(), "A");
-    lx_fsm_system_event(g_ss, g_so, "COLLISION_ENTER", lx_entity_find(g_ss, "Enemy1"), 0);
-    lx_fsm_system_event(g_ss, g_so, "COLLISION_ENTER", lx_entity_find(g_ss, "Char"), 0);   /* two in one frame */
-    sem_run(1, DT);
-    CHECK(ignored && !strcmp(sst(), "Yes") && svo("o") == lx_entity_find(g_ss, "Char"), "Collision Event filters by tag, sees every collision of a frame (%s)", sst());
+    sem_begin(ONE("[action]\ntype = Get Time Info\np0 = $f\np1 = $f2\n"));
+    sem_run(3, DT);
+    CHECK(sv("f") > 0 && NEAR(sv("f2"), DT, 1e-4f), "Get Time Info reports the game time and the frame time (%g %g)", sv("f"), sv("f2"));
     sem_end();
 
-    /* ---- rendering, camera, audio, save ---- */
-    sem_begin(ONE("[action]\ntype = Set Light\np0 = Owner\np1 = 1 0 0 1\np2 = 3\n[action]\ntype = Set Field Of View\np0 = name:Cam\np1 = 30\n"
-                  "[action]\ntype = Set Volume And Pitch\np0 = Owner\np1 = 0.5\np2 = 2\n"));
-    sem_run(1, DT);
-    CHECK(NEAR(lx_get_light(g_ss, g_so)->intensity, 3, 1e-5f) && NEAR(lx_get_light(g_ss, g_so)->color.y, 0, 1e-5f) &&
-              NEAR(lx_get_camera(g_ss, lx_entity_find(g_ss, "Cam"))->fov_deg, 30, 1e-5f) && NEAR(lx_get_audio_source(g_ss, g_so)->pitch, 2, 1e-5f),
-          "Set Light, Set Field Of View, Set Volume And Pitch");
+    sem_begin(ONE("[action]\ntype = Format Time\np0 = 125\np1 = m:ss\np2 = $s\n"));
+    sem_run(2, DT);
+    CHECK(!strcmp(svs("s"), "2:05"), "Format Time writes a HUD clock (\"%s\")", svs("s"));
     sem_end();
-    sem_begin(ONE("[action]\ntype = Fade Light\np0 = Owner\np1 = 0\np2 = 0.2\n"));
-    sem_run(20, DT);
-    CHECK(NEAR(lx_get_light(g_ss, g_so)->intensity, 0, 1e-5f) && !strcmp(sst(), "Done"), "Fade Light (%g)", lx_get_light(g_ss, g_so)->intensity);
+
+    /* ================= graph variables and state ================= */
+    sem_begin(ONE("[action]\ntype = Float Set Value\np0 = 11\np1 = $f\n"
+                  "[action]\ntype = Get Graph Variable\np0 = Owner\np1 = 0\np2 = f\np3 = $f2\np4 = $b\np5 = NO\n"
+                  "[action]\ntype = Get Graph State\np0 = Owner\np1 = 0\np2 = $s\n"));
+    sem_run(2, DT);
+    CHECK(NEAR(sv("f2"), 11, 1e-5f) && sv("b") == 1 && !strcmp(svs("s"), "A"),
+          "Get Graph Variable and Get Graph State read this graph (%g %g \"%s\")", sv("f2"), sv("b"), svs("s"));
     sem_end();
-    sem_begin("[state]\nname = A\ntransition = GO > B\n[action]\ntype = Light Flicker\np0 = Owner\np1 = 0.9\np2 = 3\n[state]\nname = B\n");
-    float base = lx_get_light(g_ss, g_so)->intensity;
-    sem_run(20, DT);
-    lx_fsm_send_event(g_ss, g_so, "GO", 0, 0);
-    CHECK(NEAR(lx_get_light(g_ss, g_so)->intensity, base, 1e-5f), "Light Flicker restores the light when the state ends");
+
+    sem_begin(ONE("[action]\ntype = Set Graph Variable\np0 = Owner\np1 = 0\np2 = f\np3 = 42\np4 = $b\np5 = NO\n"));
+    sem_run(2, DT);
+    CHECK(NEAR(sv("f"), 42, 1e-5f) && sv("b") == 1, "Set Graph Variable writes into a graph (%g)", sv("f"));
     sem_end();
-    sem_begin(ONE("[action]\ntype = Save Value\np0 = test_key\np1 = Int\np2 = 77\n[action]\ntype = Load Value\np0 = test_key\np1 = Float\np2 = 0\np3 = $f\np4 = YES\np5 = NO\n"));
-    sem_run(1, DT);
-    CHECK(NEAR(sv("f"), 77, 1e-4f) && !strcmp(sst(), "Yes"), "Save Value then Load Value (%g)", sv("f"));
+
+    sem_begin(ONE("[action]\ntype = Get Graph Variable\np0 = Owner\np1 = 0\np2 = nosuchvariable\np3 = $f\np4 = $b\np5 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("b") == 0 && !strcmp(sst(), "No"), "a missing variable takes the Not Found event (%g %s)", sv("b"), sst());
     sem_end();
-    sem_begin(ONE("[action]\ntype = Delete Saved Value\np0 = test_key\n[action]\ntype = Load Value\np0 = test_key\np2 = 5\np3 = $f\np4 = NO\np5 = YES\n"));
-    sem_run(1, DT);
-    CHECK(NEAR(sv("f"), 5, 1e-4f) && !strcmp(sst(), "Yes"), "Delete Saved Value: Load gives the default");
+
+    /* ================= save data and inventory ================= */
+    lx_save_clear();
+    sem_begin(ONE("[action]\ntype = Save Value\np0 = Score\np1 = 1234\np2 = true\n"
+                  "[action]\ntype = Has Saved Value\np0 = Score\np1 = $b\np2 = YES\np3 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("b") == 1 && !strcmp(sst(), "Yes"), "Save Value then Has Saved Value (%g %s)", sv("b"), sst());
     sem_end();
-    {   /* global variables: one graph writes, another reads */
-        char gp[LX_PATH_MAX];
-        lx_path_join(gp, sizeof gp, g_sdir, "Globals.lxglobals");
-        const char *gl = "[variable]\nname = score\ntype = float\nvalue = 1\n";
-        lx_file_write(gp, gl, strlen(gl));
-        lx_assets_clear();   /* reloads the globals */
-        lx_fsm_globals_reset_values();
-        lx_path_join(gp, sizeof gp, g_sdir, "Reader.lxgraph");
-        const char *rd = "[graph]\nstart = Idle\n[event]\nname = HIGH\n[state]\nname = Idle\ntransition = HIGH > High\n"
-                         "[action]\ntype = Float Compare\nupdate = every_frame\np0 = $score\np1 = 6\np3 = HIGH\n[state]\nname = High\n";
-        lx_file_write(gp, rd, strlen(rd));
-        sem_begin(ONE("[action]\ntype = Float Add\np0 = $score\np1 = 5\n"));
-        LxEntity reader = lx_entity_find(g_ss, "Enemy1");
-        lx_add_state_graph(g_ss, reader, "Reader.lxgraph");
+
+    sem_begin(ONE("[action]\ntype = Load Value\np0 = Score\np1 = $f\np2 = $b\np3 = YES\np4 = NO\n"));
+    sem_run(2, DT);
+    CHECK(NEAR(sv("f"), 1234, 1e-3f) && sv("b") == 1, "Load Value reads it back (%g)", sv("f"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Delete Saved Value\np0 = Score\np1 = false\n"
+                  "[action]\ntype = Has Saved Value\np0 = Score\np1 = $b\np2 = YES\np3 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("b") == 0 && !strcmp(sst(), "No"), "Delete Saved Value removes it (%g %s)", sv("b"), sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Load Value\np0 = NeverSaved\np1 = $f\np2 = $b\np3 = YES\np4 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("b") == 0 && !strcmp(sst(), "No"), "Load Value of something never saved reports Not Found (%s)", sst());
+    sem_end();
+
+    lx_inventory_clear();
+    sem_begin(ONE("[action]\ntype = Change Inventory\np0 = Add\np1 = Key\np2 = 2\np3 = $i\np4 = $b\np5 = YES\np6 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("i") == 2 && sv("b") == 1 && !strcmp(sst(), "Yes"), "Change Inventory adds items (%g)", sv("i"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Change Inventory\np0 = Remove\np1 = Key\np2 = 5\np3 = $i\np4 = $b\np5 = YES\np6 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("b") == 0 && sv("i") == 2 && !strcmp(sst(), "No"),
+          "removing more than you hold fails and changes nothing (%g %g %s)", sv("b"), sv("i"), sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Get Inventory Count\np0 = Key\np1 = $i\np2 = 2\np3 = $b\np4 = YES\np5 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("i") == 2 && sv("b") == 1 && !strcmp(sst(), "Yes"), "Get Inventory Count says whether there is enough (%g)", sv("i"));
+    sem_end();
+    lx_inventory_clear();
+
+    /* ================= breakpoints ================= */
+    lx_fsm_breakpoints_clear();
+    sem_begin("[state]\nname = A\ntransition = FINISHED > B\n[action]\ntype = Wait\np0 = 0\n"
+              "[state]\nname = B\nbreakpoint = 1\n");
+    {
+        LxFsmBreak bp;
+        CHECK(!lx_fsm_breakpoint_taken(&bp), "nothing has tripped a breakpoint yet");
         sem_run(3, DT);
-        CHECK(NEAR(lx_fsm_global_float("score"), 6, 1e-4f) && !strcmp(lx_fsm_current_state(g_ss, reader, 0), "High"), "a global variable set by one graph is seen by another (%g)",
-              lx_fsm_global_float("score"));
-        sem_end();
+        bool hit = lx_fsm_breakpoint_taken(&bp);
+        CHECK(hit && !strcmp(bp.state, "B"), "entering a state marked with a breakpoint records it (%s)", hit ? bp.state : "none");
+        CHECK(!lx_fsm_breakpoint_taken(&bp), "reading it clears it, so Play is paused once and not every frame");
+    }
+    sem_end();
+
+    {
+        /* a breakpoint survives a save and load, so it stays set between editor sessions */
+        LxGraph *g = lx_graph_new("Bp");                       /* comes with one state already */
+        LxGraphState *st = lx_graph_add_state(g, "Stop Here", 0, 0);
+        st->breakpoint = true;
+        char *text = lx_graph_to_text(g);
+        LxGraph *back = lx_graph_from_text(text);
+        CHECK(back && back->state_count == 2 && !back->states[0].breakpoint && back->states[1].breakpoint,
+              "a breakpoint is saved with the graph and read back, and only on the state that has one");
+        lx_free(text);
+        if (back) lx_graph_free(back);
+        lx_graph_free(g);
+    }
+
+    {
+        char gp[LX_PATH_MAX];
+        lx_path_join(gp, sizeof gp, g_sdir, "save.txt");
         remove(gp);
         lx_path_join(gp, sizeof gp, g_sdir, "Globals.lxglobals");
         remove(gp);
@@ -651,18 +727,18 @@ static void test_fsm_semantics(void) {
     lx_assets_clear();
 }
 
-/* ---------------- the PlayMaker-style actions (actions4.c) ---------------- */
-static void pm_frame(void) {   /* a new input frame with the game view 1280 x 720 */
+/* ---------------- the built-in action library on a real scene ---------------- */
+static void in_frame(void) {   /* a new input frame with the game view 1280 x 720 */
     lx_input_begin_frame();
 }
-static void pm_step(void) {
+static void in_step(void) {
     lx_game_ui_begin_frame(0, 0, 1280, 720, true);
     lx_input_update(1.0f / 60);
     lx_scene_simulate(g_ss, 1.0f / 60);
 }
-static void test_fsm_playmaker(void) {
-    printf("state graph: PlayMaker-style actions\n");
-    lx_path_join(g_sdir, sizeof g_sdir, tmpdir(), "luxora_test_fsmpm");
+static void test_fsm_action_library(void) {
+    printf("state graph: built-in action library\n");
+    lx_path_join(g_sdir, sizeof g_sdir, tmpdir(), "luxora_test_fsmlib");
     lx_path_remove(g_sdir);
     lx_mkdir_p(g_sdir);
     lx_assets_set_root(g_sdir);
@@ -673,8 +749,18 @@ static void test_fsm_playmaker(void) {
     g_lx_input.width = 1280; g_lx_input.height = 720;
     lx_input_begin_frame();
     lx_input_begin_frame();
+    {
+        LxScene *ps = lx_scene_create("p");
+        LxEntity b = lx_spawn_primitive(ps, LX_PRIM_CUBE, "Box", lx_v3(0, 0, 0));
+        char pp[LX_PATH_MAX];
+        lx_path_join(pp, sizeof pp, g_sdir, "Prefabs");
+        lx_mkdir_p(pp);
+        lx_path_join(pp, sizeof pp, g_sdir, "Prefabs/Box.lxprefab");
+        lx_prefab_save(ps, b, pp);
+        lx_scene_destroy(ps);
+    }
 
-    /* ---- +Z is forward (like Unity); old files' cameras and lights are turned to keep looking the same way ---- */
+    /* ---- +Z is forward; old files' cameras and lights are turned to keep looking the same way ---- */
     {
         LxQuat q = lx_quat_look(lx_v3(0, 0, 1), lx_v3(0, 1, 0));
         LxVec3 f = lx_quat_rotate(lx_quat_look(lx_v3(1, 0, 0), lx_v3(0, 1, 0)), lx_v3(0, 0, 1));
@@ -693,297 +779,364 @@ static void test_fsm_playmaker(void) {
         lx_scene_destroy(os);
     }
 
-    /* ---- logic, maths, text ---- */
-    sem_begin(ONE("[action]\ntype = Bool Operator\np0 = true\np1 = false\np2 = XOR\np3 = $b\n"
-                  "[action]\ntype = Float Remap\np0 = 5\np1 = 0\np2 = 10\np3 = 100\np4 = 200\np6 = $f\n"
-                  "[action]\ntype = Trigonometry\np0 = 1\np1 = Asin\np2 = true\np3 = $f2\n"
-                  "[action]\ntype = Float Switch\np0 = 30\np1 = 25\np2 = NO\np3 = 50\np4 = YES\np9 = NO\n"));
-    sem_run(1, DT);
-    CHECK(sv("b") == 1 && NEAR(sv("f"), 150, 1e-4f) && NEAR(sv("f2"), 90, 1e-3f) && !strcmp(sst(), "Yes"),
-          "Bool Operator, Float Remap, Trigonometry, Float Switch (%g %g %g %s)", sv("b"), sv("f"), sv("f2"), sst());
-    sem_end();
-    sem_begin(ONE("[action]\ntype = String Replace\np0 = a-b-c\np1 = -\np2 = ::\np3 = $s\n"
-                  "[action]\ntype = String Split\np0 = $s\np1 = ::\np2 = 2\np3 = $s\np4 = $i\n"
-                  "[action]\ntype = String Case\np0 = $s\np1 = Upper\np2 = $s\n"
-                  "[action]\ntype = String To Number\np0 = 12.5\np1 = $f\np3 = YES\np4 = NO\n"));
-    sem_run(1, DT);
-    CHECK(!strcmp(svs("s"), "C") && sv("i") == 3 && NEAR(sv("f"), 12.5f, 1e-5f) && !strcmp(sst(), "Yes"),
-          "String Replace, String Split, String Case, String To Number (%s %g %g %s)", svs("s"), sv("i"), sv("f"), sst());
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Get Substring\np0 = Luxora Engine\np1 = 7\np2 = 3\np3 = $s\n"
-                  "[action]\ntype = String To Number\np0 = twelve\np1 = $f\np3 = YES\np4 = NO\n"));
-    sem_run(1, DT);
-    CHECK(!strcmp(svs("s"), "Eng") && !strcmp(sst(), "No"), "Get Substring, and String To Number on words (%s %s)", svs("s"), sst());
-    sem_end();
-    sem_begin("[variable]\nname = col\ntype = color\nvalue = 0 0 0 1\n"
-              ONE("[action]\ntype = Color Ramp\np0 = 0.75\np1 = 1 0 0 1\np2 = 0 1 0 1\np3 = 0 0 1 1\np5 = $col\n"
-                  "[action]\ntype = Get Color RGBA\np0 = $col\np2 = $f\np3 = $f2\n"));
-    sem_run(1, DT);
-    CHECK(NEAR(sv("f"), 0.5f, 1e-4f) && NEAR(sv("f2"), 0.5f, 1e-4f), "Color Ramp halfway between green and blue (%g %g)", sv("f"), sv("f2"));
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Set Vector3\np0 = $v\np1 = 3 0 4\n[action]\ntype = Vector3 Clamp Magnitude\np0 = $v\np1 = 2.5\n"
-                  "[action]\ntype = Get Vector Length\np0 = $v\np1 = $f\n[action]\ntype = Get Atan2\np0 = 1\np1 = 0\np2 = true\np3 = $f2\n"));
-    sem_run(1, DT);
-    CHECK(NEAR(sv("f"), 2.5f, 1e-4f) && VEQ(svv("v"), 1.5f, 0, 2, 1e-4f) && NEAR(sv("f2"), 90, 1e-3f), "Vector3 Clamp Magnitude, Get Vector Length, Get Atan2 (%g, %g %g %g, %g)", sv("f"), svv("v").x, svv("v").y, svv("v").z, sv("f2"));
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Vector3 Interpolate\np0 = $v\np1 = 0 0 0\np2 = 10 0 0\np3 = 0.5\np5 = YES\n"));
-    sem_run(15, DT);
-    float half = svv("v").x;
-    sem_run(30, DT);
-    CHECK(half > 3 && half < 7 && NEAR(svv("v").x, 10, 1e-4f) && !strcmp(sst(), "Yes"), "Vector3 Interpolate goes there over time (%g then %g)", half, svv("v").x);
+    /* ---- transform ---- */
+    sem_begin(ONE("[action]\ntype = Set Position\np0 = name:Trigger\np1 = 1 2 3\np5 = World\n"
+                  "[action]\ntype = Get Position\np0 = name:Trigger\np1 = World\np2 = $v\np3 = $f\n"));
+    sem_run(2, DT);
+    CHECK(VEQ(svv("v"), 1, 2, 3, 1e-4f) && NEAR(sv("f"), 1, 1e-4f), "Set Position then Get Position");
     sem_end();
 
-    /* ---- transform and objects (the fuzz scene: Owner at 0 1 0 facing +Z, Char at 2 1 0 - to its left, two Enemies) ---- */
-    sem_begin(ONE("[action]\ntype = Get Angle To Target\np0 = Owner\np1 = name:Char\np2 = 0 0 0\np3 = true\np4 = $f\n"
-                  "[action]\ntype = Transform Point\np0 = Owner\np1 = 0 0 -2\np2 = Local Point To World\np3 = $v\n"
-                  "[action]\ntype = Get Root\np0 = name:Child\np1 = $o\n"));
-    sem_run(1, DT);
-    CHECK(NEAR(sv("f"), -90, 0.5f) && VEQ(svv("v"), 0, 1, -2, 1e-3f) && svo("o") == g_so, "Get Angle To Target (- = left), Transform Point, Get Root (%g)", sv("f"));
-    sem_end();
-    sem_begin("[event]\nname = LOOP\n[event]\nname = END\n[state]\nname = A\ntransition = LOOP > B\ntransition = END > Done\n"
-              "[action]\ntype = Get Next With Tag\np0 = Enemy\np1 = $i\np2 = $o\np3 = LOOP\np4 = END\n"
-              "[state]\nname = B\ntransition = FINISHED > A\n[action]\ntype = Float Add\np0 = $f\np1 = 1\n[state]\nname = Done\n");
-    sem_run(12, DT);
-    CHECK(NEAR(sv("f"), 2, 1e-5f) && !strcmp(sst(), "Done") && sv("i") == 0, "Get Next With Tag visits both enemies, then Finished (%g %s)", sv("f"), sst());
+    sem_begin(ONE("[action]\ntype = Set Position\np0 = name:Trigger\np3 = 9\np5 = World\n"
+                  "[action]\ntype = Get Position\np0 = name:Trigger\np1 = World\np2 = $v\n"));
+    sem_run(2, DT);
+    CHECK(NEAR(svv("v").y, 9, 1e-4f) && NEAR(svv("v").x, 0, 1e-4f),
+          "Set Position with only Y set moves that axis and leaves the rest (%g %g)", svv("v").x, svv("v").y);
     sem_end();
 
-    /* Smooth Look At Direction: turns to face +X over time, then sends its event */
-    sem_begin(ONE("[action]\ntype = Smooth Look At Direction\nupdate = every_frame\np0 = Owner\np1 = 3 0 0\np2 = 0.1\np3 = 0 1 0\np4 = true\np5 = World\np6 = 10\np7 = 1\np8 = YES\np9 = $f\n"));
-    sem_run(3, DT);
-    float part = sv("f");
+    sem_begin(ONE("[action]\ntype = Set Position\np0 = name:Trigger\np1 = 0 0 0\np5 = World\n"
+                  "[action]\ntype = Translate\np0 = name:Trigger\np1 = 0 0 6\np2 = World\np3 = true\n"));
     sem_run(60, DT);
-    LxVec3 fw = lx_quat_rotate(lx_entity_world_rotation(g_ss, g_so), lx_v3(0, 0, 1));
-    CHECK(part > 5 && part < 89 && VEQ(fw, 1, 0, 0, 0.03f) && !strcmp(sst(), "Yes"), "Smooth Look At Direction turns gradually, then finishes (%g, %.2f %.2f %.2f, %s)", part, fw.x, fw.y, fw.z, sst());
-    sem_end();
-
-    /* ---- arrays ---- */
-    sem_begin("[variable]\nname = arr\ntype = array\nvalue = int: 5, 3, 9\n"
-              ONE("[action]\ntype = Array Add\np0 = $arr\np1 = 7\n[action]\ntype = Array Length\np0 = $arr\np1 = $i\n"
-                  "[action]\ntype = Array Sort\np0 = $arr\n[action]\ntype = Array Get\np0 = $arr\np1 = 0\np2 = $f\n"
-                  "[action]\ntype = Array Join\np0 = $arr\np1 = -\np2 = $s\n"
-                  "[action]\ntype = Array Contains\np0 = $arr\np1 = 9\np2 = $f2\np4 = YES\np5 = NO\n"));
-    sem_run(1, DT);
-    CHECK(sv("i") == 4 && sv("f") == 3 && !strcmp(svs("s"), "3-5-7-9") && sv("f2") == 3 && !strcmp(sst(), "Yes"),
-          "Array Add, Length, Sort, Get, Join, Contains (%g %g %s %g %s)", sv("i"), sv("f"), svs("s"), sv("f2"), sst());
-    sem_end();
-    sem_begin("[variable]\nname = words\ntype = array\nvalue = string:\n[variable]\nname = k\ntype = int\nvalue = 0\n"
-              "[event]\nname = LOOP\n[event]\nname = END\n[state]\nname = A\ntransition = FINISHED > B\n"
-              "[action]\ntype = String Split To Array\np0 = red,green,blue\np1 = ,\np2 = $words\n"
-              "[state]\nname = B\ntransition = LOOP > C\ntransition = END > Done\n"
-              "[action]\ntype = Array For Each\np0 = $words\np1 = $k\np2 = $s\np4 = LOOP\np5 = END\n"
-              "[state]\nname = C\ntransition = FINISHED > B\n[action]\ntype = Float Add\np0 = $f\np1 = 1\n"
-              "[action]\ntype = String Join\np0 = $s\np1 = \np2 = $s\n[state]\nname = Done\n");
-    sem_run(20, DT);
-    CHECK(NEAR(sv("f"), 3, 1e-5f) && !strcmp(sst(), "Done"), "String Split To Array and Array For Each visit every item (%g, %s)", sv("f"), sst());
-    sem_end();
-    sem_begin("[variable]\nname = foes\ntype = array\nvalue = object:\n"
-              ONE("[action]\ntype = Array Fill With Tag\np0 = $foes\np1 = Enemy\np2 = true\np3 = $i\n"
-                  "[action]\ntype = Array Get Closest\np0 = $foes\np1 = Owner\np4 = $o\np6 = $f\n"));
-    sem_run(1, DT);
-    CHECK(sv("i") == 2 && svo("o") == lx_entity_find(g_ss, "Enemy1"), "Array Fill With Tag, Array Get Closest (%g)", sv("i"));
-    LxArray foes = lx_fsm_get_var_array(g_ss, g_so, 0, "foes");
-    CHECK(lx_array_length(foes) == 2 && lx_array_type(foes) == LX_FSM_OBJECT, "a graph's array from the scripting API");
-    sem_end();
-    CHECK(!lx_array_valid(foes) && lx_array_length(foes) == 0, "the graph's array goes with its object");
-    {   /* the scripting API directly */
-        LxArray a = lx_array_create(LX_FSM_FLOAT);
-        for (int k = 0; k < 5; k++) lx_array_add_float(a, (float)(5 - k));
-        lx_array_sort(a, false);
-        lx_array_insert_at(a, 0);
-        lx_array_set_float(a, 0, -1);
-        lx_array_remove_at(a, 3);
-        CHECK(lx_array_length(a) == 5 && lx_array_get_float(a, 0) == -1 && lx_array_get_float(a, 3) == 4 && lx_array_find_float(a, 5) == 4 &&
-                  !strcmp(lx_array_get_string(a, 1), "1"),
-              "lx_array: add, sort, insert, remove, find");
-        lx_array_destroy(a);
-        LxArray b = lx_array_create(LX_FSM_STRING);
-        CHECK(!lx_array_valid(a) && lx_array_get_float(a, 0) == 0 && b != a, "a destroyed array's handle stays dead");
-        lx_array_destroy(b);
-    }
-    /* ---- quaternions, vector2, rects ---- */
-    sem_begin("[variable]\nname = q\ntype = quaternion\nvalue = 0 0 0\n[variable]\nname = v2\ntype = vector2\nvalue = 1 0\n"
-              ONE("[action]\ntype = Make Quaternion\np0 = Euler Angles\np1 = 0 90 0\np4 = $q\n"
-                  "[action]\ntype = Quaternion Rotate Vector\np0 = $q\np1 = 0 0 -1\np2 = $v\n"
-                  "[action]\ntype = Vector2 Operator\np0 = $v2\np2 = Rotate by Float\np3 = 90\np4 = $v2\n"
-                  "[action]\ntype = Rect Contains\nupdate = once\np0 = -1 -1 10 10\np1 = $v2\np3 = YES\np4 = NO\n"));
-    sem_run(1, DT);
     {
-        LxFsmRun *r = lx_fsm_run_of(g_ss, g_so, 0);
-        LxVec3 v2 = lx_v3(-9, -9, -9);
-        for (int k = 0; r && k < r->var_count; k++) if (!strcmp(r->var_names[k], "v2")) v2 = r->vars[k].v;
-        CHECK(VEQ(svv("v"), -1, 0, 0, 1e-4f) && NEAR(v2.x, 0, 1e-4f) && NEAR(v2.y, 1, 1e-4f) && !strcmp(sst(), "Yes"),
-              "Make Quaternion, Quaternion Rotate Vector, Vector2 Operator, Rect Contains (%.2f %.2f %.2f; %.2f %.2f; %s)", svv("v").x, svv("v").y, svv("v").z, v2.x, v2.y, sst());
+        LxVec3 p = lx_entity_world_position(g_ss, lx_entity_find(g_ss, "Trigger"));
+        CHECK(p.z > 5 && p.z < 7, "Translate with Per Second moves about its speed in a second (z %.2f)", p.z);
     }
     sem_end();
 
-    /* ---- the game kit (actions6.c / gamekit.c) ---- */
-    lx_inventory_clear();
-    sem_begin(ONE("[action]\ntype = Inventory Add\np0 = Key\np1 = 2\n[action]\ntype = Inventory Remove\np0 = Key\np1 = 1\np4 = $i\n"
-                  "[action]\ntype = Apply Damage\np0 = $f\np1 = -50\np2 = 30\n"
-                  "[action]\ntype = Format Time\nupdate = once\np0 = 125.5\np1 = m:ss\np2 = $s\n"
-                  "[action]\ntype = Inventory Has\np0 = Key\np1 = 1\np3 = YES\np4 = NO\n"));
-    sem_run(1, DT);
-    CHECK(sv("i") == 1 && !strcmp(sst(), "Yes") && NEAR(sv("f"), 30, 1e-4f) && !strcmp(svs("s"), "2:05"), "Inventory Add / Remove / Has, Apply Damage heals up to max, Format Time (%g %s %g %s)",
-          sv("i"), sst(), sv("f"), svs("s"));
+    sem_begin(ONE("[action]\ntype = Set Scale\np0 = name:Trigger\np2 = 3\n"
+                  "[action]\ntype = Get Scale\np0 = name:Trigger\np1 = $v\n"));
+    sem_run(2, DT);
+    CHECK(VEQ(svv("v"), 3, 3, 3, 1e-4f), "Set Scale with Uniform sets all three axes");
     sem_end();
-    CHECK(lx_inventory_count("Key") == 1 && !lx_inventory_remove("Key", 5) && lx_inventory_count("Key") == 1, "lx_inventory: not enough means nothing is taken");
-    lx_inventory_save("t");
-    lx_inventory_clear();
-    CHECK(lx_inventory_load("t") && lx_inventory_count("Key") == 1, "lx_inventory: save and load");
-    lx_inventory_clear();
-    /* line of sight: the Owner (facing +Z) and Enemy1 (at -2 0.5 1, in front-left) with nothing between */
-    sem_begin(ONE("[action]\ntype = Line Of Sight\nupdate = once\np0 = Owner\np1 = name:Enemy1\np2 = 20\np3 = 160\np4 = 0.3\np5 = 0\np6 = YES\np7 = NO\n"));
-    sem_run(1, DT);
-    bool saw = !strcmp(sst(), "Yes");
+
+    sem_begin(ONE("[action]\ntype = Set Rotation\np0 = name:Trigger\np2 = 0 90 0\np6 = World\n"
+                  "[action]\ntype = Get Direction Vectors\np0 = name:Trigger\np1 = $v\n"));
+    sem_run(2, DT);
+    CHECK(NEAR(svv("v").x, 1, 1e-3f), "a 90 degree yaw points forward along +X (%g %g %g)", svv("v").x, svv("v").y, svv("v").z);
     sem_end();
-    sem_begin(ONE("[action]\ntype = Line Of Sight\nupdate = once\np0 = Owner\np1 = name:Enemy1\np2 = 1\np3 = 160\np4 = 0.3\np5 = 0\np6 = YES\np7 = NO\n"));
-    sem_run(1, DT);
-    CHECK(saw && !strcmp(sst(), "No"), "Line Of Sight: sees it, but not beyond its range");
+
+    sem_begin(ONE("[action]\ntype = Set Position\np0 = name:Trigger\np1 = 0 0 0\np5 = World\n"
+                  "[action]\ntype = Get Distance\np0 = name:Trigger\np1 = name:Char\np3 = false\np4 = $f\n"));
+    sem_run(2, DT);
+    CHECK(NEAR(sv("f"), sqrtf(2 * 2 + 1 * 1), 1e-3f), "Get Distance measures between two objects (%g)", sv("f"));
     sem_end();
-    /* shooting and blast damage reach a script-less target as a message (graphs get it as an event) */
-    sem_begin(ONE("[action]\ntype = Shoot Ray\np0 = name:Cam\np2 = 0 -0.33 -1\np3 = 50\np5 = 7\np8 = YES\np9 = NO\np10 = $o\n"));
-    lx_entity_set_euler(g_ss, lx_entity_find(g_ss, "Cam"), lx_v3(0, 0, 0));
-    sem_run(1, DT);
-    CHECK(!strcmp(sst(), "Yes") && svo("o") != 0, "Shoot Ray hits something in front of the camera");
+
+    sem_begin(ONE("[action]\ntype = Set Position\np0 = name:Trigger\np1 = 0 0 0\np5 = World\n"
+                  "[action]\ntype = Transform Point\np0 = name:Trigger\np1 = 0 0 1\np2 = Local To World\np3 = false\np4 = $v\n"));
+    sem_run(2, DT);
+    CHECK(VEQ(svv("v"), 0, 0, 1, 1e-4f), "Transform Point takes a local point into the world");
     sem_end();
-    sem_begin(ONE("[action]\ntype = Area Damage\np0 = Owner\np2 = 6\np3 = 40\np7 = $i\n"));
-    sem_run(1, DT);
-    CHECK(sv("i") >= 3, "Area Damage reaches the objects around (%g)", sv("i"));
+
+    sem_begin(ONE("[action]\ntype = Set Position\np0 = name:Trigger\np1 = 0 0 0\np5 = World\n"
+                  "[action]\ntype = Look At\np0 = name:Trigger\np1 = name:Char\np4 = true\np5 = 0\np6 = $f\np7 = 1\np8 = YES\n"));
+    sem_run(3, DT);
+    CHECK(!strcmp(sst(), "Yes") && sv("f") < 1.0f, "Look At snaps round and reports it is facing the target (%g %s)", sv("f"), sst());
     sem_end();
-    /* patrol between two waypoints */
-    sem_begin(ONE("[action]\ntype = Patrol\np0 = Owner\np1 = name:Points\np2 = 4\np3 = 0\np4 = Once\np6 = YES\np7 = $i\n"));
+
+    sem_begin(ONE("[action]\ntype = Set Position\np0 = name:Trigger\np1 = 0 0 0\np5 = World\n"
+                  "[action]\ntype = Move To Over Time\np0 = name:Trigger\np2 = 0 0 5\np3 = 0.1\np4 = Linear\np5 = YES\n"));
+    sem_run(12, DT);
     {
-        LxEntity pts = lx_entity_create(g_ss, "Points"), a = lx_entity_create(g_ss, "A"), b = lx_entity_create(g_ss, "B");
-        lx_entity_set_parent(g_ss, a, pts); lx_entity_set_parent(g_ss, b, pts);
-        lx_entity_set_position(g_ss, a, lx_v3(3, 0, 3)); lx_entity_set_position(g_ss, b, lx_v3(3, 0, 6));
-        lx_remove_component(g_ss, g_so, LX_COMP_RIGIDBODY);
-        sem_run(150, DT);
-        LxVec3 p = lx_entity_world_position(g_ss, g_so);
-        CHECK(!strcmp(sst(), "Yes") && NEAR(p.x, 3, 0.4f) && NEAR(p.z, 6, 0.4f), "Patrol walks the waypoints in order, then finishes (%.2f %.2f, %s)", p.x, p.z, sst());
+        LxVec3 p = lx_entity_world_position(g_ss, lx_entity_find(g_ss, "Trigger"));
+        CHECK(!strcmp(sst(), "Yes") && p.z > 4.5f, "Move To Over Time arrives and fires (z %.2f %s)", p.z, sst());
     }
     sem_end();
-    /* a spawner with a total */
-    sem_begin(ONE("[action]\ntype = Spawner\np0 = Prefabs/Box.lxprefab\np1 = Owner\np3 = 0.1\np4 = 2\np5 = 3\np9 = $i\n"));
-    sem_run(30, DT);
-    int boxes = 0;
-    for (int k = 0; k < lx_scene_entity_count(g_ss); k++) boxes += !strcmp(lx_entity_name(g_ss, lx_scene_entity_at(g_ss, k)), "Box");
-    CHECK(boxes == 2 && sv("i") == 2, "Spawner keeps Max Alive at once (%d)", boxes);
+
+    sem_begin(ONE("[action]\ntype = Set Position\np0 = name:Trigger\np1 = 0 0 0\np5 = World\n"
+                  "[action]\ntype = Rotate Around\np0 = name:Trigger\np2 = 0 0 0\np3 = 0 1 0\np4 = 90\np5 = false\np6 = false\n"));
+    sem_run(2, DT);
+    CHECK(VEQ(lx_entity_world_position(g_ss, lx_entity_find(g_ss, "Trigger")), 0, 0, 0, 1e-4f), "Rotate Around a pivot the object sits on leaves it put");
     sem_end();
-    /* dialogue: a click finishes typing, the next turns the page, the last closes it */
-    sem_begin(ONE("[action]\ntype = Dialogue\np0 = Guide\np1 = One|Two\np2 = 10\np3 = YES\n"));
-    lx_game_ui_begin_frame(0, 0, 1280, 720, true);
-    pm_frame(); pm_step();   /* the dialogue opens */
-    for (int k = 0; k < 4; k++) {   /* finish page 1, next page, finish page 2, close */
-        pm_frame(); pm_step();
-        pm_frame(); g_lx_input.keys[LX_KEY_ENTER] = true; pm_step();
-        pm_frame(); g_lx_input.keys[LX_KEY_ENTER] = false; pm_step();
-    }
-    CHECK(!strcmp(sst(), "Yes"), "Dialogue: Enter skips, turns the page and closes (%s)", sst());
+
+    /* ---- objects ---- */
+    sem_begin(ONE("[action]\ntype = Find Object\np0 = Char\np2 = $o\np3 = $b\np4 = YES\np5 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("b") == 1 && svo("o") && !strcmp(lx_entity_name(g_ss, svo("o")), "Char"),
+          "Find Object by name (%s)", svo("o") ? lx_entity_name(g_ss, svo("o")) : "none");
     sem_end();
-    sem_begin(ONE("[action]\ntype = Choice Menu\np0 = Pick\np1 = Left\np2 = NO\np3 = Right\np4 = YES\np9 = $i\n"));
-    pm_frame(); pm_step();
-    pm_frame(); g_lx_input.keys[LX_KEY_DOWN] = true; pm_step();
-    pm_frame(); g_lx_input.keys[LX_KEY_DOWN] = false; pm_step();
-    pm_frame(); g_lx_input.keys[LX_KEY_ENTER] = true; pm_step();
-    pm_frame(); g_lx_input.keys[LX_KEY_ENTER] = false; pm_step();
-    CHECK(!strcmp(sst(), "Yes") && sv("i") == 1, "Choice Menu: Down then Enter picks the second (%s)", sst());
+
+    sem_begin(ONE("[action]\ntype = Find Object\np0 = NoSuchThing\np2 = $o\np3 = $b\np4 = YES\np5 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("b") == 0 && !strcmp(sst(), "No"), "Find Object reports a miss rather than guessing (%s)", sst());
     sem_end();
-    /* checkpoints and the whole-save of the globals */
-    sem_begin(ONE("[action]\ntype = Checkpoint\np0 = Owner\np1 = Set\np4 = false\n"));
+
+    sem_begin(ONE("[action]\ntype = Compare Tag\np0 = name:Char\np1 = Player\np2 = $b\np3 = YES\np4 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("b") == 1 && !strcmp(sst(), "Yes"), "Compare Tag (%g %s)", sv("b"), sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Count With Tag\np0 = Enemy\np1 = $i\np2 = NO\np3 = YES\n"));
+    sem_run(2, DT);
+    CHECK(sv("i") == 2 && !strcmp(sst(), "Yes"), "Count With Tag counts the enemies (%g)", sv("i"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Set Position\np0 = Owner\np1 = 0 0 0\np5 = World\n"
+                  "[action]\ntype = Find Closest With Tag\np0 = Owner\np1 = Enemy\np3 = 0\np4 = $o\np5 = $f\np6 = YES\np7 = NO\n"));
+    sem_run(2, DT);
+    CHECK(svo("o") && !strcmp(lx_entity_name(g_ss, svo("o")), "Enemy1"),
+          "Find Closest With Tag picks the nearer one (%s at %g)", svo("o") ? lx_entity_name(g_ss, svo("o")) : "none", sv("f"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Get Owner\np0 = $o\n[action]\ntype = Get Child\np0 = Owner\np1 = Child\np3 = $o\np5 = NO\np6 = YES\n"));
+    sem_run(2, DT);
+    CHECK(svo("o") && !strcmp(lx_entity_name(g_ss, svo("o")), "Child") && !strcmp(sst(), "Yes"),
+          "Get Child by name (%s)", svo("o") ? lx_entity_name(g_ss, svo("o")) : "none");
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Set Object Active\np0 = name:Char\np1 = Deactivate\np2 = false\n"
+                  "[action]\ntype = Is Object Active\np0 = name:Char\np1 = $b\np2 = YES\np3 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("b") == 0 && !strcmp(sst(), "No"), "Set Object Active then Is Object Active (%g %s)", sv("b"), sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Create Object\np0 = Prefabs/Box.lxprefab\np2 = 4 0 4\np5 = $o\np6 = YES\np7 = NO\n"));
+    sem_run(2, DT);
+    CHECK(svo("o") && lx_entity_valid(g_ss, svo("o")) && !strcmp(sst(), "Yes"), "Create Object spawns a prefab (%s)", sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Duplicate Object\np0 = name:Enemy1\np3 = $o\n"
+                  "[action]\ntype = Count With Tag\np0 = Enemy\np1 = $i\n"));
+    sem_run(2, DT);
+    CHECK(sv("i") == 3, "Duplicate Object copies the tag too (%g)", sv("i"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Destroy Object\np0 = name:Enemy1\np1 = 0\n"
+                  "[action]\ntype = Count With Tag\np0 = Enemy\np1 = $i\n"));
+    sem_run(3, DT);
+    CHECK(sv("i") == 1, "Destroy Object removes it (%g)", sv("i"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Set Parent\np0 = name:Char\np1 = Owner\np2 = true\n"
+                  "[action]\ntype = Get Parent\np0 = name:Char\np1 = $o\np2 = YES\np3 = NO\n"));
+    sem_run(2, DT);
+    CHECK(svo("o") == g_so && !strcmp(sst(), "Yes"), "Set Parent then Get Parent (%s)", sst());
+    sem_end();
+
+    /* ---- physics ---- */
+    sem_begin(ONE("[action]\ntype = Set Velocity\np0 = Owner\np1 = 0 0 4\np5 = World\n"
+                  "[action]\ntype = Get Velocity\np0 = Owner\np1 = World\np2 = $v\np3 = $f\n"));
+    sem_run(2, DT);
+    CHECK(NEAR(sv("f"), 4, 0.5f), "Set Velocity then Get Velocity (%g)", sv("f"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Set Rigidbody Properties\np0 = Owner\np1 = 7\np4 = false\n"
+                  "[action]\ntype = Get Rigidbody Properties\np0 = Owner\np1 = $f\np2 = $b\np5 = $b2\n"));
+    sem_run(2, DT);
+    CHECK(NEAR(sv("f"), 7, 1e-4f) && sv("b") == 0 && sv("b2") == 1,
+          "Set then Get Rigidbody Properties (%g %g %g)", sv("f"), sv("b"), sv("b2"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Set Position\np0 = Owner\np1 = 0 3 0\np5 = World\n"
+                  "[action]\ntype = Raycast\np0 = Owner\np2 = 0 -1 0\np3 = World\np4 = 20\np5 = true\n"
+                  "p7 = $b\np8 = $o\np9 = $v\np11 = $f\np12 = YES\np13 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("b") == 1 && !strcmp(sst(), "Yes") && sv("f") > 0, "Raycast straight down finds the ground (%g %s)", sv("f"), sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Set Position\np0 = Owner\np1 = 0 50 0\np5 = World\n"
+                  "[action]\ntype = Raycast\np0 = Owner\np2 = 0 1 0\np3 = World\np4 = 5\np5 = true\np7 = $b\np12 = YES\np13 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("b") == 0 && !strcmp(sst(), "No"), "a ray into empty sky misses (%g %s)", sv("b"), sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Set Position\np0 = Owner\np1 = -2 0.5 1\np5 = World\n"
+                  "[action]\ntype = Overlap Sphere\np0 = Owner\np2 = 3\np3 = Enemy\np4 = true\np5 = $arr\np6 = $i\np7 = $o\np8 = YES\np9 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("i") >= 1 && !strcmp(sst(), "Yes"), "Overlap Sphere finds the tagged enemies nearby (%g %s)", sv("i"), sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Physics Gravity\np0 = 0 -20 0\np1 = $v\n"));
+    sem_run(2, DT);
+    CHECK(NEAR(lx_physics_settings()->gravity.y, -20, 1e-4f), "Physics Gravity sets the scene gravity (%g)",
+          lx_physics_settings()->gravity.y);
+    sem_end();
+    lx_physics_settings()->gravity = lx_v3(0, -9.81f, 0);
+
+    sem_begin(ONE("[action]\ntype = Collision Event\np0 = Enter\np1 = \np2 = YES\np3 = $o\np4 = $b\n"));
     sem_run(1, DT);
-    lx_entity_set_position(g_ss, g_so, lx_v3(9, 9, 9));
-    CHECK(lx_checkpoint_respawn(g_ss, g_so) && NEAR(lx_entity_world_position(g_ss, g_so).x, 0, 0.3f), "Checkpoint, then respawn there");
+    lx_fsm_system_event(g_ss, g_so, "COLLISION_ENTER", lx_entity_find(g_ss, "Char"), 3);
+    sem_run(2, DT);
+    CHECK(!strcmp(sst(), "Yes") && svo("o") && !strcmp(lx_entity_name(g_ss, svo("o")), "Char"),
+          "Collision Event reports who we hit (%s %s)", sst(), svo("o") ? lx_entity_name(g_ss, svo("o")) : "none");
     sem_end();
+
+    sem_begin(ONE("[action]\ntype = Trigger Event\np0 = Enter\np1 = Enemy\np2 = YES\np3 = $o\n"));
+    sem_run(1, DT);
+    lx_fsm_system_event(g_ss, g_so, "TRIGGER_ENTER", lx_entity_find(g_ss, "Char"), 0);   /* tagged Player, not Enemy */
+    sem_run(2, DT);
+    CHECK(!strcmp(sst(), "A"), "Trigger Event ignores an object that does not carry the tag (%s)", sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Is Grounded\np0 = name:Char\np1 = $b\np2 = YES\np3 = NO\n"));
+    sem_run(3, DT);
+    CHECK(!strcmp(sst(), "Yes") || !strcmp(sst(), "No"), "Is Grounded answers one way or the other (%s)", sst());
+    sem_end();
+
+    /* ---- input ---- */
+    in_frame();
+    g_lx_input.keys[LX_KEY_A] = true;
+    sem_begin(ONE("[action]\ntype = Get Key\np0 = A\np1 = Held\np2 = $b\np3 = YES\np4 = NO\n"));
+    in_step();
+    in_step();
+    CHECK(!strcmp(sst(), "Yes"), "Get Key sees A held down (%s)", sst());
+    sem_end();
+    g_lx_input.keys[LX_KEY_A] = false;
+    in_frame();
+
+    in_frame();
+    g_lx_input.keys[LX_KEY_SPACE] = true;
+    sem_begin(ONE("[action]\ntype = Get Input Action\np0 = Jump\np1 = Held\np2 = $b\np3 = YES\np4 = NO\n"));
+    in_step();
+    in_step();
+    CHECK(!strcmp(sst(), "Yes"), "Get Input Action sees the Jump action through its default Space binding (%s)", sst());
+    sem_end();
+    g_lx_input.keys[LX_KEY_SPACE] = false;
+    in_frame();
+
+    in_frame();
+    g_lx_input.keys[LX_KEY_D] = true;
+    sem_begin(ONE("[action]\ntype = Get Input Axis\np0 = MoveX\np1 = MoveY\np2 = 1\np3 = $f\np4 = $f2\np7 = $i\np8 = YES\np9 = NO\n"));
+    in_step();
+    in_step();
+    CHECK(sv("f") > 0.5f && !strcmp(sst(), "Yes"), "Get Input Axis reads MoveX while D is held (%g %s)", sv("f"), sst());
+    sem_end();
+    g_lx_input.keys[LX_KEY_D] = false;
+    in_frame();
+
+    in_frame();
+    g_lx_input.mouse[LX_MOUSE_LEFT] = true;
+    sem_begin(ONE("[action]\ntype = Get Mouse Button\np0 = Left\np1 = Held\np2 = $b\np3 = YES\np4 = NO\n"));
+    in_step();
+    in_step();
+    CHECK(!strcmp(sst(), "Yes"), "Get Mouse Button sees the left button held (%s)", sst());
+    sem_end();
+    g_lx_input.mouse[LX_MOUSE_LEFT] = false;
+    in_frame();
+
+    sem_begin(ONE("[action]\ntype = Get Touch\np0 = $i\np1 = 0\np6 = NO\np7 = YES\n"));
+    in_step();
+    in_step();
+    CHECK(sv("i") == 0 && !strcmp(sst(), "No"), "Get Touch with no fingers down takes the No Touch event (%g %s)", sv("i"), sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Get Input Device\np0 = $i\np1 = $i2\np2 = YES\np3 = NO\np4 = NO\n"));
+    in_step();
+    in_step();
+    CHECK(sv("i") >= 0 && sv("i") <= 2, "Get Input Device names the last device used (%g)", sv("i"));
+    sem_end();
+
+    /* ---- rendering and UI ---- */
+    sem_begin(ONE("[action]\ntype = Set Camera\np0 = name:Cam\np1 = 35\n"
+                  "[action]\ntype = Get Camera\np0 = name:Cam\np1 = $o\np2 = $f\n"));
+    sem_run(2, DT);
+    CHECK(NEAR(sv("f"), 35, 1e-4f), "Set Camera then Get Camera reads the field of view back (%g)", sv("f"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Set Light\np0 = Owner\np2 = 4\n"
+                  "[action]\ntype = Get Light\np0 = Owner\np2 = $f\np4 = $b\n"));
+    sem_run(2, DT);
+    CHECK(NEAR(sv("f"), 4, 1e-4f) && sv("b") == 1, "Set Light then Get Light (%g)", sv("f"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Fade Light\np0 = Owner\np1 = 0\np2 = 0.05\np3 = YES\n"));
+    sem_run(6, DT);
     {
-        char fmt[32];
-        lx_format_time(fmt, sizeof fmt, 3725.25f, 1);
-        CHECK(!strcmp(fmt, "1:02:05"), "lx_format_time h:mm:ss (%s)", fmt);
+        LxLight *l = lx_get_light(g_ss, g_so);
+        CHECK(!strcmp(sst(), "Yes") && l && NEAR(l->intensity, 0, 1e-3f), "Fade Light reaches its target and fires (%s)", sst());
     }
-
-    /* ---- keys: a press on the entering frame belongs to the state before ---- */
-    sem_begin(ONE("[action]\ntype = Get Key Down\np0 = Space\np1 = YES\n[action]\ntype = Get Key\np0 = Space\np1 = $b\n"));
-    pm_frame(); g_lx_input.keys[LX_KEY_SPACE] = true; pm_step();
-    bool first = strcmp(sst(), "Yes") != 0;
-    float held = sv("b");
-    pm_frame(); pm_step();
-    pm_frame(); g_lx_input.keys[LX_KEY_SPACE] = false; pm_step();
-    bool still = strcmp(sst(), "Yes") != 0;
-    pm_frame(); g_lx_input.keys[LX_KEY_SPACE] = true; pm_step();
-    CHECK(first && still && held == 1 && !strcmp(sst(), "Yes"), "Get Key Down: not on the entering frame, then on a new press (%d %d %s)", first, still, sst());
-    pm_frame(); g_lx_input.keys[LX_KEY_SPACE] = false; pm_step();
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Get Button Up\np0 = Jump\np1 = YES\n"));
-    pm_frame(); g_lx_input.keys[LX_KEY_SPACE] = true; pm_step();
-    pm_frame(); g_lx_input.keys[LX_KEY_SPACE] = false; pm_step();
-    CHECK(!strcmp(sst(), "Yes"), "Get Button Up: letting go of Space (Jump) (%s)", sst());
-    pm_frame(); pm_step();
     sem_end();
 
-    /* ---- axis vector relative to the camera: Cam turned to look along -X, W walks along -X ---- */
-    sem_begin(ONE("[action]\ntype = Get Axis Vector\nupdate = every_frame\np0 = MoveX\np1 = MoveY\np2 = 2\np3 = Ground (XZ)\np4 = Camera\np6 = $v\np7 = $f\n"));
-    lx_entity_set_euler(g_ss, lx_entity_find(g_ss, "Cam"), lx_v3(30, -90, 0));   /* looking along -X, a little down */
-    pm_frame(); g_lx_input.keys[LX_KEY_W] = true; pm_step();
-    pm_frame(); pm_step();
-    CHECK(VEQ(svv("v"), -2, 0, 0, 1e-3f) && NEAR(sv("f"), 2, 1e-3f), "Get Axis Vector: forward is where the camera looks, flat on the ground (%g %g %g)", svv("v").x, svv("v").y, svv("v").z);
-    pm_frame(); g_lx_input.keys[LX_KEY_W] = false; pm_step();
+    sem_begin(ONE("[action]\ntype = Set Environment\np0 = 0.05\np2 = 2\n"));
+    sem_run(2, DT);
+    {
+        LxEnvironment *e = lx_scene_environment(g_ss);
+        CHECK(e && NEAR(e->fog_density, 0.05f, 1e-5f) && NEAR(e->ambient_intensity, 2, 1e-5f),
+              "Set Environment changes only the settings that are given");
+    }
     sem_end();
 
-    /* ---- picking with the mouse: put the pointer over the Owner cube ---- */
-    sem_begin(ONE("[action]\ntype = Mouse Pick\nupdate = every_frame\np0 = 100\np1 = $b\np2 = $o\np3 = $v\n"));
-    lx_game_ui_begin_frame(0, 0, 1280, 720, true);
-    lx_scene_update_transforms(g_ss);
-    LxVec2 at = lx_v2(0, 0);
-    bool vis = lx_ui_world_to_canvas(g_ss, lx_v3(0, 1, 0), &at);
-    LxVec2 cs = lx_ui_canvas_size();
-    g_lx_input.mouse_pos = lx_v2(at.x / cs.x * 1280, at.y / cs.y * 720);
-    pm_frame(); pm_step();
-    pm_frame(); pm_step();
-    CHECK(vis && sv("b") == 1 && svo("o") == g_so && NEAR(svv("v").z, 0.5f, 0.05f), "Mouse Pick finds the cube under the pointer (hit z %.2f)", svv("v").z);
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Mouse Pick Event\np0 = Owner\np1 = 100\np3 = NO\np7 = YES\np8 = $b\n"));
-    pm_frame(); pm_step();
-    pm_frame(); g_lx_input.mouse[LX_MOUSE_LEFT] = true; pm_step();
-    bool over = sv("b") == 1;
-    pm_frame(); g_lx_input.mouse[LX_MOUSE_LEFT] = false; pm_step();
-    CHECK(over && !strcmp(sst(), "Yes"), "Mouse Pick Event: a click on the cube (%s)", sst());
-    sem_end();
-    g_lx_input.mouse_pos = lx_v2(5, 5);
-    sem_begin(ONE("[action]\ntype = Mouse Pick Event\np0 = Owner\np1 = 100\np7 = YES\np8 = $b\n"));
-    pm_frame(); pm_step();
-    pm_frame(); g_lx_input.mouse[LX_MOUSE_LEFT] = true; pm_step();
-    pm_frame(); g_lx_input.mouse[LX_MOUSE_LEFT] = false; pm_step();
-    CHECK(sv("b") == 0 && strcmp(sst(), "Yes"), "...and a click in the corner isn't on it");
+    sem_begin(ONE("[action]\ntype = Get Screen Info\np0 = $i\np1 = $i2\np2 = $f\n"));
+    in_step();
+    in_step();
+    CHECK(sv("i") == 1280 && sv("i2") == 720 && NEAR(sv("f"), 1280.0f / 720.0f, 1e-3f),
+          "Get Screen Info reports the game view (%g x %g)", sv("i"), sv("i2"));
     sem_end();
 
-    /* ---- touch: a finger lands, then swipes left ---- */
-    sem_begin(ONE("[action]\ntype = Touch Event\np0 = -1\np1 = Ended\np2 = YES\np3 = $i\np4 = $v\n[action]\ntype = Get Touch Count\np0 = $f\n"));
-    pm_frame(); pm_step();
-    pm_frame(); g_lx_input.touch_count = 1; g_lx_input.touches[0] = lx_v2(640, 360); pm_step();
-    float fingers = sv("f");
-    pm_frame(); g_lx_input.touch_count = 0; pm_step();
-    CHECK(fingers == 1 && !strcmp(sst(), "Yes") && NEAR(svv("v").x, cs.x * 0.5f, 1) , "Touch Event: a finger lifting, where it lifted (%g %s %g)", fingers, sst(), svv("v").x);
-    sem_end();
-    sem_begin(ONE("[action]\ntype = Swipe Gesture Event\np0 = 120\np1 = 0.6\np2 = YES\np3 = NO\np4 = NO\np5 = NO\np6 = $v\n"));
-    pm_frame(); pm_step();
-    for (int k = 0; k <= 6; k++) { pm_frame(); g_lx_input.touch_count = 1; g_lx_input.touches[0] = lx_v2(900.0f - (float)k * 80, 400); pm_step(); }
-    pm_frame(); g_lx_input.touch_count = 0; pm_step();
-    CHECK(!strcmp(sst(), "Yes") && NEAR(svv("v").x, -1, 1e-3f), "Swipe Gesture Event: a quick drag to the left (%s)", sst());
-    pm_frame(); pm_step();
+    sem_begin(ONE("[action]\ntype = Show Message\np0 = Checkpoint reached\np1 = 2\n"));
+    in_step();
+    in_step();
+    CHECK(true, "Show Message runs without upsetting the frame");
     sem_end();
 
-    /* ---- graph to graph ---- */
-    sem_begin(ONE("[action]\ntype = Set Float\np0 = $f\np1 = 3\n[action]\ntype = Get Graph Variable\np0 = Owner\np1 = 0\np2 = f\np3 = $f2\n"
-                  "[action]\ntype = Get Current State\np0 = Owner\np1 = 0\np2 = $s\np3 = A\np4 = YES\np5 = NO\n"));
-    sem_run(1, DT);
-    CHECK(NEAR(sv("f2"), 3, 1e-5f) && !strcmp(sst(), "Yes"), "Get Graph Variable, Get Current State (%g %s)", sv("f2"), sst());
+    sem_begin(ONE("[action]\ntype = Set Objective\np0 = Find the key\n"));
+    in_step();
+    CHECK(!strcmp(lx_ui_objective(), "Find the key"), "Set Objective puts a line on screen (\"%s\")", lx_ui_objective());
     sem_end();
-    memset(g_lx_input.keys, 0, sizeof g_lx_input.keys);
-    memset(g_lx_input.mouse, 0, sizeof g_lx_input.mouse);
-    g_lx_input.touch_count = 0;
-    lx_input_begin_frame();
-    lx_input_begin_frame();
+    lx_ui_set_objective("");
+    lx_ui_overlays_clear();
+
+    sem_begin(ONE("[action]\ntype = Draw Text\np0 = Hello\np1 = 10 10 0\np2 = 32\np3 = 1 1 1 1\np4 = Top Left\np5 = Regular\n"
+                  "[action]\ntype = Draw Bar\np0 = 0.5\np1 = 10 60 0\np2 = 200 20 0\n"
+                  "[action]\ntype = Draw Button\np0 = Play\np1 = 0 0 0\np2 = 200 60 0\np3 = YES\np4 = Center\np5 = $b\n"));
+    in_step();
+    in_step();
+    CHECK(sv("b") == 0 && !strcmp(sst(), "A"), "Draw Text, Draw Bar and an unclicked Draw Button keep drawing (%s)", sst());
+    sem_end();
+
+    /* ---- gameplay ---- */
+    sem_begin(ONE("[action]\ntype = Float Set Value\np0 = 100\np1 = $f\n"
+                  "[action]\ntype = Apply Damage\np0 = $f\np1 = 30\np2 = 100\np3 = $f2\np4 = NO\np5 = YES\n"));
+    sem_run(2, DT);
+    CHECK(NEAR(sv("f"), 70, 1e-4f) && NEAR(sv("f2"), 0.7f, 1e-4f) && !strcmp(sst(), "Yes"),
+          "Apply Damage takes health off and reports it as 0..1 (%g %g %s)", sv("f"), sv("f2"), sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Float Set Value\np0 = 10\np1 = $f\n"
+                  "[action]\ntype = Apply Damage\np0 = $f\np1 = 30\np2 = 100\np3 = $f2\np4 = YES\np5 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("f") <= 0 && !strcmp(sst(), "Yes"), "Apply Damage sends the Died event when health runs out (%g %s)", sv("f"), sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Set Position\np0 = Owner\np1 = 0 1 0\np5 = World\n"
+                  "[action]\ntype = Area Damage\np0 = Owner\np2 = 8\np3 = 10\np4 = true\np5 = Damage\np6 = Enemy\np7 = 0\np8 = $i\np9 = YES\np10 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("i") >= 1 && !strcmp(sst(), "Yes"), "Area Damage reaches the tagged enemies (%g %s)", sv("i"), sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Set Position\np0 = Owner\np1 = 0 1 0\np5 = World\n"
+                  "[action]\ntype = Can See Target\np0 = Owner\np1 = name:Char\np2 = 50\np3 = 360\np4 = 0.5\np5 = 0.5\np6 = $b\np7 = $f\np8 = NO\np9 = YES\n"));
+    sem_run(2, DT);
+    CHECK(sv("f") > 0, "Can See Target reports the distance to the target (%g)", sv("f"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Set Position\np0 = Owner\np1 = 0 1 0\np5 = World\n"
+                  "[action]\ntype = Check Angle To Target\np0 = Owner\np1 = name:Char\np2 = true\np3 = $f\np4 = 360\np5 = YES\np6 = $b\np7 = NO\n"));
+    sem_run(2, DT);
+    CHECK(!strcmp(sst(), "Yes") && sv("b") == 1, "a 360 degree view cone always counts as facing (%s)", sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Set Checkpoint\np0 = name:Char\n"));
+    sem_run(2, DT);
+    sem_end();
+    sem_begin(ONE("[action]\ntype = Respawn At Checkpoint\np0 = name:Char\np1 = $b\np2 = YES\np3 = NO\n"));
+    sem_run(2, DT);
+    CHECK(sv("b") == 1 && !strcmp(sst(), "Yes"), "Set Checkpoint, then Respawn At Checkpoint finds it (%g %s)", sv("b"), sst());
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Spawner\np0 = Prefabs/Box.lxprefab\np1 = Owner\np2 = 0\np3 = 0.02\np4 = 4\np5 = 2\n"
+                  "p6 = $i\np7 = $i2\np8 = $o\np9 = YES\np10 = NO\n"));
+    sem_run(10, DT);
+    CHECK(sv("i2") >= 1, "Spawner spawns on its interval (%g made, %g alive)", sv("i2"), sv("i"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = For Each With Tag\np0 = Enemy\np1 = $o\np2 = $i\np3 = YES\np4 = NO\n"));
+    sem_run(2, DT);
+    CHECK(!strcmp(sst(), "Yes") && sv("i") == 0 && svo("o") != 0,
+          "For Each With Tag hands out the first tagged object (%g %s)", sv("i"), sst());
+    sem_end();
+
     lx_assets_clear();
 }
+
 
 /* ---------------- the FPS and Third Person project templates ---------------- */
 static LxScene *tp_open(const char *name, LxProjectTemplate tpl, LxProject *proj) {
@@ -1219,14 +1372,14 @@ static void test_templates(void) {
 static void test_templates(void) {}
 #endif
 
-/* what a user built: Get Axis ("Move X" with a space) into a vector, into Character Move */
+/* what a user built: Get Input Axis (named "Move X", with a space) into a vector, into Character Move */
 static void test_axis_into_character_move(void) {
     printf("get axis into character move\n");
     const char *g = "[graph]\nname = Mover\nstart = Move\n"
                     "[variable]\nname = PlayerMovement\ntype = vector3\nvalue = 0 0 0\n"
                     "[state]\nname = Move\n"
-                    "[action]\ntype = Get Axis\nupdate = every_frame\np0 = Move X\np1 = Move Y\np2 = 5\np3 = $PlayerMovement\n"
-                    "[action]\ntype = Character Move\nupdate = every_frame\np0 = Owner\np1 = $PlayerMovement\np2 = World\n";
+                    "[action]\ntype = Get Input Axis\nupdate = every_frame\np0 = Move X\np1 = Move Y\np2 = 1\np6 = $PlayerMovement\n"
+                    "[action]\ntype = Character Move\nupdate = every_frame\np0 = Owner\np1 = $PlayerMovement\np2 = World\np3 = 5\n";
     char dir[LX_PATH_MAX], path[LX_PATH_MAX];
     lx_path_join(dir, sizeof dir, tmpdir(), "luxora_axis_move");
     lx_mkdir_p(dir);

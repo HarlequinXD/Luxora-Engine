@@ -131,6 +131,7 @@ char *lx_graph_to_text(const LxGraph *g) {
         lx_sb_printf(&sb, "\n[state]\n");
         put_escaped(&sb, "name", st->name);
         lx_sb_printf(&sb, "pos = %g %g\ncolor = %d\nsequence = %d\n", (double)st->x, (double)st->y, st->color, st->sequence);
+        if (st->breakpoint) lx_sb_printf(&sb, "breakpoint = 1\n");
         if (st->description[0]) put_escaped(&sb, "description", st->description);
         for (int t = 0; t < st->trans_count; t++) {
             char e1[160], e2[160];
@@ -233,6 +234,7 @@ LxGraph *lx_graph_from_text(const char *text) {
             else if (!strcmp(k, "pos")) { LxVec3 p = lx_parse_vec3(v); st->x = p.x; st->y = p.y; }
             else if (!strcmp(k, "color")) st->color = atoi(v);
             else if (!strcmp(k, "sequence")) st->sequence = lx_parse_bool(v);
+            else if (!strcmp(k, "breakpoint")) st->breakpoint = lx_parse_bool(v);
             else if (!strcmp(k, "description")) lx_strcpy(st->description, sizeof st->description, v);
             else if (!strcmp(k, "transition")) {
                 LxGraphTransition *t = PUSH(st->trans, st->trans_count, st->trans_cap, LxGraphTransition);

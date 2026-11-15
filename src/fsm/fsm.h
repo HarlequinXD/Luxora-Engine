@@ -30,6 +30,7 @@ typedef struct LxGraphState {
     float x, y;                             /* graph position (top-left) */
     int color;                              /* index into the state colour palette */
     bool sequence;                          /* run actions one after another */
+    bool breakpoint;                        /* entering this state pauses Play mode (editor debugging) */
     LxGraphAction *actions;
     int action_count, action_cap;
     LxGraphTransition *trans;
@@ -133,6 +134,20 @@ void lx_fsm_globals_reset_values(void);   /* play starts: runtime values from th
 struct LxModule;
 void lx_fsm_actions_drop_module(const struct LxModule *m);
 uint32_t lx_fsm_actions_epoch(void);
+
+/* ---------------- breakpoints ----------------
+ * A state marked with a breakpoint records the fact when it is entered. The editor checks this once a
+ * frame and pauses Play mode, so you can look at where the graph got to and what its variables hold.
+ * Nothing pauses by itself: a built game simply ignores breakpoints. */
+typedef struct LxFsmBreak {
+    LxEntity entity;
+    int slot;
+    char graph[LX_FSM_NAME];
+    char state[LX_FSM_NAME];
+    char event[LX_FSM_NAME];   /* what brought it here ("" when it is the starting state) */
+} LxFsmBreak;
+bool lx_fsm_breakpoint_taken(LxFsmBreak *out);   /* true once per hit, then clears */
+void lx_fsm_breakpoints_clear(void);
 
 /* ---------------- runtime ---------------- */
 typedef struct LxFsmValue {

@@ -740,6 +740,7 @@ void ed_play(void) {
     lx_audio_preview_stop();
     ED.play_snapshot = lx_scene_serialize(ED.scene);
     ED.play = ED_PLAYING;
+    lx_fsm_breakpoints_clear();   /* a hit left over from the last run must not pause this one */
     ED.game_view_before_play = ED.game_view;
     ED.game_view = lx_scene_main_camera(ED.scene) != 0; /* play shows the game; Stop restores the previous view */
     LX_INFO("Play mode started");
@@ -753,6 +754,7 @@ void ed_pause(void) {
 
 void ed_stop(void) {
     if (ED.play == ED_EDIT) return;
+    lx_fsm_breakpoints_clear();
     lx_input_set_platform_preview(-1);
     lx_ui_overlays_clear();
     lx_audio_stop_all();
@@ -1190,8 +1192,19 @@ void ed_update(float dt) {
         lx_mouse_lock_block(!playing || released || (!lx_mouse_locked() && (!over || ui_overlay_open(ED.ui))));
         if (v) lx_mouse_lock_center(v->x + v->cw * 0.5f, v->y + 16 + v->ch * 0.5f);
     }
-    if (ED.play == ED_PLAYING) lx_scene_simulate(ED.scene, dt);
-    else lx_scene_update_transforms(ED.scene);
+    if (ED.play == ED_PLAYING) {
+        lx_scene_simulate(ED.scene, dt);
+        /* a state with a breakpoint was entered: hold Play there so its variables can be read */
+        LxFsmBreak bp;
+        if (lx_fsm_breakpoint_taken(&bp)) {
+            ED.play = ED_PAUSED;
+            LX_INFO("Breakpoint: %s entered \"%s\" in graph \"%s\"%s%s", lx_entity_name(ED.scene, bp.entity), bp.state, bp.graph,
+                    bp.event[0] ? " on " : "", bp.event[0] ? bp.event : "");
+            ui_notify(ED.ui, "Paused at a breakpoint");
+        }
+    } else {
+        lx_scene_update_transforms(ED.scene);
+    }
     if (ED.play != ED_EDIT) {   /* the game asked to change scene or quit: in the editor, Quit stops playing */
         char next[LX_REF_MAX];
         if (lx_take_quit_request()) { LX_INFO("The game quit: stopping Play mode"); ed_stop(); return; }

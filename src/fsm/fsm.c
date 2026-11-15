@@ -681,6 +681,18 @@ static bool start_action(LxScene *s, LxFsmRun *r, int st, int a) {
     return r->state == st;
 }
 
+/* the most recent breakpoint the editor has not picked up yet */
+static LxFsmBreak g_break;
+static bool g_break_taken;
+
+bool lx_fsm_breakpoint_taken(LxFsmBreak *out) {
+    if (!g_break_taken) return false;
+    g_break_taken = false;
+    if (out) *out = g_break;
+    return true;
+}
+void lx_fsm_breakpoints_clear(void) { g_break_taken = false; }
+
 static void enter_state(LxScene *s, LxFsmRun *r, int idx) {
     if (idx < 0 || idx >= r->graph->state_count) { r->state = -1; return; }
     r->state = idx;
@@ -688,6 +700,14 @@ static void enter_state(LxScene *s, LxFsmRun *r, int idx) {
     r->state_time = 0;
     r->finished_sent = false;
     r->enter_time = lx_time();
+    if (r->graph->states[idx].breakpoint) {
+        g_break.entity = r->self;
+        g_break.slot = r->slot;
+        lx_strcpy(g_break.graph, sizeof g_break.graph, r->graph->name);
+        lx_strcpy(g_break.state, sizeof g_break.state, r->state_name);
+        lx_strcpy(g_break.event, sizeof g_break.event, r->last_event);
+        g_break_taken = true;
+    }
     int n = r->bound_counts[idx];
     for (int a = 0; a < n; a++) { r->bound[idx][a].finished = false; r->bound[idx][a].entered = false; }
     bool seq = r->graph->states[idx].sequence;
