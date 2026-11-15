@@ -638,26 +638,31 @@ static const LxFsmActionDesc A_CHAR_MOVE = {"Character Move", "Physics", "Walks 
  *  Animation, audio
  * ====================================================================== */
 typedef struct { bool wait; } ClipState;
+/* the Animator the action drives: on the object, or on the character model inside it */
+static LxEntity animated(LxFsmCtx *c, int p) { return lx_find_animator(c->scene, obj(c, p)); }
 static void play_clip_enter(LxFsmCtx *c) {
-    LxEntity e = obj(c, 0);
-    if (!e) { lx_fsm_finish(c); return; }
-    LxAnimator *a = lx_get_animator(c->scene, e);
-    if (!a) { lx_fsm_finish(c); return; }
+    LxEntity e = animated(c, 0);
+    if (!e) {   /* said once per object, not every time the state is entered */
+        static LxEntity warned;
+        if (warned != obj(c, 0)) { warned = obj(c, 0); LX_WARN("Play Animation: %s has no Animator (add one to the character's model)", lx_entity_name(c->scene, warned)); }
+        lx_fsm_finish(c);
+        return;
+    }
     const char *clip = lx_fsm_string(c, 1);
     if (clip[0]) lx_animator_play(c->scene, e, clip, lx_fsm_float(c, 2));
     if (!lx_fsm_event(c, 3)[0]) lx_fsm_finish(c);
 }
 static void play_clip_update(LxFsmCtx *c) {
-    LxEntity e = obj(c, 0);
+    LxEntity e = animated(c, 0);
     if (!e || !lx_animator_playing(c->scene, e)) { lx_fsm_finish(c); ev(c, 3); }
 }
 static const LxFsmActionDesc A_PLAY_CLIP = {"Play Animation", "Animation", "Plays a clip on an Animator, cross-fading from the current one.", "Play {1} on {0} (fade {2} s)",
-    {POBJ("Object"), PT("Clip", LX_FSM_STRING, "", "\"Models/Hero.fbx#Run\"; clips from any humanoid retarget"), P("Fade", LX_FSM_FLOAT, "0.2"), PEV("Finished Event")},
+    {POBJ("Object"), PASSET("Clip", "animation"), P("Fade", LX_FSM_FLOAT, "0.2"), PEV("Finished Event")},
     0, LX_FSM_A_CONTINUOUS, LX_FSM_EVERY_FRAME, play_clip_enter, play_clip_update, NULL};
-static void anim_speed(LxFsmCtx *c) { LxEntity e = obj(c, 0); LxAnimator *a = e ? lx_get_animator(c->scene, e) : NULL; if (a) a->speed = lx_fsm_float(c, 1); }
+static void anim_speed(LxFsmCtx *c) { LxEntity e = animated(c, 0); LxAnimator *a = e ? lx_get_animator(c->scene, e) : NULL; if (a) a->speed = lx_fsm_float(c, 1); }
 static const LxFsmActionDesc A_ANIM_SPEED = {"Set Animation Speed", "Animation", "Speeds up, slows or pauses (0) an Animator.", "{0} animation speed = {1}",
     {POBJ("Object"), P("Speed", LX_FSM_FLOAT, "1")}, 0, 0, LX_FSM_ONCE, anim_speed, anim_speed, NULL};
-static void anim_stop(LxFsmCtx *c) { LxEntity e = obj(c, 0); if (e) lx_animator_stop(c->scene, e); }
+static void anim_stop(LxFsmCtx *c) { LxEntity e = animated(c, 0); if (e) lx_animator_stop(c->scene, e); }
 static const LxFsmActionDesc A_ANIM_STOP = {"Stop Animation", "Animation", "Stops an Animator where it is.", "Stop {0}",
     {POBJ("Object")}, 0, 0, LX_FSM_ONCE, anim_stop, anim_stop, NULL};
 

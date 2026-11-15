@@ -260,6 +260,27 @@ bool ed_thumbs_poll(void);
 void ed_thumbs_cancel_queued(void);
 void ed_thumbs_shutdown(void);
 
+/* previews.c: rendered thumbnails of models, meshes, materials, animation clips and prefabs */
+bool ed_preview_supported(const char *kind);
+uint32_t ed_preview_get(const char *kind, const char *ref);   /* 0 = not drawn yet (it's queued) */
+bool ed_preview_failed(const char *kind, const char *ref);
+void ed_previews_forget(const char *ref);                     /* NULL = all */
+void ed_previews_render(void);                                /* in the frame, after the editor's views */
+void ed_previews_shutdown(void);
+
+/* picker.c: the asset picker window and the slots that open it.
+ * Kinds: texture, material, mesh, model, animation, prefab, sound, scene, graph, object */
+typedef void (*EdPickDone)(void *user, const char *value);
+void ed_picker_open(const char *kind, const char *current, const char *context_model, UiNode *target, EdPickDone done, void *user);
+UiNode *ed_slot(UiNode *parent, char *buf, int cap, const char *kind);   /* set on_change / user on the result */
+void ed_slot_set_context(UiNode *slot, const char *model_ref);          /* animation slots: this character's clips first */
+void ed_slot_name(const char *kind, const char *value, char *out, size_t cap);
+bool ed_picker_open_now(void);
+int ed_picker_item_count(void);           /* smoke test helpers */
+int ed_picker_tile_count(void);
+bool ed_picker_choose(const char *value);
+void ed_picker_search(const char *text);
+
 /* scripts.c: compiling Assets/Scripts with the built-in compiler */
 bool ed_scripts_compile(const char *out_path, bool *had_scripts);
 bool ed_scripts_compile_dir(const char *assets, const char *sdk_dir, const char *out_path, bool *had_scripts);

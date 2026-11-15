@@ -799,6 +799,7 @@ typedef struct LxAnimator {
 } LxAnimator;
 void lx_animator_play(LxScene *s, LxEntity e, const char *clip_ref, float fade_seconds);
 void lx_animator_stop(LxScene *s, LxEntity e);
+LxEntity lx_find_animator(LxScene *s, LxEntity e);   /* e if it has an Animator, else the first one below it (0 = none) */
 bool lx_animator_playing(LxScene *s, LxEntity e);
 float lx_animator_time(LxScene *s, LxEntity e);
 void lx_animator_set_time(LxScene *s, LxEntity e, float seconds);

@@ -43,12 +43,22 @@ typedef struct LxSkinState {
 
 static void binding_free(Binding *b) { lx_free(b->track_of); memset(b, 0, sizeof *b); }
 
+static bool same_ci(const char *a, const char *b) {
+    for (; *a && *b; a++, b++) if ((*a | 32) != (*b | 32)) return false;
+    return !*a && !*b;
+}
 static ModelClip *find_clip(LxModel *m, const char *ref) {
     const char *h = strchr(ref, '#');
     if (!m || !m->clip_count) return NULL;
     if (!h || !h[1]) return &m->clips[0];
     const char *name = h + 1;
     for (int i = 0; i < m->clip_count; i++) if (!strcmp(m->clips[i].name, name)) return &m->clips[i];
+    /* forgiving: "run" for "Run", and "Run" for "Armature|Run" (Blender / Mixamo take names) */
+    for (int i = 0; i < m->clip_count; i++) if (same_ci(m->clips[i].name, name)) return &m->clips[i];
+    for (int i = 0; i < m->clip_count; i++) {
+        const char *bar = strrchr(m->clips[i].name, '|');
+        if (bar && same_ci(bar + 1, name)) return &m->clips[i];
+    }
     char *end;
     long idx = strtol(name, &end, 10);
     if (!*end && idx >= 0 && idx < m->clip_count) return &m->clips[idx];
@@ -57,8 +67,17 @@ static ModelClip *find_clip(LxModel *m, const char *ref) {
 
 static bool bind_clip(Binding *b, LxModel *target, const char *clip_ref) {
     memset(b, 0, sizeof *b);
-    LxModel *src = lx_asset_model(clip_ref);
-    ModelClip *clip = find_clip(src, clip_ref);
+    /* "Models/Hero.fbx#Run" names a model's clip; a bare "Run" (or "#Run") is a clip of the character's own model */
+    const char *h = strchr(clip_ref, '#');
+    bool has_file = h ? h != clip_ref : strchr(clip_ref, '.') != NULL || strchr(clip_ref, '/') != NULL;
+    LxModel *src = has_file ? lx_asset_model(clip_ref) : NULL;
+    ModelClip *clip = src ? find_clip(src, clip_ref) : NULL;
+    if (!clip && target) {
+        char own[LX_REF_MAX * 2];
+        snprintf(own, sizeof own, "%s#%s", target->ref, h ? h + 1 : clip_ref);
+        src = target;
+        clip = find_clip(target, own);
+    }
     if (!src || !clip || !target) return false;
     b->src = src;
     b->clip = clip;
@@ -308,6 +327,18 @@ void lx_animator_play(LxScene *s, LxEntity e, const char *clip_ref, float fade) 
     for (int i = 0; i < nb.src->clip_count && i < LX_MAX_CLIPS; i++)
         if (&nb.src->clips[i] == nb.clip && i < nb.src->imp.clip_count) st->loop = d->animator.loop && nb.src->imp.clips[i].loop;
     lx_strcpy(st->clip_ref, sizeof st->clip_ref, clip_ref);
+}
+
+/* the object with the Animator: e itself, else the first one below it (a player object usually holds the
+ * character model, and the model has the Animator) */
+LxEntity lx_find_animator(LxScene *s, LxEntity e) {
+    if (!e || !lx_entity_valid(s, e)) return 0;
+    if (lx_get_animator(s, e)) return e;
+    for (LxEntity c = lx_entity_first_child(s, e); c; c = lx_entity_next_sibling(s, c)) {
+        LxEntity f = lx_find_animator(s, c);
+        if (f) return f;
+    }
+    return 0;
 }
 
 void lx_animator_stop(LxScene *s, LxEntity e) {

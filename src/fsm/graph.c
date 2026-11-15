@@ -574,7 +574,10 @@ void lx_graph_action_summary(const LxGraphAction *a, const LxFsmActionDesc *d, c
                     if (s) memcpy(val, s, l);
                     val[s ? l : 0] = 0;
                 } else if (d->params[k].type == LX_FSM_OBJECT && (!strcmp(gp->value, "Owner") || !gp->value[0])) lx_strcpy(val, sizeof val, gp->value[0] ? "self" : "None");
-                else if (d->params[k].type == LX_FSM_ASSET) lx_strcpy(val, sizeof val, gp->value[0] ? lx_path_filename(gp->value) : "None");
+                else if (d->params[k].type == LX_FSM_ASSET) {   /* a file's name, or a clip's ("Hero.fbx#Run" -> "Run") */
+                    const char *h = strchr(gp->value, '#');
+                    lx_strcpy(val, sizeof val, !gp->value[0] ? "None" : h ? h + 1 : lx_path_filename(gp->value));
+                }
                 else if (!gp->value[0]) lx_strcpy(val, sizeof val, "None");
                 else lx_strcpy(val, sizeof val, gp->value);
                 if (!strncmp(val, "tag:", 4)) memmove(val, val + 4, strlen(val + 4) + 1);

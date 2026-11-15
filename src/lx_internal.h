@@ -478,7 +478,9 @@ void lx_lightmap_bake_free(LxLightmapBake *b);
 bool lx_lightmap_write(const char *path, int size, const float *color, const float *dir);
 uint16_t *lx_lightmap_read(const char *path, int *size);   /* 2 layers of RGBA half floats */
 float lx_lightmap_half(uint16_t h);
-uint32_t lx_lightmap_epoch(void);   /* changes whenever lightmaps are written or cleared (the renderer reloads) */
+uint32_t lx_lightmap_epoch(void);
+void lx_renderer_set_preview(bool on);   /* asset thumbnails: no GI, lightmaps or probes of their own */
+bool lx_renderer_can_draw_view(void);     /* this frame has room for another view */   /* changes whenever lightmaps are written or cleared (the renderer reloads) */
 /* renderer: GPU tracing of a bake (false: no GPU, the CPU does it) */
 bool lx_renderer_lightmap_begin(const LxLightmapBake *b);
 void lx_renderer_lightmap_trace(LxLightmapBake *b, int first, int count, uint32_t sample);

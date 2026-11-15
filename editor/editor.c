@@ -332,6 +332,7 @@ void ed_close_project(void) {
     ed_reset_history();
     if (ED.viewport_rt) { lx_render_target_destroy(ED.viewport_rt); ED.viewport_rt = NULL; }
     ed_thumbs_shutdown();
+    ed_previews_shutdown();   /* the thumbnails were of this project's assets */
     lx_assets_clear();
     lx_gi_reset();
     ed_scripts_close();

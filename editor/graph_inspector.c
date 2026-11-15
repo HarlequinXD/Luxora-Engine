@@ -21,12 +21,6 @@ static void quick_add_enter(UiNode *n);
 static void add_on_enter(UiNode *n);
 static void add_var_enter(UiNode *n);
 
-static int lx_strcasecmp_ascii(const char *a, const char *b) {
-    for (;; a++, b++) {
-        int x = tolower((unsigned char)*a), y = tolower((unsigned char)*b);
-        if (x != y || !x) return x - y;
-    }
-}
 static bool lx_strcasestr_ascii(const char *hay, const char *needle) {
     if (!needle[0]) return true;
     size_t n = strlen(needle);
@@ -174,104 +168,7 @@ static UiNode *small_btn(UiNode *row, UiIcon icon, const char *tip, void (*cb)(U
 /* ======================================================================
  *  value fields (parameters, variables, overrides)
  * ====================================================================== */
-static void asset_pick(UiNode *it);
-static void collect_files(UiNode *popup, const char *dir, const char *rel, const char *ext, PB *b, int *count) {
-    LxDirEntry *e;
-    int n = lx_dir_list(dir, &e);
-    for (int i = 0; i < n && *count < 150; i++) {
-        if (e[i].name[0] == '.') continue;
-        char full[LX_PATH_MAX], r[LX_REF_MAX];
-        lx_path_join(full, sizeof full, dir, e[i].name);
-        if (rel[0]) snprintf(r, sizeof r, "%s/%s", rel, e[i].name);
-        else lx_strcpy(r, sizeof r, e[i].name);
-        if (e[i].is_dir) { collect_files(popup, full, r, ext, b, count); continue; }
-        size_t ln = strlen(e[i].name), le = strlen(ext);
-        if (ln < le || lx_strcasecmp_ascii(e[i].name + ln - le, ext)) continue;
-        UiNode *it = ui_menu_item(ED.ui, popup, r, NULL, asset_pick);
-        it->user = b;
-        it->icon = ed_icon_for_file(e[i].name, false);
-        it->icon_color = ed_color_for_icon(it->icon);
-        (*count)++;
-    }
-    lx_free(e);
-}
-static const char *kind_ext(const char *kind) {
-    if (!kind) return "";
-    if (!strcmp(kind, "prefab")) return ".lxprefab";
-    if (!strcmp(kind, "sound")) return ".wav";
-    if (!strcmp(kind, "scene")) return ".lxscene";
-    if (!strcmp(kind, "material")) return ".lxmat";
-    if (!strcmp(kind, "graph")) return ".lxgraph";
-    if (!strcmp(kind, "mesh")) return ".obj";
-    return "";
-}
-
 static void value_changed(UiNode *n);   /* routes by PB kind */
-static void asset_pick(UiNode *it) {
-    PB *b = it->user;
-    lx_strcpy(b->s, sizeof b->s, it->text[0] == '(' ? "" : it->text);
-    UiNode fake;
-    memset(&fake, 0, sizeof fake);
-    fake.user = b;
-    value_changed(&fake);
-}
-static void asset_browse(UiNode *btn) {
-    PB *b = btn->user;
-    UiNode *field = btn->prev;
-    UiNode *p = ui_popup(ED.ui, field->x, field->y + field->ch, field->cw / ui_scale(ED.ui) + 30);
-    if (!p) return;
-    p->owner = btn;
-    UiNode *none = ui_menu_item(ED.ui, p, "(none)", NULL, asset_pick);
-    none->user = b;
-    int count = 0;
-    const char *kind = btn->path;
-    if (!strcmp(kind, "material")) {
-        static const char *bi[] = {"builtin:default", "builtin:metal", "builtin:red", "builtin:green", "builtin:blue", "builtin:emissive", "builtin:concrete", "builtin:fabric", "builtin:grid"};
-        for (int i = 0; i < 9; i++) { UiNode *it = ui_menu_item(ED.ui, p, bi[i], NULL, asset_pick); it->user = b; it->icon = UI_ICON_MATERIAL; }
-    }
-    if (kind_ext(kind)[0]) collect_files(p, ED.project.assets, "", kind_ext(kind), b, &count);
-    if (!count && strcmp(kind, "material")) { UiNode *it = ui_menu_item(ED.ui, p, "No matching assets in the project", NULL, NULL); it->disabled = true; }
-}
-static void asset_drop(UiNode *n, const char *type, const char *payload) {
-    LX_UNUSED(type);
-    PB *b = n->user;
-    lx_strcpy(b->s, sizeof b->s, payload);
-    value_changed(n);
-}
-
-static void object_pick(UiNode *it) {
-    PB *b = it->user;
-    lx_strcpy(b->s, sizeof b->s, it->path);
-    UiNode fake;
-    memset(&fake, 0, sizeof fake);
-    fake.user = b;
-    value_changed(&fake);
-}
-static void object_browse(UiNode *btn) {
-    PB *b = btn->user;
-    UiNode *field = btn->prev;
-    UiNode *p = ui_popup(ED.ui, field->x, field->y + field->ch, 220);
-    if (!p) return;
-    p->owner = btn;
-    UiNode *it = ui_menu_item(ED.ui, p, "Owner (this object)", NULL, object_pick);
-    it->user = b; lx_strcpy(it->path, sizeof it->path, "Owner"); it->icon = UI_ICON_GRAPH;
-    it = ui_menu_item(ED.ui, p, "None", NULL, object_pick);
-    it->user = b; lx_strcpy(it->path, sizeof it->path, "None");
-    ui_menu_separator(ED.ui, p);
-    int n = 0;
-    for (int i = 0; ED.scene && i < lx_scene_entity_count(ED.scene) && n < 40; i++) {
-        LxEntity e = lx_scene_entity_at(ED.scene, i);
-        const char *nm = lx_entity_name(ED.scene, e);
-        if (!nm || !nm[0]) continue;
-        it = ui_menu_item(ED.ui, p, nm, NULL, object_pick);
-        it->user = b;
-        snprintf(it->path, sizeof it->path, "name:%s", nm);
-        it->icon = ed_icon_for_entity(ED.scene, e);
-        it->icon_color = COL_DIM;
-        n++;
-    }
-    if (n) { UiNode *h = ui_menu_item(ED.ui, p, "Or type tag:Enemy for any object with a tag", NULL, NULL); h->disabled = true; }
-}
 static void object_drop(UiNode *n, const char *type, const char *payload) {
     LX_UNUSED(type);
     PB *b = n->user;
@@ -280,6 +177,19 @@ static void object_drop(UiNode *n, const char *type, const char *payload) {
     if (e == GE.obj) lx_strcpy(b->s, sizeof b->s, "Owner");
     else snprintf(b->s, sizeof b->s, "name:%s", lx_entity_name(ED.scene, e));
     value_changed(n);
+}
+
+/* the model of the Animator on the graph's object (or below it): its clips come first in the picker */
+static const char *owner_model(void) {
+    if (!GE.obj || !ED.scene || !lx_entity_valid(ED.scene, GE.obj)) return "";
+    LxAnimator *a = lx_get_animator(ED.scene, GE.obj);
+    if (a) return a->model;
+    for (int i = 0; i < lx_scene_entity_count(ED.scene); i++) {
+        LxEntity e = lx_scene_entity_at(ED.scene, i);
+        for (LxEntity p = lx_entity_parent(ED.scene, e); p; p = lx_entity_parent(ED.scene, p))
+            if (p == GE.obj && (a = lx_get_animator(ED.scene, e))) return a->model;
+    }
+    return "";
 }
 
 /* a field for a value of type t, bound to b, calling value_changed */
@@ -310,31 +220,19 @@ static void value_field(UiNode *row, PB *b, LxFsmType t, const char *options) {
         }
         return;
     case LX_FSM_COLOR: n = ui_color(ui, row, b->f, true); break;
-    case LX_FSM_OBJECT: {
-        n = ui_textfield(ui, row, b->s, sizeof b->s);
-        lx_strcpy(n->hint, sizeof n->hint, "Owner, name:X or tag:X");
-        n->accept = "entity";
+    case LX_FSM_OBJECT: {   /* a slot: click for the object picker, or drop an object from the hierarchy */
+        n = ed_slot(row, b->s, sizeof b->s, "object");
         n->on_drop = object_drop;
-        n->grow = 1;
-        n->h = 22;
         n->user = b;
         n->on_change = value_changed;
-        UiNode *bb = small_btn(row, UI_ICON_CHEVRON_DOWN, "Pick an object", object_browse);
-        bb->user = b;
         return;
     }
-    case LX_FSM_ASSET: {
-        n = ui_textfield(ui, row, b->s, sizeof b->s);
-        n->accept = options && options[0] ? options : "file";
-        n->on_drop = asset_drop;
-        lx_strcpy(n->hint, sizeof n->hint, "Drop an asset or browse");
-        n->grow = 1;
-        n->h = 22;
+    case LX_FSM_ASSET: {    /* a slot: click for the asset picker */
+        const char *kind = options && options[0] ? options : "file";
+        n = ed_slot(row, b->s, sizeof b->s, kind);
         n->user = b;
         n->on_change = value_changed;
-        UiNode *bb = small_btn(row, UI_ICON_DOTS, "Browse", asset_browse);
-        bb->user = b;
-        lx_strcpy(bb->path, sizeof bb->path, options ? options : "");
+        if (!strcmp(kind, "animation")) ed_slot_set_context(n, owner_model());   /* the character's clips first */
         return;
     }
     default: n = ui_textfield(ui, row, b->s, sizeof b->s); break;
@@ -1786,49 +1684,6 @@ static void slot_graph_drop(UiNode *n, const char *type, const char *payload) {
     lx_strcpy(b->s, sizeof b->s, payload);
     slot_graph_changed(n);
 }
-static void slot_graph_pick(UiNode *it) {
-    PB *b = it->user;
-    lx_strcpy(b->s, sizeof b->s, it->text[0] == '(' ? "" : it->text);
-    UiNode fake;
-    memset(&fake, 0, sizeof fake);
-    fake.user = b;
-    slot_graph_changed(&fake);
-}
-static void slot_browse(UiNode *btn) {
-    PB *b = btn->user;
-    UiNode *p = ui_popup(ED.ui, btn->x - 200 * ui_scale(ED.ui), btn->y + btn->ch, 230);
-    if (!p) return;
-    p->owner = btn;
-    int count = 0;
-    UiNode *none = ui_menu_item(ED.ui, p, "(none)", NULL, slot_graph_pick);
-    none->user = b;
-    /* collect_files writes into b->s via asset_pick: use our own handler instead */
-    LxDirEntry *e;
-    char stack[16][LX_PATH_MAX];
-    int sp = 0;
-    lx_strcpy(stack[sp++], LX_PATH_MAX, ED.project.assets);
-    while (sp && count < 150) {
-        char dir[LX_PATH_MAX];
-        lx_strcpy(dir, sizeof dir, stack[--sp]);
-        int n = lx_dir_list(dir, &e);
-        for (int i = 0; i < n; i++) {
-            if (e[i].name[0] == '.') continue;
-            char full[LX_PATH_MAX];
-            lx_path_join(full, sizeof full, dir, e[i].name);
-            if (e[i].is_dir) { if (sp < 16) lx_strcpy(stack[sp++], LX_PATH_MAX, full); continue; }
-            if (ed_icon_for_file(e[i].name, false) != UI_ICON_GRAPH) continue;
-            char rel[LX_REF_MAX];
-            ed_relative_asset(rel, sizeof rel, full);
-            UiNode *it = ui_menu_item(ED.ui, p, rel, NULL, slot_graph_pick);
-            it->user = b;
-            it->icon = UI_ICON_GRAPH;
-            it->icon_color = ed_color_for_icon(UI_ICON_GRAPH);
-            count++;
-        }
-        lx_free(e);
-    }
-    if (!count) { UiNode *it = ui_menu_item(ED.ui, p, "No graphs yet: use New Graph", NULL, NULL); it->disabled = true; }
-}
 static void override_changed(PB *b) {
     LxStateGraph *sg = ED.scene ? lx_get_state_graph(ED.scene, b->e) : NULL;
     if (!sg || b->p < 0 || b->p >= sg->count) return;
@@ -1868,17 +1723,10 @@ void ed_state_graph_section(UiNode *sec, LxEntity e) {
         b->e = e;
         b->p = i;
         lx_strcpy(b->s, sizeof b->s, slot->graph);
-        UiNode *tf = ui_textfield(ui, row, b->s, (int)sizeof slot->graph);
-        tf->grow = 1;
-        tf->h = 22;
-        tf->accept = "graph";
+        UiNode *tf = ed_slot(row, b->s, (int)sizeof slot->graph, "graph");   /* click for the graph picker */
         tf->on_drop = slot_graph_drop;
         tf->user = b;
         tf->on_change = slot_graph_changed;
-        tf->icon = UI_ICON_GRAPH;
-        lx_strcpy(tf->hint, sizeof tf->hint, "Drop a .lxgraph or browse");
-        UiNode *br = ui_icon_button(ui, row, UI_ICON_DOTS, "Browse graphs", slot_browse);
-        br->w = 24; br->h = 22; br->user = b;
         if (sg->count > 1) { UiNode *x = ui_icon_button(ui, row, UI_ICON_CLOSE, "Remove this graph", slot_remove); x->w = 22; x->h = 22; x->tag = i; }
         LxGraph *g = slot->graph[0] ? lx_asset_graph(slot->graph) : NULL;
         UiNode *brow = ui_box(ui, sec, UI_ROW);

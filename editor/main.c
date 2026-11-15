@@ -204,6 +204,7 @@ int main(int argc, char **argv) {
         if (lx_renderer_begin_frame()) {
             ED.in_frame = true;
             if (ED.mode == ED_MODE_EDITOR) ed_render();
+            ed_previews_render();   /* asset thumbnails, after the real views */
             ed_chrome_frame_before_ui();
             ui_frame(ED.ui, ED.dt, lx_v4(0.1f, 0.1f, 0.11f, 1));
             if (smoke) { extern void ed_smoke_in_frame(void); ed_smoke_in_frame(); }

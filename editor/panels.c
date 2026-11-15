@@ -471,92 +471,12 @@ static UiNode *comp_section(UiNode *body, UiIcon icon, const char *title, bool *
     return s;
 }
 
-static void asset_drop(UiNode *n, const char *type, const char *payload) {
-    LX_UNUSED(type);
-    if (n->s) lx_strcpy(n->s, (size_t)n->s_cap, payload);
-    ED.inspector_dirty = true;
-    ed_mark_changed();
-    ed_commit();
-}
-
-static char *g_pick_target;
-static int g_pick_cap;
-static void pick_asset(UiNode *n) {
-    if (g_pick_target) lx_strcpy(g_pick_target, (size_t)g_pick_cap, n->text[0] == '(' ? "" : n->hint[0] ? n->hint : n->text);
-    ED.inspector_dirty = true;
-    lx_scene_mark_static_dirty(ED.scene);
-    ed_mark_changed();
-    ed_commit();
-}
-
-static void collect_assets(UiNode *popup, const char *dir, const char *rel, const char *const *exts, int n_ext, int *count) {
-    LxDirEntry *e;
-    int n = lx_dir_list(dir, &e);
-    for (int i = 0; i < n && *count < 200; i++) {
-        if (e[i].name[0] == '.') continue;
-        char full[LX_PATH_MAX], r[LX_REF_MAX];
-        lx_path_join(full, sizeof full, dir, e[i].name);
-        if (rel[0]) snprintf(r, sizeof r, "%s/%s", rel, e[i].name);
-        else lx_strcpy(r, sizeof r, e[i].name);
-        if (e[i].is_dir) { collect_assets(popup, full, r, exts, n_ext, count); continue; }
-        for (int k = 0; k < n_ext; k++)
-            if (ext_is(e[i].name, exts[k])) {
-                UiNode *it = ui_menu_item(ED.ui, popup, r, NULL, pick_asset);
-                it->icon = ed_icon_for_file(e[i].name, false);
-                it->icon_color = ed_color_for_icon(it->icon);
-                (*count)++;
-            }
-    }
-    lx_free(e);
-}
-
-static void browse_assets(UiNode *n) {
-    UiNode *field = n->user;
-    g_pick_target = field->s;
-    g_pick_cap = field->s_cap;
-    const char *kind = field->accept;
-    UiNode *p = ui_popup(ED.ui, field->x, field->y + field->ch, field->cw / ui_scale(ED.ui) + 30);
-    if (!p) return;
-    p->owner = field;   /* picking writes into the field's data: the list closes if the field goes away */
-    int count = 0;
-    if (!strcmp(kind, "mesh")) {
-        static const char *b[] = {"builtin:cube", "builtin:sphere", "builtin:plane", "builtin:cylinder", "builtin:capsule"};
-        for (int i = 0; i < 5; i++) { UiNode *it = ui_menu_item(ED.ui, p, b[i], NULL, pick_asset); it->icon = UI_ICON_MESH; it->icon_color = ed_color_for_icon(UI_ICON_MESH); }
-        static const char *ext[] = {".obj"};
-        collect_assets(p, ED.project.assets, "", ext, 1, &count);
-    } else if (!strcmp(kind, "material")) {
-        static const char *b[] = {"builtin:default", "builtin:metal", "builtin:red", "builtin:green", "builtin:blue", "builtin:emissive", "builtin:concrete", "builtin:fabric", "builtin:grid"};
-        for (int i = 0; i < 9; i++) { UiNode *it = ui_menu_item(ED.ui, p, b[i], NULL, pick_asset); it->icon = UI_ICON_MATERIAL; it->icon_color = ed_color_for_icon(UI_ICON_MATERIAL); }
-        static const char *ext[] = {".lxmat"};
-        collect_assets(p, ED.project.assets, "", ext, 1, &count);
-    } else if (!strcmp(kind, "sound")) {
-        ui_menu_item(ED.ui, p, "(none)", NULL, pick_asset);
-        static const char *ext[] = {".wav"};
-        collect_assets(p, ED.project.assets, "", ext, 1, &count);
-        if (!count) { UiNode *it = ui_menu_item(ED.ui, p, "Add .wav files to Assets/Sounds", NULL, NULL); it->disabled = true; }
-    } else if (!strcmp(kind, "texture")) {
-        ui_menu_item(ED.ui, p, "(none)", NULL, pick_asset);
-        static const char *ext[] = {".png", ".jpg", ".jpeg", ".tga", ".bmp"};
-        collect_assets(p, ED.project.assets, "", ext, 5, &count);
-    }
-}
-
+/* an asset slot: shows the asset (thumbnail + name); clicking opens the asset picker, drops still work */
 static UiNode *asset_field(UiNode *parent, const char *label, char *buf, int cap, const char *kind) {
     UiNode *row = ed_prop_row(parent, label);
-    UiNode *tf = ui_textfield(ED.ui, row, buf, cap);
-    tf->grow = 1;
-    tf->h = 22;
-    tf->accept = kind;
-    tf->on_drop = asset_drop;
-    tf->on_change = structural_changed;
-    tf->icon = !strcmp(kind, "mesh") ? UI_ICON_MESH : !strcmp(kind, "material") ? UI_ICON_MATERIAL : !strcmp(kind, "sound") ? UI_ICON_SOUND : UI_ICON_TEXTURE;
-    lx_strcpy(tf->hint, sizeof tf->hint, "Drop an asset or browse");
-    UiNode *b = ui_icon_button(ED.ui, row, UI_ICON_DOTS, "Browse", browse_assets);
-    b->user = tf;
-    b->w = 24;
-    b->h = 22;
-    b->bg = ui_theme(ED.ui)->panel_alt;
-    return tf;
+    UiNode *sl = ed_slot(row, buf, cap, kind);
+    sl->on_change = structural_changed;
+    return sl;
 }
 
 static UiNode *float_row(UiNode *parent, const char *label, float *v, float step, float minv, float maxv) {

@@ -216,58 +216,26 @@ void ed_model_inspector(UiNode *body, const char *ref) {
 /* ======================================================================
  *  Animator component
  * ====================================================================== */
-#define MAX_CLIP_OPTIONS 128
-static char g_clip_refs[MAX_CLIP_OPTIONS][LX_REF_MAX];
-static char g_clip_labels[MAX_CLIP_OPTIONS][96];
-static const char *g_clip_opts[MAX_CLIP_OPTIONS];
-static int g_clip_count, g_clip_index;
 static LxEntity g_anim_entity;
 static bool g_preview;
 static float g_preview_time;
 static UiNode *g_time_label;
 
-static void add_clips_of(const char *ref, LxModel *m) {
-    for (int i = 0; i < lx_model_clip_count(m) && g_clip_count < MAX_CLIP_OPTIONS; i++) {
-        snprintf(g_clip_refs[g_clip_count], LX_REF_MAX, "%s#%s", ref, lx_model_clip_name(m, i));
-        char base[LX_NAME_MAX];
-        lx_strcpy(base, sizeof base, lx_path_filename(ref));
-        snprintf(g_clip_labels[g_clip_count], sizeof g_clip_labels[0], "%s  (%s)", lx_model_clip_name(m, i), base);
-        g_clip_opts[g_clip_count] = g_clip_labels[g_clip_count];
-        g_clip_count++;
-    }
-}
-
-/* every humanoid model's clips in the project can play on a humanoid */
-static void scan_humanoid_clips(const char *dir, const char *own) {
-    LxDirEntry *e;
-    int n = lx_dir_list(dir, &e);
-    for (int i = 0; i < n; i++) {
-        char full[LX_PATH_MAX];
-        lx_path_join(full, sizeof full, dir, e[i].name);
-        if (e[i].is_dir) { scan_humanoid_clips(full, own); continue; }
-        const char *x = lx_path_ext(e[i].name);
-        if (strcmp(x, ".fbx") && strcmp(x, ".FBX")) continue;
-        LxModelImport imp;
-        if (!lx_model_import_load(full, &imp) || imp.rig != LX_RIG_HUMANOID) continue;
-        char ref[LX_REF_MAX];
-        ed_relative_asset(ref, sizeof ref, full);
-        if (!strcmp(ref, own)) continue;
-        add_clips_of(ref, lx_asset_model(ref));
-    }
-    lx_free(e);
-}
-
 static void anim_changed(UiNode *n) { LX_UNUSED(n); ed_mark_changed(); ed_commit(); }
-static void clip_changed(UiNode *n) {
+static void model_slot_changed(UiNode *n) {   /* another skeleton: the clip list and rig line change */
     LX_UNUSED(n);
-    LxAnimator *a = lx_get_animator(ED.scene, g_anim_entity);
-    if (!a || g_clip_index < 0 || g_clip_index >= g_clip_count) return;
-    lx_strcpy(a->clip, sizeof a->clip, g_clip_refs[g_clip_index]);
-    if (g_preview) lx_animator_play(ED.scene, g_anim_entity, a->clip, 0.2f);
     ed_mark_changed();
     ed_commit();
+    ED.inspector_dirty = true;
 }
-
+static void clip_slot_changed(UiNode *n) {
+    LX_UNUSED(n);
+    LxAnimator *a = lx_get_animator(ED.scene, g_anim_entity);
+    if (a && g_preview && a->clip[0]) lx_animator_play(ED.scene, g_anim_entity, a->clip, 0.2f);
+    ed_mark_changed();
+    ed_commit();
+    ED.inspector_dirty = true;
+}
 static void preview_frame(UiNode *n) {
     LxAnimator *a = lx_get_animator(ED.scene, g_anim_entity);
     if (!a || ED.play != ED_EDIT) { g_preview = false; return; }
@@ -299,28 +267,13 @@ void ed_animator_section(UiNode *sec, LxEntity e) {
     if (g_anim_entity != e) { g_preview = false; g_preview_time = 0; }
     g_anim_entity = e;
     UiNode *r = ed_prop_row(sec, "Model");
-    UiNode *mf = ui_textfield(ui, r, a->model, sizeof a->model);
-    mf->grow = 1;
-    mf->h = 22;
-    mf->accept = "model";
-    mf->icon = UI_ICON_MODEL;
-    mf->on_change = anim_changed;
+    UiNode *mf = ed_slot(r, a->model, sizeof a->model, "model");
+    mf->on_change = model_slot_changed;
     LxModel *m = lx_asset_model(a->model);
-    g_clip_count = 0;
-    if (m) add_clips_of(a->model, m);
-    if (m && lx_model_rig(m) == LX_RIG_HUMANOID) scan_humanoid_clips(ED.project.assets, a->model);
-    g_clip_index = -1;
-    for (int i = 0; i < g_clip_count; i++) if (!strcmp(g_clip_refs[i], a->clip)) g_clip_index = i;
     r = ed_prop_row(sec, "Clip");
-    if (g_clip_count) {
-        UiNode *cd = ui_dropdown(ui, r, &g_clip_index, g_clip_opts, g_clip_count);
-        cd->grow = 1;
-        cd->h = 22;
-        cd->on_change = clip_changed;
-    } else {
-        UiNode *none = ui_label(ui, r, m ? "No clips" : "Choose a model");
-        none->fg = ui_theme(ui)->text_dim;
-    }
+    UiNode *cs = ed_slot(r, a->clip, sizeof a->clip, "animation");
+    ed_slot_set_context(cs, a->model);
+    cs->on_change = clip_slot_changed;
     r = ed_prop_row(sec, "Speed");
     UiNode *sp = ui_slider(ui, r, &a->speed, 0, 3);
     sp->grow = 1;

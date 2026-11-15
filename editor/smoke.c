@@ -1254,6 +1254,59 @@ static void s_bake_check(void) {
     lx_graphics_settings()->gi_enabled = true;
 }
 
+/* ---- the asset picker: slots open it, tiles show what fits, Apply fills the slot ---- */
+static UiNode *find_slot(UiNode *n, const char *buf) {
+    if (!n) return NULL;
+    if (n->s == buf && n->on_click && n->hint[0]) return n;
+    for (UiNode *c = n->first; c; c = c->next) {
+        UiNode *r = find_slot(c, buf);
+        if (r) return r;
+    }
+    return NULL;
+}
+static LxEntity g_pick_ent;
+static void s_pick_setup(void) {
+    LxScene *s = ED.scene;
+    g_pick_ent = lx_spawn_primitive(s, LX_PRIM_CUBE, "Picker Cube", lx_v3(0, 0.5f, 0));
+    ed_select(g_pick_ent);
+    ED.inspector_dirty = true;
+}
+static void s_pick_open(void) {
+    LxMeshRenderer *mr = lx_get_mesh(ED.scene, g_pick_ent);
+    UiNode *slot = mr ? find_slot(ui_root(ED.ui), mr->material) : NULL;
+    SMOKE_CHECK(slot != NULL, "the Material field is a slot");
+    if (!slot) return;
+    slot->on_click(slot);
+    SMOKE_CHECK(ed_picker_open_now(), "clicking it opens the picker");
+    SMOKE_CHECK(ed_picker_tile_count() >= 9, "the picker shows the materials as tiles (%d)", ed_picker_tile_count());
+}
+static void s_pick_shot(void) { sg_shot("picker_materials.ppm"); }
+static void s_pick_apply(void) {
+    ed_picker_search("met");
+    SMOKE_CHECK(ed_picker_tile_count() >= 1, "search narrows the tiles (%d)", ed_picker_tile_count());
+    SMOKE_CHECK(ed_picker_choose("builtin:metal"), "a tile can be chosen and applied");
+    LxMeshRenderer *mr = lx_get_mesh(ED.scene, g_pick_ent);
+    SMOKE_CHECK(mr && !strcmp(mr->material, "builtin:metal") && !ed_picker_open_now(), "Apply fills the slot and closes the picker (%s)", mr ? mr->material : "-");
+}
+static void s_pick_mesh(void) {
+    LxMeshRenderer *mr = lx_get_mesh(ED.scene, g_pick_ent);
+    UiNode *slot = mr ? find_slot(ui_root(ED.ui), mr->mesh) : NULL;
+    SMOKE_CHECK(slot != NULL, "the Mesh field is a slot");
+    if (!slot) return;
+    slot->on_click(slot);
+    SMOKE_CHECK(ed_picker_tile_count() >= 5, "the mesh picker has the built-in meshes (%d)", ed_picker_tile_count());
+}
+static void s_pick_mesh_shot(void) { sg_shot("picker_meshes.ppm"); }
+static void s_pick_cancel(void) {
+    UiNode *c = find_node(ui_modal_node(ED.ui), NULL, "Cancel");
+    SMOKE_CHECK(c != NULL, "the picker has Cancel");
+    if (c) c->on_click(c);
+    LxMeshRenderer *mr = lx_get_mesh(ED.scene, g_pick_ent);
+    SMOKE_CHECK(!ed_picker_open_now() && mr && !strcmp(mr->mesh, "builtin:cube"), "Cancel leaves the slot alone");
+    lx_entity_destroy(ED.scene, g_pick_ent);
+    ed_select(0);
+}
+
 static const struct { int frame; SmokeFn fn; const char *what; } TPL_STEPS[] = {
     {0, s_tpl_close, "close the project"},
     {4, s_tpl_dialog, "New Project"},
@@ -1287,6 +1340,13 @@ static const struct { int frame; SmokeFn fn; const char *what; } TPL_STEPS[] = {
     {364, s_bake_apply, "bake it"},
     {376, s_bake_shot, "picture of the baked scene"},
     {380, s_bake_check, "the baked shadow shows"},
+    {382, s_pick_setup, "a cube to fill slots on"},
+    {386, s_pick_open, "click its Material slot"},
+    {400, s_pick_shot, "picture of the material picker"},
+    {402, s_pick_apply, "search, choose Metal, Apply"},
+    {406, s_pick_mesh, "click its Mesh slot"},
+    {420, s_pick_mesh_shot, "picture of the mesh picker"},
+    {422, s_pick_cancel, "Cancel"},
 };
 static int g_tpl_base = -1;
 
@@ -1307,5 +1367,5 @@ bool ed_smoke_step(int frame) {
             LX_INFO("[smoke] %s", TPL_STEPS[i].what);
             TPL_STEPS[i].fn();
         }
-    return frame - g_tpl_base < 382;
+    return frame - g_tpl_base < 424;
 }

@@ -471,7 +471,7 @@ static const LxFsmActionDesc A_LIGHT_FADE = {"Fade Light", "Rendering", "Changes
     {POBJ("Object"), P("To Intensity", LX_FSM_FLOAT, "0"), P("Time", LX_FSM_FLOAT, "1"), PEV("Finish Event")}, sizeof(LightTween), LX_FSM_A_CONTINUOUS, LX_FSM_EVERY_FRAME, NULL, light_fade, NULL};
 
 static void anim_time(LxFsmCtx *c) {
-    LxEntity e = obj(c, 0);
+    LxEntity e = lx_find_animator(c->scene, obj(c, 0));
     if (!e) return;
     if (lx_fsm_int(c, 2) == 0) lx_animator_set_time(c->scene, e, lx_fsm_float(c, 1));
     lx_fsm_set_float(c, 3, lx_animator_time(c->scene, e));

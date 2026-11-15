@@ -222,6 +222,7 @@ static struct {
     VkDescriptorSet lm_set;
     GpuBuffer lm_buf[6];                 /* BVH nodes, triangles, materials, lights, texels, sums */
     bool lm_baking;
+    bool preview;                        /* drawing an asset thumbnail: the scene-wide work belongs to the real views */
 } R;
 
 /* ------------------------------------------------------------------ helpers */
@@ -2385,6 +2386,9 @@ void lx_render_target_destroy(LxRenderTarget *rt) {
 }
 
 uint32_t lx_render_target_texture(const LxRenderTarget *rt) { return rt ? rt->ui_tex : 0; }
+/* thumbnails: views drawn in preview mode leave GI, lightmaps and reflection probes to the real views */
+void lx_renderer_set_preview(bool on) { R.preview = on; }
+bool lx_renderer_can_draw_view(void) { return R.frame_active && R.frames[R.frame].ubo_used < MAX_VIEWS_PER_FRAME; }
 
 /* ------------------------------------------------------------------ frame */
 bool lx_renderer_begin_frame(void) {
@@ -3071,10 +3075,12 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
         write_scene_sets();
     }
     lx_scene_update_transforms(s);
-    lightmaps_sync(s, fr);
+    if (!R.preview) lightmaps_sync(s, fr);
 
     /* ---- GI ---- */
-    if (R.gi_gpu) {
+    if (R.preview) {
+        /* a thumbnail: no GI of its own (the real views own it) */
+    } else if (R.gi_gpu) {
         if (R.gi_frame != R.frame_serial) {   /* once per frame: the first view's camera places the camera grids */
             R.gi_frame = R.frame_serial;
             static LxGiGpuFrame gf;
@@ -3143,7 +3149,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     if (cascades) compute_cascades(view, sun_dir, cascades, gs->shadow_distance, cvp, splits);
     for (int c = 0; c < cascades; c++) { ubo.cascade_vp[c] = cvp[c]; ubo.cascade_splits[c] = splits[c]; }
     const LxGiVolume *gv = lx_gi_volume();
-    bool gi_on = gs->gi_enabled && gv->valid && R.gi_res[0] == gv->res[0] && R.gi_res[1] == gv->res[1] && R.gi_res[2] == gv->res[2];
+    bool gi_on = !R.preview && gs->gi_enabled && gv->valid && R.gi_res[0] == gv->res[0] && R.gi_res[1] == gv->res[1] && R.gi_res[2] == gv->res[2];
     ubo.gi_origin[0] = gv->origin.x; ubo.gi_origin[1] = gv->origin.y; ubo.gi_origin[2] = gv->origin.z; ubo.gi_origin[3] = gi_on ? 1.0f : 0.0f;
     ubo.gi_cell[0] = gv->cell_size.x; ubo.gi_cell[1] = gv->cell_size.y; ubo.gi_cell[2] = gv->cell_size.z;
     ubo.gi_res[0] = (float)gv->res[0]; ubo.gi_res[1] = (float)gv->res[1]; ubo.gi_res[2] = (float)gv->res[2];
@@ -3203,7 +3209,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
         }
     }
     /* reflection probes: the first view rendered each frame owns probe placement and capture */
-    bool probe_owner = R.probe_frame != R.frame_serial;
+    bool probe_owner = !R.preview && R.probe_frame != R.frame_serial;
     if (probe_owner) {
         R.probe_frame = R.frame_serial;
         int want_res = gs->reflection_resolution <= 64 ? 64 : gs->reflection_resolution <= 128 ? 128 : gs->reflection_resolution <= 256 ? 256 : 512;
@@ -3214,6 +3220,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
         probes_assign(s, view, gs->reflections_enabled ? scene_look_hash(s) : 0);
     }
     probes_fill_ubo(&ubo);
+    if (R.preview) { ubo.refl[1] = 0; for (int i = 0; i < PROBE_SLOTS; i++) ubo.probe_pos[i][3] = 0; }   /* the sky only */
     uint32_t ubo_off = fr->ubo_used * 4096;
     memcpy((uint8_t *)fr->ubo.mapped + ubo_off, &ubo, sizeof ubo);
     fr->ubo_used++;

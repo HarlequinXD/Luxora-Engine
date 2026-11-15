@@ -1818,6 +1818,34 @@ static void test_models(void) {
     CHECK(def && found, "skinned vertex follows the animated bone (45 degrees)");
     LxVec3 e = lx_entity_euler(s, tip);
     CHECK(NEAR(e.z, 45, 0.1f), "bone rotated %g", e.z);
+    /* a clip by its name alone plays the character's own clip ("Bend", "bend", "#Bend") */
+    const char *bare[] = {"Bend", "bend", "#Bend"};
+    for (int k = 0; k < 3; k++) {
+        lx_animator_reset_pose(s, root);
+        lx_animator_play(s, root, bare[k], 0);
+        lx_animator_set_time(s, root, 0.5f);
+        lx_animator_update(s, root, 0);
+        CHECK(lx_animator_playing(s, root) && NEAR(lx_entity_euler(s, tip).z, 45, 0.1f), "clip named \"%s\" plays", bare[k]);
+    }
+    /* the Play Animation action finds the Animator on the model inside a player object */
+    {
+        const char *g = "[graph]\nname = Anim\nstart = A\n[state]\nname = A\n[action]\ntype = Play Animation\np0 = Owner\np1 = BarModel.fbx#Bend\np2 = 0\n";
+        char gp[LX_PATH_MAX];
+        lx_path_join(gp, sizeof gp, dir, "Anim.lxgraph");
+        lx_file_write(gp, g, strlen(g));
+        LxScene *ps = lx_scene_create("Player");
+        LxEntity player = lx_entity_create(ps, "Player");
+        LxEntity model = lx_model_instantiate(ps, "BarModel.fbx", lx_v3(0, 0, 0), player);
+        lx_get_animator(ps, model)->play_on_start = false;
+        lx_add_state_graph(ps, player, "Anim.lxgraph");
+        CHECK(lx_find_animator(ps, player) == model, "the player's Animator is found on its model");
+        lx_scene_simulate(ps, 0.1f);
+        lx_scene_simulate(ps, 0.1f);
+        CHECK(lx_animator_playing(ps, model) && !strcmp(lx_animator_current_clip(ps, model), "BarModel.fbx#Bend"),
+              "Play Animation on the player object plays its model's clip (%s)", lx_animator_current_clip(ps, model));
+        lx_scene_stop_simulation(ps);
+        lx_scene_destroy(ps);
+    }
     /* scenes remember animators */
     char *text = lx_scene_serialize(s);
     LxScene *s2 = lx_scene_deserialize(text);

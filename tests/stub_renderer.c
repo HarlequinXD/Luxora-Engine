@@ -146,6 +146,7 @@ bool lx_renderer_screenshot(const char *path) {
     lx_free(fb);
     return true;
 }
+static bool g_preview;
 LxRenderTarget *lx_render_target_create(int w, int h) { LxRenderTarget *r = lx_calloc(1, sizeof *r); r->w = w; r->h = h; r->tex = g_next_tex++; return r; }
 void lx_render_target_resize(LxRenderTarget *rt, int w, int h) { rt->w = w; rt->h = h; }
 void lx_render_target_destroy(LxRenderTarget *rt) { lx_free(rt); }
@@ -153,6 +154,7 @@ uint32_t lx_render_target_texture(const LxRenderTarget *rt) { return rt ? rt->te
 void lx_render_scene(LxScene *s, const LxRenderView *v, LxRenderTarget *t) {
     LX_UNUSED(v); LX_UNUSED(t);
     lx_scene_update_transforms(s);
+    if (g_preview) return;   /* a thumbnail: the GI belongs to the real views */
     lx_gi_update(s, &g_settings); /* exercise the photon tracer with the real scene */
     g_stats.gi_photons_traced = lx_gi_last_photon_count();
     g_stats.gi_ms = lx_gi_last_ms();
@@ -176,3 +178,5 @@ void lx_reflections_refresh(void) {}
 bool lx_renderer_lightmap_begin(const LxLightmapBake *b) { LX_UNUSED(b); return false; }
 void lx_renderer_lightmap_trace(LxLightmapBake *b, int first, int count, uint32_t sample) { LX_UNUSED(b); LX_UNUSED(first); LX_UNUSED(count); LX_UNUSED(sample); }
 bool lx_renderer_lightmap_end(LxLightmapBake *b, bool read_back) { LX_UNUSED(b); LX_UNUSED(read_back); return false; }
+void lx_renderer_set_preview(bool on) { g_preview = on; }
+bool lx_renderer_can_draw_view(void) { return true; }
