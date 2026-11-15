@@ -81,6 +81,24 @@ bool lx_fsm_value_parse(LxFsmValue *v, LxFsmType t, const char *text, const char
         v->v = lx_parse_vec3(text);
         if (!isfinite(v->v.x) || !isfinite(v->v.y) || !isfinite(v->v.z)) v->v = lx_v3(0, 0, 0);   /* "nan", "inf": never into a transform */
         break;
+    case LX_FSM_VEC2:
+        v->v = lx_parse_vec3(text);
+        v->v.z = 0;
+        if (!isfinite(v->v.x) || !isfinite(v->v.y)) v->v = lx_v3(0, 0, 0);
+        break;
+    case LX_FSM_QUAT: {   /* written as degrees */
+        LxVec3 e = lx_parse_vec3(text);
+        if (!isfinite(e.x) || !isfinite(e.y) || !isfinite(e.z)) e = lx_v3(0, 0, 0);
+        LxQuat q = lx_quat_euler_deg(e);
+        v->c = lx_v4(q.x, q.y, q.z, q.w);
+        v->v = e;
+        break;
+    }
+    case LX_FSM_RECT:
+        v->c = lx_parse_vec4(text);
+        if (!isfinite(v->c.x) || !isfinite(v->c.y) || !isfinite(v->c.z) || !isfinite(v->c.w)) v->c = lx_v4(0, 0, 0, 0);
+        break;
+    case LX_FSM_ARRAY: v->i = 0; lx_strcpy(v->s, sizeof v->s, text); break;   /* made into an array when a graph starts */
     case LX_FSM_COLOR: {
         LxVec4 c = lx_parse_vec4(text);
         int n = 0;
@@ -110,9 +128,28 @@ void lx_fsm_value_format(const LxFsmValue *v, char *out, size_t cap, const char 
     }
     case LX_FSM_BOOL: lx_strcpy(out, cap, v->b ? "true" : "false"); break;
     case LX_FSM_VEC3: snprintf(out, cap, "%g %g %g", (double)v->v.x, (double)v->v.y, (double)v->v.z); break;
-    case LX_FSM_COLOR: snprintf(out, cap, "%g %g %g %g", (double)v->c.x, (double)v->c.y, (double)v->c.z, (double)v->c.w); break;
+    case LX_FSM_COLOR: case LX_FSM_RECT: snprintf(out, cap, "%g %g %g %g", (double)v->c.x, (double)v->c.y, (double)v->c.z, (double)v->c.w); break;
+    case LX_FSM_VEC2: snprintf(out, cap, "%g %g", (double)v->v.x, (double)v->v.y); break;
+    case LX_FSM_QUAT: {
+        LxVec3 e = lx_quat_to_euler_deg((LxQuat){v->c.x, v->c.y, v->c.z, v->c.w});
+        snprintf(out, cap, "%g %g %g", (double)e.x, (double)e.y, (double)e.z);
+        break;
+    }
+    case LX_FSM_ARRAY:
+        if (lx_array_valid(v->i)) lx_array_to_text(v->i, out, cap);
+        else lx_strcpy(out, cap, v->s);
+        break;
     default: lx_strcpy(out, cap, v->s); break;
     }
+}
+
+/* Array variables: made from their starting text when a graph (or the globals) start, destroyed with them */
+#define LX_FSM_VOID_KEPT LX_FSM_TYPE_COUNT
+static void value_make(LxFsmValue *v) {
+    if (v->type == LX_FSM_ARRAY && !lx_array_valid(v->i)) v->i = lx_array_from_text(v->s);
+}
+static void value_release(LxFsmValue *v) {
+    if (v->type == LX_FSM_ARRAY && v->i) { lx_array_destroy(v->i); v->i = 0; }
 }
 
 /* ======================================================================
@@ -174,10 +211,14 @@ bool lx_fsm_globals_save(void) {
 }
 void lx_fsm_globals_reset_values(void) {
     lx_fsm_globals();
+    for (int i = 0; i < g_global_value_count; i++) value_release(&g_global_values[i]);
     lx_free(g_global_values);
     g_global_value_count = g_globals.var_count;
     g_global_values = lx_calloc((size_t)(g_global_value_count ? g_global_value_count : 1), sizeof(LxFsmValue));
-    for (int i = 0; i < g_global_value_count; i++) lx_fsm_value_parse(&g_global_values[i], g_globals.vars[i].type, g_globals.vars[i].value, NULL);
+    for (int i = 0; i < g_global_value_count; i++) {
+        lx_fsm_value_parse(&g_global_values[i], g_globals.vars[i].type, g_globals.vars[i].value, NULL);
+        value_make(&g_global_values[i]);
+    }
 }
 int lx_fsm_globals_index(const char *name) {
     lx_fsm_globals();
@@ -305,8 +346,14 @@ static void bind(LxFsmRun *r, LxScene *s, const LxStateGraphSlot *slot) {
             if (v->inspector && !strcmp(slot->overrides[o].var, v->name)) text = slot->overrides[o].value;
         lx_fsm_value_parse(&r->vars[i], v->type, text, NULL);
         for (int j = 0; j < old_count; j++)
-            if (!strcmp(old_names[j], v->name) && old[j].type == v->type) r->vars[i] = old[j];
+            if (!strcmp(old_names[j], v->name) && old[j].type == v->type && old[j].type != LX_FSM_VOID_KEPT) {
+                r->vars[i] = old[j];
+                old[j].type = LX_FSM_VOID_KEPT;   /* its array now belongs to the new value */
+                break;
+            }
+        value_make(&r->vars[i]);
     }
+    for (int j = 0; j < old_count; j++) if (old[j].type != LX_FSM_VOID_KEPT) value_release(&old[j]);
     lx_free(old);
     lx_free(old_names);
     LX_UNUSED(s);
@@ -332,34 +379,54 @@ static LxFsmValue *param(LxFsmCtx *c, int p) {
     if (vi <= -2) { LxFsmValue *gv = global_value(-2 - vi); if (gv) return gv; }
     return &b->lit[p];
 }
+LxFsmValue *lx_fsm_param_value(LxFsmCtx *c, int p) { return param(c, p); }
 float lx_fsm_float(LxFsmCtx *c, int p) {
     LxFsmValue *v = param(c, p);
+    if (v->type == LX_FSM_ARRAY) return (float)lx_array_length(v->i);
+    if (v->type == LX_FSM_ANY) { float f = (float)atof(v->s); return isfinite(f) ? f : 0; }
     return v->type == LX_FSM_INT || v->type == LX_FSM_ENUM ? (float)v->i : v->type == LX_FSM_BOOL ? (v->b ? 1.0f : 0.0f) : v->f;
 }
 int lx_fsm_int(LxFsmCtx *c, int p) {
     LxFsmValue *v = param(c, p);
+    if (v->type == LX_FSM_ARRAY) return lx_array_length(v->i);
+    if (v->type == LX_FSM_ANY) { long long x = strtoll(v->s, NULL, 10); return x > 2147483647LL ? 2147483647 : x < -2147483647LL ? -2147483647 : (int)x; }
     if (v->type == LX_FSM_FLOAT) return v->f >= 2147483647.0f ? 2147483647 : v->f <= -2147483647.0f ? -2147483647 : (int)lroundf(v->f);
     return v->type == LX_FSM_BOOL ? v->b : v->i;
 }
 bool lx_fsm_bool(LxFsmCtx *c, int p) {
     LxFsmValue *v = param(c, p);
+    if (v->type == LX_FSM_ANY) return lx_parse_bool(v->s);
     return v->type == LX_FSM_FLOAT ? v->f != 0 : v->type == LX_FSM_INT ? v->i != 0 : v->b;
 }
 const char *lx_fsm_string(LxFsmCtx *c, int p) {
     LxFsmValue *v = param(c, p);
-    if (v->type == LX_FSM_STRING || v->type == LX_FSM_ASSET || v->type == LX_FSM_EVENT || v->type == LX_FSM_OBJECT) return v->s;
-    static char buf[64];
+    if (v->type == LX_FSM_STRING || v->type == LX_FSM_ASSET || v->type == LX_FSM_EVENT || v->type == LX_FSM_OBJECT || v->type == LX_FSM_MATERIAL ||
+        v->type == LX_FSM_TEXTURE || v->type == LX_FSM_ANY)
+        return v->s;
+    static char buf[LX_REF_MAX];
     lx_fsm_value_format(v, buf, sizeof buf, NULL);
     return buf;
 }
-LxVec3 lx_fsm_vec3(LxFsmCtx *c, int p) { LxFsmValue *v = param(c, p); return v->type == LX_FSM_COLOR ? lx_v3(v->c.x, v->c.y, v->c.z) : v->v; }
-LxVec4 lx_fsm_color(LxFsmCtx *c, int p) { LxFsmValue *v = param(c, p); return v->type == LX_FSM_VEC3 ? lx_v4(v->v.x, v->v.y, v->v.z, 1) : v->c; }
+LxVec3 lx_fsm_vec3(LxFsmCtx *c, int p) {
+    LxFsmValue *v = param(c, p);
+    if (v->type == LX_FSM_QUAT) return lx_quat_to_euler_deg((LxQuat){v->c.x, v->c.y, v->c.z, v->c.w});   /* degrees */
+    if (v->type == LX_FSM_ANY) { LxVec3 x = lx_parse_vec3(v->s); return isfinite(x.x) && isfinite(x.y) && isfinite(x.z) ? x : lx_v3(0, 0, 0); }
+    return v->type == LX_FSM_COLOR || v->type == LX_FSM_RECT ? lx_v3(v->c.x, v->c.y, v->c.z) : v->v;
+}
+LxVec4 lx_fsm_color(LxFsmCtx *c, int p) { LxFsmValue *v = param(c, p); return v->type == LX_FSM_VEC3 || v->type == LX_FSM_VEC2 ? lx_v4(v->v.x, v->v.y, v->v.z, 1) : v->c; }
+LxQuat lx_fsm_quat(LxFsmCtx *c, int p) {
+    LxFsmValue *v = param(c, p);
+    if (v->type == LX_FSM_QUAT) return (LxQuat){v->c.x, v->c.y, v->c.z, v->c.w};
+    if (v->type == LX_FSM_VEC3) return lx_quat_euler_deg(v->v);
+    return lx_quat_identity();
+}
+LxArray lx_fsm_array(LxFsmCtx *c, int p) { LxFsmValue *v = param(c, p); return v->type == LX_FSM_ARRAY && lx_array_valid(v->i) ? v->i : 0; }
 const char *lx_fsm_asset(LxFsmCtx *c, int p) { return param(c, p)->s; }
 const char *lx_fsm_event(LxFsmCtx *c, int p) { return param(c, p)->s; }
 
 LxEntity lx_fsm_object(LxFsmCtx *c, int p) {
     LxFsmValue *v = param(c, p);
-    if (v->type != LX_FSM_OBJECT) return 0;
+    if (v->type != LX_FSM_OBJECT && v->type != LX_FSM_ANY) return 0;
     if (v->e && lx_entity_valid(c->scene, v->e)) return v->e;
     const char *s = v->s;
     if (!strcmp(s, "Owner")) return c->self;
@@ -376,7 +443,9 @@ bool lx_fsm_is_none(LxFsmCtx *c, int p) {
     if (b->var[p] != -1) return false;
     const LxFsmValue *v = &b->lit[p];
     if (v->type == LX_FSM_OBJECT) return !v->s[0] || !strcmp(v->s, "None");
-    if (v->type == LX_FSM_STRING || v->type == LX_FSM_ASSET || v->type == LX_FSM_EVENT) return !v->s[0] || !strcmp(v->s, "None");
+    if (v->type == LX_FSM_STRING || v->type == LX_FSM_ASSET || v->type == LX_FSM_EVENT || v->type == LX_FSM_MATERIAL || v->type == LX_FSM_TEXTURE ||
+        v->type == LX_FSM_ANY)
+        return !v->s[0] || !strcmp(v->s, "None");
     return b->src && !b->src->p[p].value[0];
 }
 
@@ -417,15 +486,55 @@ void lx_fsm_set_string(LxFsmCtx *c, int p, const char *s) {
 void lx_fsm_set_vec3(LxFsmCtx *c, int p, LxVec3 x) {
     LxFsmValue *v = out_var(c, p);
     if (!v || !isfinite(x.x) || !isfinite(x.y) || !isfinite(x.z)) return;
-    if (v->type == LX_FSM_COLOR) v->c = lx_v4(x.x, x.y, x.z, v->c.w);
+    if (v->type == LX_FSM_QUAT) { LxQuat q = lx_quat_euler_deg(x); v->c = lx_v4(q.x, q.y, q.z, q.w); }
+    else if (v->type == LX_FSM_VEC2) v->v = lx_v3(x.x, x.y, 0);
+    else if (v->type == LX_FSM_STRING) snprintf(v->s, sizeof v->s, "%g %g %g", (double)x.x, (double)x.y, (double)x.z);
+    else if (v->type == LX_FSM_COLOR) v->c = lx_v4(x.x, x.y, x.z, v->c.w);
     else if (v->type == LX_FSM_FLOAT) v->f = lx_len3(x);
     else v->v = x;
 }
 void lx_fsm_set_color(LxFsmCtx *c, int p, LxVec4 x) {
     LxFsmValue *v = out_var(c, p);
+    if (!v || !isfinite(x.x) || !isfinite(x.y) || !isfinite(x.z) || !isfinite(x.w)) return;
+    if (v->type == LX_FSM_VEC3 || v->type == LX_FSM_VEC2) v->v = lx_v3(x.x, x.y, v->type == LX_FSM_VEC2 ? 0 : x.z);
+    else if (v->type == LX_FSM_COLOR || v->type == LX_FSM_RECT || v->type == LX_FSM_QUAT) v->c = x;
+}
+void lx_fsm_set_quat(LxFsmCtx *c, int p, LxQuat q) {
+    LxFsmValue *v = out_var(c, p);
+    if (!v || !isfinite(q.x) || !isfinite(q.y) || !isfinite(q.z) || !isfinite(q.w)) return;
+    if (v->type == LX_FSM_QUAT || v->type == LX_FSM_COLOR) v->c = lx_v4(q.x, q.y, q.z, q.w);
+    else if (v->type == LX_FSM_VEC3) v->v = lx_quat_to_euler_deg(q);
+}
+/* an Any output: the value of an array item, written as whatever type the variable is */
+void lx_fsm_set_from_array(LxFsmCtx *c, int p, LxArray a, int i) {
+    LxFsmValue *v = out_var(c, p);
     if (!v) return;
-    if (v->type == LX_FSM_VEC3) v->v = lx_v3(x.x, x.y, x.z);
-    else v->c = x;
+    switch (v->type) {
+    case LX_FSM_FLOAT: lx_fsm_set_float(c, p, lx_array_get_float(a, i)); break;
+    case LX_FSM_INT: case LX_FSM_ENUM: lx_fsm_set_int(c, p, lx_array_get_int(a, i)); break;
+    case LX_FSM_BOOL: lx_fsm_set_bool(c, p, lx_array_get_bool(a, i)); break;
+    case LX_FSM_VEC3: case LX_FSM_VEC2: lx_fsm_set_vec3(c, p, lx_array_get_vec3(a, i)); break;
+    case LX_FSM_COLOR: case LX_FSM_RECT: case LX_FSM_QUAT:
+        if (lx_array_type(a) == LX_FSM_VEC3) lx_fsm_set_vec3(c, p, lx_array_get_vec3(a, i));
+        else lx_fsm_set_color(c, p, lx_array_get_color(a, i));
+        break;
+    case LX_FSM_OBJECT: lx_fsm_set_object(c, p, lx_array_get_object(a, i)); break;
+    case LX_FSM_ARRAY: break;
+    default: lx_strcpy(v->s, sizeof v->s, lx_array_get_string(a, i)); break;
+    }
+}
+/* the other way: a parameter's value (any type) into an array item */
+void lx_fsm_array_set_from(LxFsmCtx *c, int p, LxArray a, int i) {
+    LxFsmValue *v = param(c, p);
+    switch (v->type) {
+    case LX_FSM_FLOAT: lx_array_set_float(a, i, v->f); break;
+    case LX_FSM_INT: case LX_FSM_ENUM: lx_array_set_int(a, i, v->i); break;
+    case LX_FSM_BOOL: lx_array_set_bool(a, i, v->b); break;
+    case LX_FSM_VEC3: case LX_FSM_VEC2: lx_array_set_vec3(a, i, v->v); break;
+    case LX_FSM_COLOR: case LX_FSM_RECT: case LX_FSM_QUAT: lx_array_set_color(a, i, v->c); break;
+    case LX_FSM_OBJECT: lx_array_set_object(a, i, lx_fsm_object(c, p)); break;
+    default: lx_array_set_string(a, i, v->s); break;
+    }
 }
 void lx_fsm_set_object(LxFsmCtx *c, int p, LxEntity e) {
     LxFsmValue *v = out_var(c, p);
@@ -651,6 +760,7 @@ static void rebind(LxScene *s, LxFsmRun *r, const LxStateGraphSlot *slot) {
 static void run_free(LxScene *s, LxFsmRun *r) {
     if (s && r->graph && r->bound && r->actions_epoch == g_actions_epoch) exit_state(s, r);   /* not into unloaded script code */
     bound_free(r);
+    for (int i = 0; i < r->var_count; i++) value_release(&r->vars[i]);
     lx_free(r->vars);
     lx_free(r->var_names);
     memset(r, 0, sizeof *r);
@@ -852,6 +962,16 @@ float lx_fsm_get_var_float(LxScene *s, LxEntity e, int slot, const char *var) {
     if (i < 0) return 0;
     LxFsmValue *v = &r->vars[i];
     return v->type == LX_FSM_INT ? (float)v->i : v->type == LX_FSM_BOOL ? (float)v->b : v->f;
+}
+LxArray lx_fsm_get_var_array(LxScene *s, LxEntity e, int slot, const char *var) {
+    LxFsmRun *r = lx_fsm_run_of(s, e, slot);
+    if (!r || !r->graph) return 0;
+    int i = var_index(r, var);
+    return i >= 0 && r->vars[i].type == LX_FSM_ARRAY ? r->vars[i].i : 0;
+}
+LxArray lx_fsm_global_array(const char *name) {
+    LxFsmValue *v = global_value(lx_fsm_globals_index(name));
+    return v && v->type == LX_FSM_ARRAY ? v->i : 0;
 }
 bool lx_fsm_set_var_float(LxScene *s, LxEntity e, int slot, const char *var, float f) {
     LxFsmRun *r = lx_fsm_run_of(s, e, slot);

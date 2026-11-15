@@ -82,7 +82,23 @@ static void pb_options(PB *b, const char *options) {
         s = bar + 1;
     }
 }
+/* what an Array variable can hold */
+static const char *const ELEM_TYPES[] = {"Float", "Int", "Bool", "String", "Vector3", "Color", "Object", "Asset", "Vector2", "Quaternion", "Rect", "Material", "Texture"};
+static const LxFsmType ELEM_IDS[] = {LX_FSM_FLOAT, LX_FSM_INT, LX_FSM_BOOL, LX_FSM_STRING, LX_FSM_VEC3, LX_FSM_COLOR, LX_FSM_OBJECT, LX_FSM_ASSET,
+                                     LX_FSM_VEC2, LX_FSM_QUAT, LX_FSM_RECT, LX_FSM_MATERIAL, LX_FSM_TEXTURE};
+#define ELEM_N ((int)(sizeof ELEM_IDS / sizeof ELEM_IDS[0]))
 static void pb_load(PB *b, LxFsmType t, const char *text, const char *options) {
+    if (t == LX_FSM_ARRAY) {   /* "float: 1, 2, 3" -> the type dropdown and the items */
+        b->type = t;
+        LxFsmType et = lx_array_text_type(text ? text : "");
+        b->i = 0;
+        for (int k = 0; k < ELEM_N; k++) if (ELEM_IDS[k] == et) b->i = k;
+        const char *colon = text ? strchr(text, ':') : NULL;
+        const char *items = colon ? colon + 1 : (text ? text : "");
+        while (*items == ' ') items++;
+        lx_strcpy(b->s, sizeof b->s, items);
+        return;
+    }
     LxFsmValue v;
     lx_fsm_value_parse(&v, t, text, options);
     b->type = t;
@@ -91,7 +107,9 @@ static void pb_load(PB *b, LxFsmType t, const char *text, const char *options) {
     case LX_FSM_INT: case LX_FSM_ENUM: b->i = v.i; break;
     case LX_FSM_BOOL: b->b = v.b; break;
     case LX_FSM_VEC3: b->f[0] = v.v.x; b->f[1] = v.v.y; b->f[2] = v.v.z; break;
-    case LX_FSM_COLOR: b->f[0] = v.c.x; b->f[1] = v.c.y; b->f[2] = v.c.z; b->f[3] = v.c.w; break;
+    case LX_FSM_COLOR: case LX_FSM_RECT: b->f[0] = v.c.x; b->f[1] = v.c.y; b->f[2] = v.c.z; b->f[3] = v.c.w; break;
+    case LX_FSM_VEC2: b->f[0] = v.v.x; b->f[1] = v.v.y; break;
+    case LX_FSM_QUAT: b->f[0] = v.v.x; b->f[1] = v.v.y; b->f[2] = v.v.z; break;   /* degrees, as written */
     default: lx_strcpy(b->s, sizeof b->s, text ? text : ""); break;
     }
     if (t == LX_FSM_ENUM) pb_options(b, options);
@@ -103,7 +121,10 @@ static void pb_format(const PB *b, char *out, size_t cap) {
     case LX_FSM_ENUM: lx_strcpy(out, cap, b->i >= 0 && b->i < b->opt_count ? b->opts[b->i] : "0"); break;
     case LX_FSM_BOOL: lx_strcpy(out, cap, b->b ? "true" : "false"); break;
     case LX_FSM_VEC3: snprintf(out, cap, "%g %g %g", (double)b->f[0], (double)b->f[1], (double)b->f[2]); break;
-    case LX_FSM_COLOR: snprintf(out, cap, "%g %g %g %g", (double)b->f[0], (double)b->f[1], (double)b->f[2], (double)b->f[3]); break;
+    case LX_FSM_COLOR: case LX_FSM_RECT: snprintf(out, cap, "%g %g %g %g", (double)b->f[0], (double)b->f[1], (double)b->f[2], (double)b->f[3]); break;
+    case LX_FSM_VEC2: snprintf(out, cap, "%g %g", (double)b->f[0], (double)b->f[1]); break;
+    case LX_FSM_QUAT: snprintf(out, cap, "%g %g %g", (double)b->f[0], (double)b->f[1], (double)b->f[2]); break;
+    case LX_FSM_ARRAY: snprintf(out, cap, "%s: %s", lx_fsm_type_name(ELEM_IDS[b->i >= 0 && b->i < ELEM_N ? b->i : 0]), b->s); break;
     default: lx_strcpy(out, cap, b->s); break;
     }
 }
@@ -209,16 +230,37 @@ static void value_field(UiNode *row, PB *b, LxFsmType t, const char *options) {
         return;
     }
     case LX_FSM_ENUM: n = ui_dropdown(ui, row, &b->i, b->opts, b->opt_count); break;
-    case LX_FSM_VEC3:
-        for (int k = 0; k < 3; k++) {
-            UiNode *x = ui_number(ui, row, &b->f[k], 0.05f);
+    case LX_FSM_VEC2: case LX_FSM_QUAT: case LX_FSM_RECT: case LX_FSM_VEC3: {
+        int nf = t == LX_FSM_VEC2 ? 2 : t == LX_FSM_RECT ? 4 : 3;
+        for (int k = 0; k < nf; k++) {
+            UiNode *x = ui_number(ui, row, &b->f[k], t == LX_FSM_QUAT ? 1.0f : 0.05f);
             x->grow = 1;
             x->h = 22;
             x->precision = 2;
             x->user = b;
             x->on_change = value_changed;
+            if (t == LX_FSM_QUAT) lx_strcpy(x->tooltip, sizeof x->tooltip, k == 0 ? "X (degrees)" : k == 1 ? "Y (degrees)" : "Z (degrees)");
+            if (t == LX_FSM_RECT) lx_strcpy(x->tooltip, sizeof x->tooltip, k == 0 ? "X" : k == 1 ? "Y" : k == 2 ? "Width" : "Height");
         }
         return;
+    }
+    case LX_FSM_MATERIAL: case LX_FSM_TEXTURE:
+        n = ed_slot(row, b->s, sizeof b->s, t == LX_FSM_MATERIAL ? "material" : "texture");
+        n->user = b;
+        n->on_change = value_changed;
+        return;
+    case LX_FSM_ARRAY:
+        if (b->kind == PB_PARAM) {   /* an array parameter needs an Array variable */
+            UiNode *h = label(row, "pick an Array variable", UI_FONT_SMALL, COL_DIM);
+            h->grow = 1;
+            return;
+        }
+        n = ui_dropdown(ui, row, &b->i, ELEM_TYPES, ELEM_N);
+        n->w = 84; n->h = 22; n->user = b; n->on_change = value_changed;
+        lx_strcpy(n->tooltip, sizeof n->tooltip, "what the array holds");
+        n = ui_textfield(ui, row, b->s, sizeof b->s);
+        lx_strcpy(n->tooltip, sizeof n->tooltip, "starting items, separated by commas (empty = an empty array)");
+        break;
     case LX_FSM_COLOR: n = ui_color(ui, row, b->f, true); break;
     case LX_FSM_OBJECT: {   /* a slot: click for the object picker, or drop an object from the hierarchy */
         n = ed_slot(row, b->s, sizeof b->s, "object");
@@ -312,7 +354,14 @@ static void var_pick(UiNode *it) {
     ge_commit(true, NULL);
 }
 static bool type_fits(LxFsmType want, LxFsmType have) {
-    if (want == have) return true;
+    if (want == have || want == LX_FSM_ANY) return true;
+    if (want == LX_FSM_ARRAY || have == LX_FSM_ARRAY) return false;
+    bool asset_w = want == LX_FSM_ASSET || want == LX_FSM_MATERIAL || want == LX_FSM_TEXTURE || want == LX_FSM_STRING;
+    bool asset_h = have == LX_FSM_ASSET || have == LX_FSM_MATERIAL || have == LX_FSM_TEXTURE || have == LX_FSM_STRING;
+    if (asset_w && asset_h && (want != LX_FSM_STRING || have != LX_FSM_STRING)) return true;
+    if ((want == LX_FSM_VEC3 || want == LX_FSM_VEC2) && (have == LX_FSM_VEC3 || have == LX_FSM_VEC2)) return true;
+    if ((want == LX_FSM_COLOR || want == LX_FSM_RECT) && (have == LX_FSM_COLOR || have == LX_FSM_RECT)) return true;
+    if (want == LX_FSM_QUAT && have == LX_FSM_VEC3) return true;
     bool num_w = want == LX_FSM_FLOAT || want == LX_FSM_INT || want == LX_FSM_ENUM, num_h = have == LX_FSM_FLOAT || have == LX_FSM_INT;
     if (num_w && num_h) return true;
     if (want == LX_FSM_STRING && (have == LX_FSM_FLOAT || have == LX_FSM_INT)) return false;
@@ -1046,15 +1095,18 @@ static void build_events_tab(UiNode *body) {
 /* ======================================================================
  *  Variables tab
  * ====================================================================== */
-static const char *const VAR_TYPES[] = {"Float", "Int", "Bool", "String", "Vector3", "Color", "Object", "Asset"};
-static const LxFsmType VAR_TYPE_IDS[] = {LX_FSM_FLOAT, LX_FSM_INT, LX_FSM_BOOL, LX_FSM_STRING, LX_FSM_VEC3, LX_FSM_COLOR, LX_FSM_OBJECT, LX_FSM_ASSET};
+static const char *const VAR_TYPES[] = {"Float", "Int", "Bool", "String", "Vector3", "Color", "Object", "Asset",
+                                        "Vector2", "Quaternion", "Rect", "Material", "Texture", "Array"};
+static const LxFsmType VAR_TYPE_IDS[] = {LX_FSM_FLOAT, LX_FSM_INT, LX_FSM_BOOL, LX_FSM_STRING, LX_FSM_VEC3, LX_FSM_COLOR, LX_FSM_OBJECT, LX_FSM_ASSET,
+                                         LX_FSM_VEC2, LX_FSM_QUAT, LX_FSM_RECT, LX_FSM_MATERIAL, LX_FSM_TEXTURE, LX_FSM_ARRAY};
+#define VAR_TYPE_N ((int)(sizeof VAR_TYPE_IDS / sizeof VAR_TYPE_IDS[0]))
 static int g_new_var_type;
 static PB *g_new_var_pb;
 static void add_var(bool global) {
     if (!g_new_var_pb || !g_new_var_pb->s[0]) return;
     char name[LX_FSM_NAME];
     lx_strcpy(name, sizeof name, g_new_var_pb->s);
-    LxFsmType t = VAR_TYPE_IDS[g_new_var_type & 7];
+    LxFsmType t = VAR_TYPE_IDS[g_new_var_type >= 0 && g_new_var_type < VAR_TYPE_N ? g_new_var_type : 0];
     if (global) {
         LxGlobals *gl = lx_fsm_globals();
         if (!gl || lx_fsm_globals_find_var(name)) { ui_notify(ED.ui, "%s already exists", name); return; }
@@ -1102,7 +1154,7 @@ static void var_type_changed(UiNode *n) {
     PB *b = n->user;
     LxGraph *g = ge_graph();
     if (!g || b->st < 0 || b->st >= g->var_count) return;
-    LxFsmType t = VAR_TYPE_IDS[b->p & 7];
+    LxFsmType t = VAR_TYPE_IDS[b->p >= 0 && b->p < VAR_TYPE_N ? b->p : 0];
     g->vars[b->st].type = t;
     lx_strcpy(g->vars[b->st].value, sizeof g->vars[b->st].value, lx_fsm_default_value(t));
     ge_commit(true, NULL);
@@ -1152,8 +1204,8 @@ static void var_block(UiNode *body, int i, const LxGraphVar *v, bool global) {
         tf->grow = 1; tf->h = 22; tf->user = nb; tf->on_change = var_name_changed; tf->fg = COL_VAR_TEXT; tf->font = UI_FONT_BOLD;
         PB *tb = pb_new(PB_MISC);
         tb->st = i;
-        for (int k = 0; k < 8; k++) if (VAR_TYPE_IDS[k] == v->type) tb->p = k;
-        UiNode *dd = ui_dropdown(ui, row, &tb->p, VAR_TYPES, 8);
+        for (int k = 0; k < VAR_TYPE_N; k++) if (VAR_TYPE_IDS[k] == v->type) tb->p = k;
+        UiNode *dd = ui_dropdown(ui, row, &tb->p, VAR_TYPES, VAR_TYPE_N);
         dd->w = 90; dd->h = 22; dd->user = tb; dd->on_change = var_type_changed;
         char u[32];
         int uses = lx_graph_var_uses(ge_graph(), v->name);
@@ -1208,7 +1260,7 @@ static void build_vars_tab(UiNode *body) {
     UiNode *tf = ui_textfield(ui, row, nb->s, LX_FSM_NAME);
     tf->grow = 1; tf->h = 24; tf->on_change = add_var_enter;
     lx_strcpy(tf->hint, sizeof tf->hint, "New variable name");
-    UiNode *dd = ui_dropdown(ui, row, &g_new_var_type, VAR_TYPES, 8);
+    UiNode *dd = ui_dropdown(ui, row, &g_new_var_type, VAR_TYPES, VAR_TYPE_N);
     dd->w = 90; dd->h = 24;
     UiNode *bt = ui_button(ui, row, "Add", add_var_click);
     bt->w = 56; bt->h = 24;

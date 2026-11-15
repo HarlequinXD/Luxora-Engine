@@ -11,7 +11,8 @@ bool lx_fsm_is_system_event(const char *name) {
     return false;
 }
 
-static const char *TYPE_NAMES[LX_FSM_TYPE_COUNT] = {"float", "int", "bool", "string", "vector3", "color", "object", "asset", "event", "enum"};
+static const char *TYPE_NAMES[LX_FSM_TYPE_COUNT] = {"float", "int", "bool", "string", "vector3", "color", "object", "asset", "event", "enum",
+                                                     "vector2", "quaternion", "rect", "material", "texture", "array", "any"};
 const char *lx_fsm_type_name(LxFsmType t) { return t >= 0 && t < LX_FSM_TYPE_COUNT ? TYPE_NAMES[t] : "float"; }
 LxFsmType lx_fsm_type_parse(const char *s) {
     for (int i = 0; i < LX_FSM_TYPE_COUNT; i++) if (!strcmp(s, TYPE_NAMES[i])) return (LxFsmType)i;
@@ -23,6 +24,10 @@ const char *lx_fsm_default_value(LxFsmType t) {
     case LX_FSM_BOOL: return "false";
     case LX_FSM_VEC3: return "0 0 0";
     case LX_FSM_COLOR: return "1 1 1 1";
+    case LX_FSM_VEC2: return "0 0";
+    case LX_FSM_QUAT: return "0 0 0";
+    case LX_FSM_RECT: return "0 0 1 1";
+    case LX_FSM_ARRAY: return "float:";
     case LX_FSM_OBJECT: return "None";
     default: return "";
     }

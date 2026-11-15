@@ -736,6 +736,66 @@ static void test_fsm_playmaker(void) {
     CHECK(part > 5 && part < 89 && VEQ(fw, 1, 0, 0, 0.03f) && !strcmp(sst(), "Yes"), "Smooth Look At Direction turns gradually, then finishes (%g, %.2f %.2f %.2f, %s)", part, fw.x, fw.y, fw.z, sst());
     sem_end();
 
+    /* ---- arrays ---- */
+    sem_begin("[variable]\nname = arr\ntype = array\nvalue = int: 5, 3, 9\n"
+              ONE("[action]\ntype = Array Add\np0 = $arr\np1 = 7\n[action]\ntype = Array Length\np0 = $arr\np1 = $i\n"
+                  "[action]\ntype = Array Sort\np0 = $arr\n[action]\ntype = Array Get\np0 = $arr\np1 = 0\np2 = $f\n"
+                  "[action]\ntype = Array Join\np0 = $arr\np1 = -\np2 = $s\n"
+                  "[action]\ntype = Array Contains\np0 = $arr\np1 = 9\np2 = $f2\np4 = YES\np5 = NO\n"));
+    sem_run(1, DT);
+    CHECK(sv("i") == 4 && sv("f") == 3 && !strcmp(svs("s"), "3-5-7-9") && sv("f2") == 3 && !strcmp(sst(), "Yes"),
+          "Array Add, Length, Sort, Get, Join, Contains (%g %g %s %g %s)", sv("i"), sv("f"), svs("s"), sv("f2"), sst());
+    sem_end();
+    sem_begin("[variable]\nname = words\ntype = array\nvalue = string:\n[variable]\nname = k\ntype = int\nvalue = 0\n"
+              "[event]\nname = LOOP\n[event]\nname = END\n[state]\nname = A\ntransition = FINISHED > B\n"
+              "[action]\ntype = String Split To Array\np0 = red,green,blue\np1 = ,\np2 = $words\n"
+              "[state]\nname = B\ntransition = LOOP > C\ntransition = END > Done\n"
+              "[action]\ntype = Array For Each\np0 = $words\np1 = $k\np2 = $s\np4 = LOOP\np5 = END\n"
+              "[state]\nname = C\ntransition = FINISHED > B\n[action]\ntype = Float Add\np0 = $f\np1 = 1\n"
+              "[action]\ntype = String Join\np0 = $s\np1 = \np2 = $s\n[state]\nname = Done\n");
+    sem_run(20, DT);
+    CHECK(NEAR(sv("f"), 3, 1e-5f) && !strcmp(sst(), "Done"), "String Split To Array and Array For Each visit every item (%g, %s)", sv("f"), sst());
+    sem_end();
+    sem_begin("[variable]\nname = foes\ntype = array\nvalue = object:\n"
+              ONE("[action]\ntype = Array Fill With Tag\np0 = $foes\np1 = Enemy\np2 = true\np3 = $i\n"
+                  "[action]\ntype = Array Get Closest\np0 = $foes\np1 = Owner\np4 = $o\np6 = $f\n"));
+    sem_run(1, DT);
+    CHECK(sv("i") == 2 && svo("o") == lx_entity_find(g_ss, "Enemy1"), "Array Fill With Tag, Array Get Closest (%g)", sv("i"));
+    LxArray foes = lx_fsm_get_var_array(g_ss, g_so, 0, "foes");
+    CHECK(lx_array_length(foes) == 2 && lx_array_type(foes) == LX_FSM_OBJECT, "a graph's array from the scripting API");
+    sem_end();
+    CHECK(!lx_array_valid(foes) && lx_array_length(foes) == 0, "the graph's array goes with its object");
+    {   /* the scripting API directly */
+        LxArray a = lx_array_create(LX_FSM_FLOAT);
+        for (int k = 0; k < 5; k++) lx_array_add_float(a, (float)(5 - k));
+        lx_array_sort(a, false);
+        lx_array_insert_at(a, 0);
+        lx_array_set_float(a, 0, -1);
+        lx_array_remove_at(a, 3);
+        CHECK(lx_array_length(a) == 5 && lx_array_get_float(a, 0) == -1 && lx_array_get_float(a, 3) == 4 && lx_array_find_float(a, 5) == 4 &&
+                  !strcmp(lx_array_get_string(a, 1), "1"),
+              "lx_array: add, sort, insert, remove, find");
+        lx_array_destroy(a);
+        LxArray b = lx_array_create(LX_FSM_STRING);
+        CHECK(!lx_array_valid(a) && lx_array_get_float(a, 0) == 0 && b != a, "a destroyed array's handle stays dead");
+        lx_array_destroy(b);
+    }
+    /* ---- quaternions, vector2, rects ---- */
+    sem_begin("[variable]\nname = q\ntype = quaternion\nvalue = 0 0 0\n[variable]\nname = v2\ntype = vector2\nvalue = 1 0\n"
+              ONE("[action]\ntype = Make Quaternion\np0 = Euler Angles\np1 = 0 90 0\np4 = $q\n"
+                  "[action]\ntype = Quaternion Rotate Vector\np0 = $q\np1 = 0 0 -1\np2 = $v\n"
+                  "[action]\ntype = Vector2 Operator\np0 = $v2\np2 = Rotate by Float\np3 = 90\np4 = $v2\n"
+                  "[action]\ntype = Rect Contains\nupdate = once\np0 = -1 -1 10 10\np1 = $v2\np3 = YES\np4 = NO\n"));
+    sem_run(1, DT);
+    {
+        LxFsmRun *r = lx_fsm_run_of(g_ss, g_so, 0);
+        LxVec3 v2 = lx_v3(-9, -9, -9);
+        for (int k = 0; r && k < r->var_count; k++) if (!strcmp(r->var_names[k], "v2")) v2 = r->vars[k].v;
+        CHECK(VEQ(svv("v"), -1, 0, 0, 1e-4f) && NEAR(v2.x, 0, 1e-4f) && NEAR(v2.y, 1, 1e-4f) && !strcmp(sst(), "Yes"),
+              "Make Quaternion, Quaternion Rotate Vector, Vector2 Operator, Rect Contains (%.2f %.2f %.2f; %.2f %.2f; %s)", svv("v").x, svv("v").y, svv("v").z, v2.x, v2.y, sst());
+    }
+    sem_end();
+
     /* ---- keys: a press on the entering frame belongs to the state before ---- */
     sem_begin(ONE("[action]\ntype = Get Key Down\np0 = Space\np1 = YES\n[action]\ntype = Get Key\np0 = Space\np1 = $b\n"));
     pm_frame(); g_lx_input.keys[LX_KEY_SPACE] = true; pm_step();

@@ -204,6 +204,13 @@ bool lx_fsm_spawn_allowed(LxScene *s);   /* Spawn/Duplicate actions: per-frame b
 void lx_fsm_system_event(LxScene *s, LxEntity self, const char *event, LxEntity other, float value);
 LxFsmRun *lx_fsm_run_of(LxScene *s, LxEntity e, int slot);
 bool lx_fsm_value_parse(LxFsmValue *v, LxFsmType t, const char *text, const char *options);
+/* arrays (arrays.c) */
+LxArray lx_array_from_text(const char *text);              /* "float: 1, 2, 3" */
+void lx_array_to_text(LxArray a, char *out, size_t cap);
+LxFsmType lx_array_text_type(const char *text);
+LxFsmValue *lx_fsm_param_value(LxFsmCtx *c, int p);
+void lx_fsm_set_from_array(LxFsmCtx *c, int p, LxArray a, int i);   /* an output of any type from an array item */
+void lx_fsm_array_set_from(LxFsmCtx *c, int p, LxArray a, int i);   /* an array item from a parameter of any type */
 void lx_fsm_value_format(const LxFsmValue *v, char *out, size_t cap, const char *options);
 LxStateGraph *lx_state_graph_alloc(void);
 #endif

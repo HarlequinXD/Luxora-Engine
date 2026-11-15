@@ -628,6 +628,13 @@ typedef enum LxFsmType {
     LX_FSM_ASSET,      /* a reference to an asset ("Prefabs/Coin.lxprefab") */
     LX_FSM_EVENT,      /* an event name (parameters only) */
     LX_FSM_ENUM,       /* one of the options in the parameter's options ("A|B|C"), stored as its index */
+    LX_FSM_VEC2,       /* "x y" */
+    LX_FSM_QUAT,       /* a rotation; written as degrees "x y z" */
+    LX_FSM_RECT,       /* "x y width height" */
+    LX_FSM_MATERIAL,   /* a material asset ("Materials/Stone.lxmat") */
+    LX_FSM_TEXTURE,    /* a texture asset */
+    LX_FSM_ARRAY,      /* a list of values of one type: "float: 1, 2, 3"; a handle at run time (lx_array_*) */
+    LX_FSM_ANY,        /* parameters only: takes a value or a variable of any type (array items) */
     LX_FSM_TYPE_COUNT
 } LxFsmType;
 
@@ -724,6 +731,59 @@ bool lx_fsm_set_var_float(LxScene *s, LxEntity e, int slot, const char *var, flo
 /* global variables (Assets/Globals.lxglobals) */
 float lx_fsm_global_float(const char *name);
 void lx_fsm_set_global_float(const char *name, float v);
+
+/* more parameter types inside an action */
+LxQuat lx_fsm_quat(struct LxFsmCtx *c, int p);
+void lx_fsm_set_quat(struct LxFsmCtx *c, int p, LxQuat q);
+int lx_fsm_array(struct LxFsmCtx *c, int p);   /* the array a parameter is bound to (0 = none) */
+
+/* ===================================================================
+ *  Arrays: lists of floats, ints, bools, strings, vectors, colours, objects... (the State Graph's Array
+ *  variables are these). An LxArray is a handle: 0 is none, a destroyed array's handle stops working.
+ *  Indexes start at 0; out-of-range reads give 0 / "" / None, out-of-range writes do nothing.
+ * =================================================================== */
+typedef int LxArray;
+LxArray lx_array_create(LxFsmType element_type);
+void lx_array_destroy(LxArray a);
+bool lx_array_valid(LxArray a);
+LxFsmType lx_array_type(LxArray a);
+int lx_array_length(LxArray a);
+void lx_array_clear(LxArray a);
+void lx_array_resize(LxArray a, int length);          /* new items are 0 / "" / None */
+void lx_array_remove_at(LxArray a, int index);
+void lx_array_insert_at(LxArray a, int index);        /* an empty item, then set it */
+void lx_array_swap(LxArray a, int i, int j);
+void lx_array_reverse(LxArray a);
+void lx_array_shuffle(LxArray a);
+void lx_array_sort(LxArray a, bool descending);       /* numbers by value, text alphabetically, objects by name */
+void lx_array_copy(LxArray to, LxArray from);         /* to becomes a copy (converted to its type) */
+float lx_array_get_float(LxArray a, int i);
+int lx_array_get_int(LxArray a, int i);
+bool lx_array_get_bool(LxArray a, int i);
+const char *lx_array_get_string(LxArray a, int i);    /* any type as text */
+LxVec3 lx_array_get_vec3(LxArray a, int i);
+LxVec4 lx_array_get_color(LxArray a, int i);
+LxEntity lx_array_get_object(LxArray a, int i);
+void lx_array_set_float(LxArray a, int i, float v);
+void lx_array_set_int(LxArray a, int i, int v);
+void lx_array_set_bool(LxArray a, int i, bool v);
+void lx_array_set_string(LxArray a, int i, const char *v);
+void lx_array_set_vec3(LxArray a, int i, LxVec3 v);
+void lx_array_set_color(LxArray a, int i, LxVec4 v);
+void lx_array_set_object(LxArray a, int i, LxEntity v);
+int lx_array_add_float(LxArray a, float v);           /* the add functions return the new item's index */
+int lx_array_add_int(LxArray a, int v);
+int lx_array_add_bool(LxArray a, bool v);
+int lx_array_add_string(LxArray a, const char *v);
+int lx_array_add_vec3(LxArray a, LxVec3 v);
+int lx_array_add_color(LxArray a, LxVec4 v);
+int lx_array_add_object(LxArray a, LxEntity v);
+int lx_array_find_float(LxArray a, float v);          /* the first index holding it, or -1 */
+int lx_array_find_string(LxArray a, const char *v);
+int lx_array_find_object(LxArray a, LxEntity v);
+/* the arrays State Graphs use */
+LxArray lx_fsm_get_var_array(LxScene *s, LxEntity e, int slot, const char *var);
+LxArray lx_fsm_global_array(const char *name);
 
 /* ===================================================================
  *  Models (FBX), skinned meshes, animation and humanoid avatars
@@ -1161,6 +1221,16 @@ LxVec2 lx_ui_pointer(void);                     /* mouse / first touch, in canva
 bool lx_ui_pointer_over(void);                  /* over a button: don't treat the click as gameplay */
 /* project a world position (e.g. above an enemy's head) to canvas units with the scene's main camera */
 bool lx_ui_world_to_canvas(LxScene *s, LxVec3 world, LxVec2 *out);
+/* Overlays: shown for a while without being drawn every frame, and kept through scene changes.
+   toast: a message near the bottom ("Checkpoint reached"); popup text: rises and fades from a world point
+   (damage numbers, "+50"); objective: a line at the top left until changed ("" hides it); flash: the whole
+   screen in a colour, fading out (hits, fades between scenes). */
+void lx_ui_toast(const char *text, float seconds);
+void lx_ui_popup_text(LxScene *s, LxVec3 world, const char *text, uint32_t color, float size, float seconds);
+void lx_ui_set_objective(const char *text);
+const char *lx_ui_objective(void);
+void lx_ui_flash(LxVec4 color, float seconds);
+void lx_ui_overlays_clear(void);
 LxVec2 lx_ui_screen_to_canvas(LxVec2 window_pixels);   /* a touch or mouse position in canvas units */
 /* the ray from the main camera through a canvas point (Mouse Pick, tapping objects) */
 bool lx_ui_canvas_ray(LxScene *s, LxVec2 canvas, LxVec3 *origin, LxVec3 *dir);

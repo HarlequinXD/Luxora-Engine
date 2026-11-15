@@ -754,6 +754,7 @@ void ed_pause(void) {
 void ed_stop(void) {
     if (ED.play == ED_EDIT) return;
     lx_input_set_platform_preview(-1);
+    lx_ui_overlays_clear();
     lx_audio_stop_all();
     lx_scene_stop_simulation(ED.scene);
     char *sel = selected_name();

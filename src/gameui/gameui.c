@@ -59,6 +59,21 @@ static struct {
     int ntex;
 } G;
 
+/* overlays: messages, floating text, the objective line and screen flashes that outlive the call that made
+ * them (and a scene change), drawn by lx_game_ui_geometry */
+#define MAX_TOASTS 6
+#define MAX_POPUPS 48
+typedef struct Popup { char text[48]; LxVec2 at; uint32_t color; float size; double start; float seconds; } Popup;
+static struct {
+    struct { char text[160]; double start; float seconds; } toast[MAX_TOASTS];
+    int ntoast;
+    Popup popup[MAX_POPUPS];
+    int npopup;
+    char objective[160];
+    struct { LxVec4 color; double start; float seconds; } flash;
+    bool drawn;
+} OV;
+
 /* ---------------- atlas ---------------- */
 static uint32_t be32(const unsigned char *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 
@@ -411,6 +426,91 @@ bool lx_ui_canvas_ray(LxScene *s, LxVec2 canvas, LxVec3 *origin, LxVec3 *dir) {
     return true;
 }
 
+/* ---------------- overlays ---------------- */
+void lx_ui_toast(const char *text, float seconds) {
+    if (!text || !text[0]) return;
+    if (OV.ntoast == MAX_TOASTS) { memmove(&OV.toast[0], &OV.toast[1], sizeof OV.toast[0] * (MAX_TOASTS - 1)); OV.ntoast--; }
+    lx_strcpy(OV.toast[OV.ntoast].text, sizeof OV.toast[0].text, text);
+    OV.toast[OV.ntoast].start = lx_time();
+    OV.toast[OV.ntoast].seconds = seconds > 0 ? seconds : 2.5f;
+    OV.ntoast++;
+}
+void lx_ui_popup_text(LxScene *s, LxVec3 world, const char *text, uint32_t color, float size, float seconds) {
+    if (!text || !text[0]) return;
+    LxVec2 at;
+    if (!lx_ui_world_to_canvas(s, world, &at)) return;   /* behind the camera */
+    if (OV.npopup == MAX_POPUPS) { memmove(&OV.popup[0], &OV.popup[1], sizeof OV.popup[0] * (MAX_POPUPS - 1)); OV.npopup--; }
+    Popup *p = &OV.popup[OV.npopup++];
+    lx_strcpy(p->text, sizeof p->text, text);
+    p->at = at;
+    p->color = color;
+    p->size = size > 0 ? size : 40;
+    p->start = lx_time();
+    p->seconds = seconds > 0 ? seconds : 1.0f;
+}
+void lx_ui_set_objective(const char *text) { lx_strcpy(OV.objective, sizeof OV.objective, text ? text : ""); }
+const char *lx_ui_objective(void) { return OV.objective; }
+void lx_ui_flash(LxVec4 color, float seconds) {
+    OV.flash.color = color;
+    OV.flash.start = lx_time();
+    OV.flash.seconds = seconds > 0 ? seconds : 0.3f;
+}
+void lx_ui_overlays_clear(void) { memset(&OV, 0, sizeof OV); }
+
+static uint32_t with_alpha(uint32_t c, float a) { return (c & 0x00ffffffu) | ((uint32_t)(((c >> 24) & 255) * lx_clampf(a, 0, 1)) << 24); }
+static void draw_overlays(void) {
+    double now = lx_time();
+    LxUiAnchor anchor = G.anchor;
+    LxUiFont font = G.font;
+    G.anchor = LX_ANCHOR_TOP_LEFT;
+    LxVec2 cs = lx_ui_canvas_size();
+    /* floating text rises and fades */
+    int keep = 0;
+    for (int i = 0; i < OV.npopup; i++) {
+        float age = (float)(now - OV.popup[i].start), k = age / OV.popup[i].seconds;
+        if (k >= 1 || age < 0) continue;
+        OV.popup[keep++] = OV.popup[i];
+        float y = OV.popup[i].at.y - 70 * k, size = OV.popup[i].size * (k < 0.15f ? 0.7f + 2 * k : 1);
+        G.font = LX_FONT_BOLD;
+        float w = lx_ui_text_width(size, OV.popup[i].text);
+        lx_ui_text(OV.popup[i].at.x - w * 0.5f + 2, y + 2, size, with_alpha(0xff000000u, (1 - k) * 0.6f), "%s", OV.popup[i].text);
+        lx_ui_text(OV.popup[i].at.x - w * 0.5f, y, size, with_alpha(OV.popup[i].color, k > 0.6f ? (1 - k) / 0.4f : 1), "%s", OV.popup[i].text);
+    }
+    OV.npopup = keep;
+    /* the objective, top left */
+    if (OV.objective[0]) {
+        G.font = LX_FONT_BOLD;
+        float w = lx_ui_text_width(32, OV.objective);
+        lx_ui_rect(30, 30, w + 48, 56, LX_RGBA(0, 0, 0, 140), 10);
+        lx_ui_rect(30, 30, 6, 56, LX_RGBA(255, 200, 80, 255), 3);
+        lx_ui_text(54, 42, 32, LX_RGBA(255, 240, 210, 255), "%s", OV.objective);
+    }
+    /* messages, stacked above the bottom */
+    keep = 0;
+    for (int i = 0; i < OV.ntoast; i++) if (now - OV.toast[i].start < OV.toast[i].seconds) OV.toast[keep++] = OV.toast[i];
+    OV.ntoast = keep;
+    for (int i = 0; i < OV.ntoast; i++) {
+        float age = (float)(now - OV.toast[i].start), left = OV.toast[i].seconds - age;
+        float a = lx_clampf(lx_minf(age * 6, left * 2), 0, 1);
+        G.font = LX_FONT_BOLD;
+        float w = lx_ui_text_width(34, OV.toast[i].text), y = cs.y * 0.80f - (float)(OV.ntoast - 1 - i) * 66;
+        lx_ui_rect(cs.x * 0.5f - w * 0.5f - 28, y - 12, w + 56, 58, with_alpha(LX_RGBA(10, 10, 14, 190), a), 29);
+        lx_ui_text(cs.x * 0.5f - w * 0.5f, y, 34, with_alpha(LX_RGBA(255, 255, 255, 255), a), "%s", OV.toast[i].text);
+    }
+    /* a screen flash, fading */
+    if (OV.flash.seconds > 0) {
+        float k = (float)(now - OV.flash.start) / OV.flash.seconds;
+        if (k < 1 && k >= 0) {
+            LxVec4 c = OV.flash.color;
+            uint32_t col = LX_RGBA((int)(lx_clampf(c.x, 0, 1) * 255), (int)(lx_clampf(c.y, 0, 1) * 255), (int)(lx_clampf(c.z, 0, 1) * 255),
+                                   (int)(lx_clampf(c.w, 0, 1) * (1 - k) * 255));
+            lx_ui_rect(0, 0, cs.x, cs.y, col, 0);
+        } else OV.flash.seconds = 0;
+    }
+    G.anchor = anchor;
+    G.font = font;
+}
+
 /* ---------------- host side ---------------- */
 void lx_game_ui_begin_frame(float vx, float vy, float vw, float vh, bool clear) {
     G.vx = vx;
@@ -425,6 +525,7 @@ void lx_game_ui_begin_frame(float vx, float vy, float vw, float vh, bool clear) 
     G.vc = G.ic = G.cc = 0;
     G.cursor_drawn = false;
     G.touch_drawn = false;
+    OV.drawn = false;
     G.anchor = LX_ANCHOR_TOP_LEFT;
     G.font = LX_FONT_REGULAR;
     G.over_button_prev = G.over_button;
@@ -441,8 +542,10 @@ void lx_game_ui_begin_frame(float vx, float vy, float vw, float vh, bool clear) 
     G.pointer = lx_v2((p.x - vx) / G.scale, (p.y - vy) / G.scale);
 }
 
+static void draw_overlays(void);
 void lx_game_ui_geometry(LxGameUiGeometry *out) {
     memset(out, 0, sizeof *out);
+    if (!OV.drawn && ready()) { OV.drawn = true; draw_overlays(); }
     if (!G.touch_drawn && ready()) {   /* on-screen touch controls, over the game's own UI */
         G.touch_drawn = true;
         LxUiAnchor a = G.anchor;
