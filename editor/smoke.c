@@ -1168,6 +1168,17 @@ static void s_bake_setup(void) {
     lx_entity_set_euler(s, sun, lx_v3(-40, 30, 0));
     lx_scene_update_transforms(s);
     g_bake_sun = lx_norm3(lx_mat4_dir(lx_entity_world_matrix(s, sun), lx_v3(0, 0, -1)));
+    /* a Baked Lighting Volume, and two moving balls in it: one in the box's baked shadow, one in the open */
+    LxEntity vol = lx_entity_create(s, "Volume");
+    lx_add_bake_volume(s, vol);
+    ed_bake_volume_fit(vol);
+    lx_get_bake_volume(s, vol)->density = 2;
+    LxVec3 hd = lx_norm3(lx_v3(g_bake_sun.x, 0, g_bake_sun.z));
+    for (int k = 0; k < 2; k++) {
+        LxEntity ball = lx_spawn_primitive(s, LX_PRIM_SPHERE, k ? "Ball Open" : "Ball Shade", lx_add3(lx_scale3(hd, k ? -2.2f : 2.2f), lx_v3(0, 0.3f, 0)));
+        lx_entity_set_scale(s, ball, lx_v3(0.5f, 0.5f, 0.5f));
+        lx_get_mesh(s, ball)->static_geometry = false;   /* moves: lit by the volume, not lightmapped */
+    }
     LxBakeSettings *bk = lx_scene_bake_settings(s);
     bk->texels_per_unit = 4;
     bk->samples = 24;
@@ -1190,12 +1201,15 @@ static void s_bake_compare(void) {
         return;
     }
     double t0 = lx_time();
-    for (int k = 0; k < g->set.samples; k++) lx_renderer_lightmap_trace(g, 0, g->texel_count, (uint32_t)k);
+    for (int k = 0; k < g->set.samples; k++) {   /* texels, then the volume's voxels (one kind per dispatch) */
+        lx_renderer_lightmap_trace(g, 0, g->texel_count, (uint32_t)k);
+        if (g->voxel_count) lx_renderer_lightmap_trace(g, g->texel_count, g->voxel_count, (uint32_t)k);
+    }
     SMOKE_CHECK(lx_renderer_lightmap_end(g, true), "the GPU bake reads back");
     double gpu_ms = (lx_time() - t0) * 1000.0;
     LxLightmapBake *c = lx_lightmap_prepare(s);
     t0 = lx_time();
-    for (int k = 0; k < c->set.samples; k++) lx_lightmap_trace_cpu(c, 0, c->texel_count, (uint32_t)k);
+    for (int k = 0; k < c->set.samples; k++) lx_lightmap_trace_cpu(c, 0, c->texel_count + c->voxel_count, (uint32_t)k);
     double cpu_ms = (lx_time() - t0) * 1000.0;
     /* the same light in total, in the same places (4x4 texel blocks) */
     int A = g->atlas_size, bw = (A + 3) / 4, nb = bw * bw * g->atlas_count;
@@ -1214,6 +1228,14 @@ static void s_bake_compare(void) {
     SMOKE_CHECK(gs == cs && gs > 0, "both traced every texel the same number of times (%.0f vs %.0f)", gs, cs);
     SMOKE_CHECK(ct > 0 && fabs(gt - ct) < ct * 0.03, "the GPU bake carries the same light as the CPU's (%.5g vs %.5g)", gt, ct);
     SMOKE_CHECK(corr > 0.97, "and puts it in the same places (correlation %.4f over %d blocks)", corr, nb);
+    /* the volume: same light (SH L0 green) and same shadowmask-free samples */
+    double gv = 0, cv = 0, gvs = 0, cvs = 0;
+    for (int i = 0; i < g->voxel_count; i++) {
+        gv += g->vox_acc[(size_t)i * 20 + 4]; cv += c->vox_acc[(size_t)i * 20 + 4];
+        gvs += g->vox_acc[(size_t)i * 20 + 12]; cvs += c->vox_acc[(size_t)i * 20 + 12];
+    }
+    SMOKE_CHECK(g->voxel_count > 0 && gvs == cvs && gvs > 0, "the volume's voxels were traced on both (%d voxels)", g->voxel_count);
+    SMOKE_CHECK(cv > 0 && fabs(gv - cv) < cv * 0.03, "the GPU volume carries the same light as the CPU's (%.5g vs %.5g)", gv, cv);
     lx_free(gb);
     lx_free(cb);
     lx_lightmap_bake_free(g);
@@ -1229,6 +1251,10 @@ static void s_bake_apply(void) {
     SMOKE_CHECK(lx_file_exists(path), "the lightmap file is saved (%s)", path);
     LxEntityData *d = lx_entity_data(s, lx_entity_find(s, "Floor"));
     SMOKE_CHECK(d && d->lm_index == 0, "the floor knows its lightmap tile");
+    LxEntityData *vd = lx_entity_data(s, lx_entity_find(s, "Volume"));
+    snprintf(rel, sizeof rel, "%s/vol0.lxlv", s->lightmap_ref);
+    lx_asset_path(path, sizeof path, rel);
+    SMOKE_CHECK(vd && vd->vol_index == 0 && s->volume_count == 1 && lx_file_exists(path), "the volume is baked and saved (%s)", path);
 }
 static void s_bake_shot(void) { sg_shot("baked.ppm"); }
 static void s_bake_check(void) {
@@ -1250,6 +1276,15 @@ static void s_bake_check(void) {
     if (ed_viewport_to_screen(open, &a)) lit = ls_lum(px, w, h, a.x * k, a.y * k);
     if (ed_viewport_to_screen(in_shadow, &b)) dark = ls_lum(px, w, h, b.x * k, b.y * k);
     SMOKE_CHECK(lit > 30 && dark < lit * 0.6f, "the baked shadow shows on the floor (open %.0f, in the shadow %.0f)", lit, dark);
+    /* the moving balls: lit only by the volume (the sun is Baked), so the one in the box's shadow is darker */
+    float ball[2] = {0, 0};
+    for (int j = 0; j < 2; j++) {
+        LxEntity e = lx_entity_find(ED.scene, j ? "Ball Open" : "Ball Shade");
+        LxVec2 sp;
+        if (e && ed_viewport_to_screen(lx_add3(lx_entity_world_position(ED.scene, e), lx_v3(0, 0.25f, 0)), &sp)) ball[j] = ls_lum(px, w, h, sp.x * k, sp.y * k);
+    }
+    SMOKE_CHECK(ball[1] > 30 && ball[0] < ball[1] * 0.7f, "a moving ball in the volume gets the box's baked shadow (open %.0f, in the shadow %.0f)", ball[1],
+                ball[0]);
     lx_free(px);
     lx_graphics_settings()->gi_enabled = true;
 }

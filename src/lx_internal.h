@@ -305,6 +305,7 @@ typedef struct LxEntityData {
     LxBehaviourRef behaviour;
     LxCrowdComponent crowd;
     LxReflectionProbe probe;
+    LxBakeVolume bvol;
     LxCollider collider;
     LxRigidbody body;
     LxCharacterController character;
@@ -323,6 +324,7 @@ typedef struct LxEntityData {
     bool pending_destroy;     /* destroyed during the frame: removed when the frame ends */
     int16_t lm_index;         /* baked lighting: lightmap atlas, -1 = none */
     float lm_st[3];           /* its tile in the atlas: size, x, y (0..1) */
+    int16_t vol_index;        /* Baked Lighting Volume: its baked probes (vol<i>.lxlv), -1 = not baked */
 } LxEntityData;
 
 struct LxScene {
@@ -346,6 +348,7 @@ struct LxScene {
     LxBakeSettings bake;             /* baked lighting */
     char lightmap_ref[LX_REF_MAX];   /* folder of the baked lightmaps (lm0.lxlm ...), "" = none */
     int lightmap_count;
+    int volume_count;                /* baked volumes in the same folder (vol0.lxlv ...) */
     uint32_t lightmap_version;       /* runtime: changes when lightmaps are baked or cleared */
 };
 
@@ -451,7 +454,12 @@ typedef struct LxLmLight {
     LxVec3 color, pos, dir;   /* colour * intensity; dir = where the light points */
     float range, cos_outer;   /* spot cone */
     float radius, cos_size;   /* soft shadows: point/spot sphere radius; directional cos(half its angle) */
+    int entity;
+    int mask_channel;         /* Mixed lights: shadowmask channel in Baked Lighting Volumes (0..3), -1 none */
 } LxLmLight;
+#define LX_VOLUME_MAX_RES 64
+#define LX_MAX_BAKE_VOLUMES 8
+typedef struct LxLmVolume { int entity; int n[3]; int first; } LxLmVolume;
 typedef struct LxLmTile { int entity, atlas, x, y, size; } LxLmTile;
 typedef struct LxLightmapBake {
     LxBakeSettings set;
@@ -469,6 +477,13 @@ typedef struct LxLightmapBake {
     int *owner;               /* tile of each texel, -1 = none */
     float *accum;             /* 8 per texel: irradiance sum rgb, samples; direction sum xyz, back-face hits */
     float *color, *dir;       /* resolved: RGBA per texel */
+    /* Baked Lighting Volumes: 3D textures of light, traced after the texels (work items texel_count + voxel) */
+    LxLmVolume *vols;
+    int vol_count, vol_cap;
+    int voxel_count;
+    float *vox_pos;           /* 4 per voxel: position, 1 */
+    float *vox_acc;           /* 20 per voxel: SH red / green / blue (L0, y, z, x), samples, back-face hits, -, -, shadowmask 0..3 */
+    float *vox_out;           /* resolved: 16 per voxel: SH red / green / blue, shadowmask */
 } LxLightmapBake;
 LxLightmapBake *lx_lightmap_prepare(LxScene *s);
 void lx_lightmap_trace_cpu(LxLightmapBake *b, int first, int count, uint32_t sample);
@@ -476,6 +491,10 @@ void lx_lightmap_resolve(LxLightmapBake *b);
 bool lx_lightmap_apply(LxLightmapBake *b, LxScene *s, const char *dir_ref);
 void lx_lightmap_bake_free(LxLightmapBake *b);
 bool lx_lightmap_write(const char *path, int size, const float *color, const float *dir);
+/* a volume's 3D textures: <dir>/vol<i>.lxlv = magic, version, nx, ny, nz, then 4 layers of RGBA half floats
+ * (SH red, green, blue, shadowmask), each nz * ny * nx */
+bool lx_volume_write(const char *path, const int n[3], const float *voxels16);
+uint16_t *lx_volume_read(const char *path, int n[3]);
 uint16_t *lx_lightmap_read(const char *path, int *size);   /* 2 layers of RGBA half floats */
 float lx_lightmap_half(uint16_t h);
 uint32_t lx_lightmap_epoch(void);

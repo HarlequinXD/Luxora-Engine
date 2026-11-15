@@ -990,7 +990,7 @@ static LxVec3 lm_probe(const LxLightmapBake *b, LxScene *s, LxEntity e, LxVec3 p
 static LxLightmapBake *lm_bake_cpu(LxScene *s) {
     LxLightmapBake *b = lx_lightmap_prepare(s);
     if (!b) return NULL;
-    for (int k = 0; k < b->set.samples; k++) lx_lightmap_trace_cpu(b, 0, b->texel_count, (uint32_t)k);
+    for (int k = 0; k < b->set.samples; k++) lx_lightmap_trace_cpu(b, 0, b->texel_count + b->voxel_count, (uint32_t)k);
     lx_lightmap_resolve(b);
     return b;
 }
@@ -1122,6 +1122,112 @@ static void test_lightmapper(void) {
     CHECK(c->lightmap_count == 1 && !strcmp(c->lightmap_ref, "Lightmaps/Bake"), "lightmap folder saved");
     CHECK(lx_get_light(c, cs)->mode == LX_LIGHT_BAKED && lx_get_light(c, cs)->shadow_radius == 0.4f, "light mode saved");
     CHECK(c->bake.samples == 256 && c->bake.texels_per_unit == 2, "bake settings saved");
+    lx_scene_destroy(c);
+    lx_scene_destroy(s);
+}
+
+/* ---------- Baked Lighting Volumes ---------- */
+/* the resolved voxel of a volume nearest to p */
+static const float *vox_near(const LxLightmapBake *b, int vol, LxVec3 p) {
+    const LxLmVolume *v = &b->vols[vol];
+    float best = 1e30f;
+    const float *out = NULL;
+    for (int i = 0; i < v->n[0] * v->n[1] * v->n[2]; i++) {
+        const float *q = &b->vox_pos[(size_t)(v->first + i) * 4];
+        float d = lx_len3(lx_sub3(lx_v3(q[0], q[1], q[2]), p));
+        if (d < best) { best = d; out = &b->vox_out[(size_t)(v->first + i) * 16]; }
+    }
+    return out;
+}
+static float vox_light(const float *vx, LxVec3 n) { return vx ? lx_gi_eval_l1(vx + 4, n) : -1; }   /* green channel */
+
+static void test_bake_volumes(void) {
+    printf("baked lighting volumes\n");
+    LxScene *s = lx_scene_create("Volumes");
+    s->bake.samples = 96;
+    s->bake.bounces = 0;
+    s->env.ambient_intensity = 0;
+    LxEntity floor = lx_spawn_primitive(s, LX_PRIM_CUBE, "Floor", lx_v3(0, -0.5f, 0));
+    lx_entity_set_scale(s, floor, lx_v3(20, 1, 20));
+    LxEntity roof = lx_spawn_primitive(s, LX_PRIM_CUBE, "Roof", lx_v3(-5, 4, 0));   /* covers x < 0 */
+    lx_entity_set_scale(s, roof, lx_v3(10, 0.4f, 20));
+    LxEntity sun = lx_entity_create(s, "Sun");
+    LxLight *L = lx_add_light(s, sun, LX_LIGHT_DIRECTIONAL);
+    L->intensity = 3;
+    L->color = lx_v3(1, 1, 1);
+    L->mode = LX_LIGHT_BAKED;
+    L->shadow_radius = 0;
+    lx_entity_set_euler(s, sun, lx_v3(-90, 0, 0));
+    LxEntity ve = lx_entity_create(s, "Volume");
+    LxBakeVolume *bv = lx_add_bake_volume(s, ve);
+    bv->size = lx_v3(16, 3, 16);
+    bv->density = 1;
+    lx_entity_set_position(s, ve, lx_v3(0, 1.5f, 0));
+    LxVec3 up = lx_v3(0, 1, 0), down = lx_v3(0, -1, 0);
+
+    /* a Baked sun: a character in the open gets its 3 on its top, under the roof nothing */
+    LxLightmapBake *b = lm_bake_cpu(s);
+    CHECK(b && b->vol_count == 1 && b->voxel_count == 16 * 3 * 16, "one volume of 16 x 3 x 16 voxels (%d)", b ? b->voxel_count : 0);
+    if (!b) { lx_scene_destroy(s); return; }
+    float open_up = vox_light(vox_near(b, 0, lx_v3(5, 1, 0)), up), shade_up = vox_light(vox_near(b, 0, lx_v3(-5, 1, 0)), up);
+    float open_down = vox_light(vox_near(b, 0, lx_v3(5, 1, 0)), down);
+    printf("  baked sun: open %.3f (facing down %.3f), under the roof %.3f\n", open_up, open_down, shade_up);
+    CHECK(fabsf(open_up - 3.0f) < 0.05f, "a character in the open gets the sun's 3 from above (%.3f)", open_up);
+    CHECK(open_down < 0.05f, "and none on its underside (%.3f)", open_down);
+    CHECK(shade_up < 0.05f, "under the roof: the roof's baked shadow (%.3f)", shade_up);
+    lx_lightmap_bake_free(b);
+
+    /* a Mixed sun: its light stays real time; the volume keeps where it's shadowed (shadowmask) */
+    L->mode = LX_LIGHT_MIXED;
+    b = lm_bake_cpu(s);
+    const float *vo = vox_near(b, 0, lx_v3(5, 1, 0)), *vs = vox_near(b, 0, lx_v3(-5, 1, 0));
+    CHECK(b->lights[0].mask_channel == 0, "the Mixed sun gets shadowmask channel 0");
+    CHECK(vox_light(vo, up) < 1e-4f, "its direct light isn't baked (%.4f)", vox_light(vo, up));
+    CHECK(vo && vs && vo[12] > 0.99f && vs[12] < 0.01f, "shadowmask: lit in the open (%.2f), shadowed under the roof (%.2f)", vo ? vo[12] : -1, vs ? vs[12] : -1);
+    lx_lightmap_bake_free(b);
+
+    /* sky only: brighter facing up than down, and the roof shades it */
+    L->mode = LX_LIGHT_REALTIME;
+    s->env.sky_zenith = lx_v3(1, 1, 1);
+    s->env.sky_horizon = lx_v3(1, 1, 1);
+    s->env.ambient_intensity = 0.5f;
+    b = lm_bake_cpu(s);
+    float sky_up = vox_light(vox_near(b, 0, lx_v3(6, 1, 6)), up), sky_down = vox_light(vox_near(b, 0, lx_v3(6, 1, 6)), down);
+    float roof_up = vox_light(vox_near(b, 0, lx_v3(-6, 1, 0)), up);
+    printf("  sky: open facing up %.3f (true %.3f), down %.3f; under the roof %.3f\n", sky_up, LX_PI * 0.5f, sky_down, roof_up);
+    CHECK(sky_up > LX_PI * 0.5f * 0.75f && sky_up < LX_PI * 0.5f * 1.25f, "sky light from above, part of the sky behind the roof (%.3f)", sky_up);
+    CHECK(sky_down < sky_up * 0.3f, "little from the floor below (%.3f)", sky_down);
+    CHECK(roof_up < sky_up * 0.6f, "the roof shades the sky (%.3f)", roof_up);
+    lx_lightmap_bake_free(b);
+
+    /* files and saving */
+    char path[LX_PATH_MAX];
+    snprintf(path, sizeof path, "%s/vol_test.lxlv", tmpdir());
+    int n[3] = {2, 3, 4}, rn[3];
+    float vox[24 * 16];
+    for (int i = 0; i < 24 * 16; i++) vox[i] = (float)(i % 37) * 0.1f;
+    CHECK(lx_volume_write(path, n, vox), "volume written");
+    uint16_t *h = lx_volume_read(path, rn);
+    bool same = h && rn[0] == 2 && rn[1] == 3 && rn[2] == 4;
+    for (int layer = 0; same && layer < 4; layer++)
+        for (int v = 0; same && v < 24; v++)
+            for (int k = 0; same && k < 4; k++) same = fabsf(lx_lightmap_half(h[((size_t)layer * 24 + v) * 4 + k]) - vox[v * 16 + layer * 4 + k]) < 0.01f;
+    CHECK(same, "volume read back");
+    lx_free(h);
+    lx_path_remove(path);
+    lx_entity_data(s, ve)->vol_index = 0;
+    s->volume_count = 1;
+    lx_strcpy(s->lightmap_ref, sizeof s->lightmap_ref, "Lightmaps/Volumes");
+    L->mode = LX_LIGHT_MIXED;
+    L->mask_channel = 2;
+    char *text = lx_scene_serialize(s);
+    LxScene *c = lx_scene_deserialize(text);
+    lx_free(text);
+    LxEntity cv = lx_entity_find(c, "Volume");
+    LxBakeVolume *cb = lx_get_bake_volume(c, cv);
+    CHECK(cb && cb->size.x == 16 && cb->size.y == 3 && cb->density == 1 && lx_entity_data(c, cv)->vol_index == 0, "volume saved with the scene");
+    CHECK(c->volume_count == 1 && !strcmp(c->lightmap_ref, "Lightmaps/Volumes"), "baked volumes listed");
+    CHECK(lx_get_light(c, lx_entity_find(c, "Sun"))->mask_channel == 2, "shadowmask channel saved");
     lx_scene_destroy(c);
     lx_scene_destroy(s);
 }
@@ -2148,6 +2254,7 @@ int main(void) {
     test_gi_headroom();
     test_lightmap_uvs();
     test_lightmapper();
+    test_bake_volumes();
     test_gi_sky_calibration();
     test_acoustics();
     test_crowd();

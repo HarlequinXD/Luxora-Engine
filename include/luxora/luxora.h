@@ -310,6 +310,7 @@ typedef enum LxComponentBits {
     LX_COMP_CHARACTER = 1 << 10,
     LX_COMP_ANIMATOR = 1 << 11,
     LX_COMP_STATE_GRAPH = 1 << 12,
+    LX_COMP_BAKE_VOLUME = 1 << 13,
 } LxComponentBits;
 
 typedef struct LxCamera {
@@ -336,6 +337,7 @@ typedef struct LxLight {
     bool contribute_gi;    /* emits virtual photons */
     LxLightMode mode;      /* baked lighting */
     float shadow_radius;   /* baked soft shadows: point/spot the light's radius (m), directional its size (degrees) */
+    int8_t mask_channel;   /* set by the bake: Mixed lights' shadowmask channel in lighting volumes (-1 none) */
 } LxLight;
 
 typedef struct LxMeshRenderer {
@@ -379,6 +381,14 @@ typedef struct LxReflectionProbe {
     bool box_projection;
     bool realtime;
 } LxReflectionProbe;
+
+/* Baked Lighting Volume: a box of light probes filled by the lightmap bake. Objects without lightmaps inside it -
+ * characters, anything that moves - take their bounced light and the light of Baked lights (with their baked
+ * shadows) from it, like Bakery Volumes. The box is centred on the entity; probes are spaced 1 / density apart. */
+typedef struct LxBakeVolume {
+    LxVec3 size;            /* box, local units (the entity's scale and rotation apply) */
+    float density;          /* probes per metre */
+} LxBakeVolume;
 
 /* ---- Physics components ----
  * Collider alone            = static scenery (never moves)
@@ -514,6 +524,7 @@ void lx_add_audio_listener(LxScene *s, LxEntity e);
 LxBehaviourRef *lx_add_behaviour(LxScene *s, LxEntity e, const char *behaviour_name);
 LxCrowdComponent *lx_add_crowd(LxScene *s, LxEntity e, int agents);
 LxReflectionProbe *lx_add_reflection_probe(LxScene *s, LxEntity e);
+LxBakeVolume *lx_add_bake_volume(LxScene *s, LxEntity e);
 LxCollider *lx_add_collider(LxScene *s, LxEntity e, LxColliderShape shape); /* sized to the mesh when there is one */
 LxRigidbody *lx_add_rigidbody(LxScene *s, LxEntity e);
 LxCharacterController *lx_add_character(LxScene *s, LxEntity e);
@@ -525,6 +536,7 @@ LxAudioSource *lx_get_audio_source(LxScene *s, LxEntity e);
 LxBehaviourRef *lx_get_behaviour(LxScene *s, LxEntity e);
 LxCrowdComponent *lx_get_crowd(LxScene *s, LxEntity e);
 LxReflectionProbe *lx_get_reflection_probe(LxScene *s, LxEntity e);
+LxBakeVolume *lx_get_bake_volume(LxScene *s, LxEntity e);
 LxCollider *lx_get_collider(LxScene *s, LxEntity e);
 LxRigidbody *lx_get_rigidbody(LxScene *s, LxEntity e);
 LxCharacterController *lx_get_character(LxScene *s, LxEntity e);

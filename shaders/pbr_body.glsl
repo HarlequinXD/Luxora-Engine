@@ -57,6 +57,15 @@ vec3 brdf(vec3 n, vec3 v, vec3 l, vec3 albedo, float metallic, float rough) {
     return (kd * albedo / PI + spec) * ndl;
 }
 
+// the highlight part of brdf(): baked light shines too
+vec3 brdf_spec(vec3 n, vec3 v, vec3 l, vec3 albedo, float metallic, float rough) {
+    vec3 h = normalize(v + l);
+    float ndl = max(dot(n, l), 0.0), ndv = max(dot(n, v), 1e-4), ndh = max(dot(n, h), 0.0), vdh = max(dot(v, h), 0.0);
+    float a = max(rough * rough, 0.002);
+    vec3 f0 = mix(vec3(0.04), albedo, metallic);
+    return d_ggx(ndh, a) * v_smith(ndv, ndl, a) * f_schlick(vdh, f0) * ndl;
+}
+
 float shadow_factor(vec3 world, vec3 n) {
     if (u.sun_dir.w < 0.5 || u.counts.y == 0) return 1.0;
     int cascade = u.counts.y - 1;
@@ -222,6 +231,38 @@ vec3 gi_eval(GiSH sh, vec3 n) {
     return (any(isnan(e)) || any(isinf(e))) ? vec3(0.0) : e;   // a broken GI cell must not blacken the screen
 }
 
+// Baked Lighting Volume at p (like Bakery Volumes): its light (SH) and shadowmask, filtered between voxels.
+// Returns how much the volume covers p: 0 outside, fading in over half a voxel at its faces.
+float bvol_at(vec3 p, out GiSH sh, out vec4 mask) {
+    sh = GiSH(vec4(0.0), vec4(0.0), vec4(0.0));
+    mask = vec4(1.0);
+    int count = int(u.bvol_params.x + 0.5);
+    for (int i = 0; i < count; i++) {
+        vec4 pp = vec4(p, 1.0);
+        vec3 q = vec3(dot(u.bvol_rows[i * 3], pp), dot(u.bvol_rows[i * 3 + 1], pp), dot(u.bvol_rows[i * 3 + 2], pp));
+        if (any(lessThan(q, vec3(0.0))) || any(greaterThan(q, vec3(1.0)))) continue;
+        vec4 info = u.bvol_info[i];   // z offset, nx, ny, nz
+        vec3 res = info.yzw;
+        vec3 t = q * res;
+        vec3 edge = min(t, res - t);
+        float cover = clamp(min(min(edge.x, edge.y), edge.z) * 2.0, 0.0, 1.0);
+        vec3 size = vec3(textureSize(u_bvol, 0));
+        vec3 c = clamp(t, vec3(0.5), res - 0.5);   // stay inside this volume's voxels
+        vec2 xy = c.xy / size.xy;
+        float z0 = info.x + c.z, D = u.bvol_params.y;
+        sh.r = texture(u_bvol, vec3(xy, z0 / size.z));
+        sh.g = texture(u_bvol, vec3(xy, (z0 + D) / size.z));
+        sh.b = texture(u_bvol, vec3(xy, (z0 + 2.0 * D) / size.z));
+        mask = texture(u_bvol, vec3(xy, (z0 + 3.0 * D) / size.z));
+        return cover;
+    }
+    return 0.0;
+}
+vec3 sh_irradiance(GiSH sh, vec3 n) {
+    vec3 e = vec3(gi_eval_l1(sh.r, n), gi_eval_l1(sh.g, n), gi_eval_l1(sh.b, n));
+    return (any(isnan(e)) || any(isinf(e))) ? vec3(0.0) : e;
+}
+
 vec3 env_brdf_approx(vec3 f0, float rough, float ndv) {
     const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
     const vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
@@ -338,12 +379,26 @@ void main() {
     }
     vec3 color = vec3(0.0);
     bool lightmapped = v_lm.z >= -0.5;
-    // a Baked light's light is in the lightmap already: lightmapped surfaces skip it
-    if (u.sun_color.w > 0.5 && !(lightmapped && u.sun_color.w > 1.5))
-        color += brdf(n, v, -u.sun_dir.xyz, albedo, metallic, rough) * u.sun_color.rgb * shadow_factor(v_world, ng) * self_shadow;
+    // everything else may stand in a Baked Lighting Volume: baked light and baked shadows for characters
+    GiSH vol_sh;
+    vec4 vol_mask;
+    float vol_cover = lightmapped ? 0.0 : bvol_at(v_world + ng * 0.05, vol_sh, vol_mask);
+    // a Baked light's light is in the lightmap / volume already: skip (or fade) its real-time light there
+    if (u.sun_color.w > 0.5) {
+        float w = u.sun_color.w > 1.5 ? (lightmapped ? 0.0 : 1.0 - vol_cover) : 1.0;
+        float sh = shadow_factor(v_world, ng) * self_shadow;
+        int sch = int(u.bvol_params.z + 0.5);
+        if (u.bvol_params.z > -0.5 && vol_cover > 0.0) sh = min(sh, mix(1.0, vol_mask[sch], vol_cover));   // Mixed sun: baked shadows too
+        if (w > 0.0) color += brdf(n, v, -u.sun_dir.xyz, albedo, metallic, rough) * u.sun_color.rgb * sh * w;
+    }
     for (int i = 0; i < u.counts.x; i++) {
         LxLightData L = u.lights[i];
-        if (lightmapped && L.color_type.w > 9.5) continue;
+        float code = mod(L.color_type.w, 100.0);   // type + 10 for Baked; + 100 * (shadowmask channel + 1)
+        bool baked = code > 9.5;
+        int mch = int(L.color_type.w / 100.0 + 0.001) - 1;
+        if (lightmapped && baked) continue;
+        float lw = baked ? 1.0 - vol_cover : 1.0;
+        if (lw <= 0.0) continue;
         vec3 to_l = L.pos_range.xyz - v_world;
         float d2 = max(dot(to_l, to_l), 1e-4);
         vec3 l = to_l * inversesqrt(d2);
@@ -354,8 +409,12 @@ void main() {
             float cd = dot(-l, normalize(L.dir_cos.xyz));
             att *= smoothstep(L.dir_cos.w, mix(L.dir_cos.w, 1.0, 0.25), cd);
         }
-        if (att > 0.0) att *= local_shadow(i, v_world, ng);
-        color += brdf(n, v, l, albedo, metallic, rough) * L.color_type.rgb * att;
+        if (att > 0.0) {
+            float ls = local_shadow(i, v_world, ng);
+            if (mch >= 0 && vol_cover > 0.0) ls = min(ls, mix(1.0, vol_mask[mch], vol_cover));   // baked shadows from static objects
+            att *= ls;
+        }
+        color += brdf(n, v, l, albedo, metallic, rough) * L.color_type.rgb * att * lw;
     }
     // indirect: virtual-photon GI volume (or hemisphere ambient when GI is off)
     vec3 irradiance;
@@ -377,8 +436,31 @@ void main() {
         float turn = clamp((dot(n, ldir) * 0.5 + 0.5) / max(ld.w, 0.05), 0.0, 3.0);
         irradiance = lm.rgb * turn;
         gi_cover = 0.0;
-    } else if (gi_cover > 0.0) { gi_sh = gi_gather(v_world, ng); irradiance = mix(sky_ambient, gi_eval(gi_sh, n), gi_cover); }
-    else irradiance = sky_ambient;
+        // baked light shines: the part that comes from one direction gets a highlight, rough or glossy as the material
+        float dirness = length(ldir);
+        if (dirness > 0.05) {
+            vec3 bl = ldir / dirness;
+            vec3 peak = min(lm.rgb * dirness / max(dot(ng, bl), 0.25), lm.rgb * 4.0);
+            color += brdf_spec(n, v, bl, albedo, metallic, rough) * peak * ao;
+        }
+    } else {
+        if (gi_cover > 0.0) { gi_sh = gi_gather(v_world, ng); irradiance = mix(sky_ambient, gi_eval(gi_sh, n), gi_cover); }
+        else irradiance = sky_ambient;
+        if (vol_cover > 0.0) {
+            irradiance = mix(irradiance, sh_irradiance(vol_sh, n), vol_cover);
+            // its main light direction shines too (the strongly one-sided part of the light: Baked lights, a bright opening)
+            vec3 bv = vec3(dot(vec3(vol_sh.r.w, vol_sh.g.w, vol_sh.b.w), vec3(0.2126, 0.7152, 0.0722)),
+                           dot(vec3(vol_sh.r.y, vol_sh.g.y, vol_sh.b.y), vec3(0.2126, 0.7152, 0.0722)),
+                           dot(vec3(vol_sh.r.z, vol_sh.g.z, vol_sh.b.z), vec3(0.2126, 0.7152, 0.0722)));
+            float l0 = dot(vec3(vol_sh.r.x, vol_sh.g.x, vol_sh.b.x), vec3(0.2126, 0.7152, 0.0722));
+            float lb = length(bv);
+            if (l0 > 0.0 && lb > 1e-5) {
+                vec3 bl = bv / lb;
+                float rho = clamp(lb * (2.0 * PI / 3.0) * 0.488603 / (2.0 * PI * 0.282095 * l0), 0.0, 1.0);
+                color += brdf_spec(n, v, bl, albedo, metallic, rough) * sh_irradiance(vol_sh, bl) * rho * vol_cover * ao;
+            }
+        }
+    }
     float ndv = max(dot(n, v), 1e-4);
     vec3 f0 = mix(vec3(0.04), albedo, metallic);
     vec3 spec_env = env_brdf_approx(f0, rough, ndv);
@@ -400,10 +482,12 @@ void main() {
         occl = mix(occl, 1.0, local_w * 0.7);
         occl = mix(1.0, occl, gi_cover);
     }
-    if (lightmapped) {   // baked: how much less light arrives than the open sky would give
-        float open_e = max(dot(sky_ambient, vec3(0.333)), 1e-3);
-        float ratio = clamp(dot(irradiance, vec3(0.333)) / open_e, 0.0, 1.0);
-        occl = mix(mix(0.35, 1.0, sqrt(ratio)), 1.0, local_w * 0.7);
+    if (lightmapped || vol_cover > 0.0) {   // baked: how much less light arrives than the open sky would give
+        vec3 from_r = lightmapped ? irradiance : sh_irradiance(vol_sh, r);   // a volume knows where light comes from
+        float open_e = max(dot(lightmapped ? sky_ambient : mix(u.sky_horizon.rgb, u.sky_zenith.rgb, 0.5) * ambient * PI * clamp(0.5 + 0.5 * r.y, 0.05, 1.0), vec3(0.333)), 1e-3);
+        float ratio = clamp(dot(from_r, vec3(0.333)) / open_e, 0.0, 1.0);
+        float baked_occl = mix(mix(0.35, 1.0, sqrt(ratio)), 1.0, local_w * 0.7);
+        occl = mix(occl, baked_occl, lightmapped ? 1.0 : vol_cover);
     }
     // specular occlusion from the AO map (Lagarde & de Rousiers)
     float spec_ao = clamp(pow(ndv + ao, exp2(-16.0 * rough - 1.0)) - 1.0 + ao, 0.0, 1.0);

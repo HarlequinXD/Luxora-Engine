@@ -66,8 +66,8 @@ static float smooth01(float e0, float e1, float x) {
     return t * t * (3.0f - 2.0f * t);
 }
 
-/* the light from one light arriving at x (normal n, geometric normal ng), shadows included */
-static LxVec3 light_at(const LxLightmapBake *b, const LxLmLight *L, LxVec3 x, LxVec3 n, LxVec3 ng, uint32_t *rng) {
+/* a point on the light (soft shadows): the way to it, how far, and the light's falloff there (no cosine) */
+static void light_sample(const LxLmLight *L, LxVec3 x, uint32_t *rng, LxVec3 *dir_out, float *dist_out, float *att_out) {
     LxVec3 dir;
     float dist, att;
     if (L->type == LX_LIGHT_DIRECTIONAL) {
@@ -98,10 +98,23 @@ static LxVec3 light_at(const LxLightmapBake *b, const LxLmLight *L, LxVec3 x, Lx
             att *= smooth01(L->cos_outer, L->cos_outer + (1.0f - L->cos_outer) * 0.25f, cd);
         }
     }
+    *dir_out = dir;
+    *dist_out = dist;
+    *att_out = att;
+}
+static bool light_blocked(const LxLightmapBake *b, LxVec3 x, LxVec3 dir, float dist) {
+    LxRay ray = {x, dir};
+    return lx_bvh_occluded(&b->bvh, ray, dist < 1e29f ? dist - b->eps : 1e30f);
+}
+
+/* the light from one light arriving at x (normal n, geometric normal ng), shadows included */
+static LxVec3 light_at(const LxLightmapBake *b, const LxLmLight *L, LxVec3 x, LxVec3 n, LxVec3 ng, uint32_t *rng) {
+    LxVec3 dir;
+    float dist, att;
+    light_sample(L, x, rng, &dir, &dist, &att);
     float cs = lx_dot3(n, dir);
     if (att <= 0 || cs <= 0 || lx_dot3(ng, dir) <= 0) return lx_v3(0, 0, 0);
-    LxRay ray = {x, dir};
-    if (lx_bvh_occluded(&b->bvh, ray, dist < 1e29f ? dist - b->eps : 1e30f)) return lx_v3(0, 0, 0);
+    if (light_blocked(b, x, dir, dist)) return lx_v3(0, 0, 0);
     return lx_scale3(L->color, att * cs);
 }
 
@@ -161,13 +174,75 @@ static void trace_texel(const LxLightmapBake *b, int texel, uint32_t sample, flo
     acc[4] += D.x; acc[5] += D.y; acc[6] += D.z; acc[7] += back;
 }
 
+/* uniform direction on the sphere */
+static LxVec3 lm_sphere(uint32_t *s) {
+    float z = 1.0f - 2.0f * lm_rnd(s), r = sqrtf(lx_maxf(0.0f, 1.0f - z * z)), ph = 2.0f * LX_PI * lm_rnd(s);
+    return lx_v3(r * cosf(ph), r * sinf(ph), z);
+}
+/* adds light from direction d into L1 SH (L0, y, z, x per channel), as the photon GI stores it */
+static void sh_add(float *sh, LxVec3 d, LxVec3 c) {
+    float y[4] = {0.282095f, 0.488603f * d.y, 0.488603f * d.z, 0.488603f * d.x};
+    for (int k = 0; k < 4; k++) { sh[k] += c.x * y[k]; sh[4 + k] += c.y * y[k]; sh[8 + k] += c.z * y[k]; }
+}
+
+/* one sample of the light at a volume voxel (a point in the air, every direction): adds to acc[0..19]
+ * (SH red, green, blue; samples; back-face hits; -; -; shadowmask channels 0..3) */
+static void trace_voxel(const LxLightmapBake *b, int vox, uint32_t sample, float *acc) {
+    const float *vp = &b->vox_pos[(size_t)vox * 4];
+    LxVec3 x = lx_v3(vp[0], vp[1], vp[2]);
+    uint32_t rng = lm_hash((uint32_t)vox * 7919u + 0x51ed27u + lm_hash(sample + 0x9e3779b9u));
+    float sh[12] = {0};
+    /* Baked lights: arriving from their direction (a character standing here faces them however it turns) */
+    for (int i = 0; i < b->light_count; i++) {
+        const LxLmLight *L = &b->lights[i];
+        LxVec3 dir;
+        float dist, att;
+        light_sample(L, x, &rng, &dir, &dist, &att);
+        bool lit = att > 0 && !light_blocked(b, x, dir, dist);
+        if (L->mask_channel >= 0) acc[16 + L->mask_channel] += lit || att <= 0 ? 1.0f : 0.0f;   /* Mixed: is it in shadow here? */
+        if (L->mode == LX_LIGHT_BAKED && lit) sh_add(sh, dir, lx_scale3(L->color, att));
+    }
+    /* sky and bounced light from a random direction */
+    LxVec3 d = lm_sphere(&rng), first = d, T = lx_v3(1, 1, 1), o = x, rad = lx_v3(0, 0, 0);
+    float back = 0;
+    for (int k = 0;; k++) {
+        LxHit h;
+        LxRay ray = {o, d};
+        if (!lx_bvh_intersect(&b->bvh, ray, 1e30f, &h)) { rad = lx_add3(rad, lx_mul3(T, sky_at(b, d))); break; }
+        LxVec3 hn = b->bvh.normals[h.tri];
+        if (lx_dot3(hn, d) > 0) { if (k == 0) back = 1; break; }
+        const LxTriMaterial *m = &b->bvh.materials[b->bvh.mat_index[h.tri]];
+        rad = lx_add3(rad, lx_mul3(T, lx_scale3(m->emissive, 1.0f / LX_PI)));
+        if (k >= b->bounces) break;
+        LxVec3 p = lx_add3(lx_add3(o, lx_scale3(d, h.t)), lx_scale3(hn, b->eps));
+        T = lx_mul3(T, lx_scale3(m->albedo, 1.0f / LX_PI));
+        LxVec3 eh = lx_v3(0, 0, 0);
+        for (int i = 0; i < b->light_count; i++)
+            if (b->lights[i].mode != LX_LIGHT_REALTIME) eh = lx_add3(eh, light_at(b, &b->lights[i], p, hn, hn, &rng));
+        rad = lx_add3(rad, lx_mul3(T, eh));
+        T = lx_scale3(T, LX_PI);
+        if (lum3(T) < 1e-5f) break;
+        o = p;
+        d = lm_cosine(hn, &rng);
+    }
+    sh_add(sh, first, lx_scale3(rad, 4.0f * LX_PI));   /* Monte Carlo over the sphere: / pdf (1 / 4 pi) */
+    for (int k = 0; k < 12; k++) acc[k] += sh[k];
+    acc[12] += 1.0f;
+    acc[13] += back;
+}
+
 typedef struct CpuPass { LxLightmapBake *b; int first; uint32_t sample; } CpuPass;
 static void cpu_pass_job(void *user, int begin, int end, int thread) {
     LX_UNUSED(thread);
     CpuPass *p = user;
     for (int i = begin; i < end; i++) {
         int t = p->first + i;
-        if (p->b->texels[(size_t)t * 12 + 3] > 0) trace_texel(p->b, t, p->sample, &p->b->accum[(size_t)t * 8]);
+        if (t < p->b->texel_count) {
+            if (p->b->texels[(size_t)t * 12 + 3] > 0) trace_texel(p->b, t, p->sample, &p->b->accum[(size_t)t * 8]);
+        } else {
+            int v = t - p->b->texel_count;
+            trace_voxel(p->b, v, p->sample, &p->b->vox_acc[(size_t)v * 20]);
+        }
     }
 }
 void lx_lightmap_trace_cpu(LxLightmapBake *b, int first, int count, uint32_t sample) {
@@ -257,8 +332,24 @@ LxLightmapBake *lx_lightmap_prepare(LxScene *s) {
         Tile tl = {i, size, 0, 0, 0};
         LX_VEC_PUSH(tiles, nt, tcap, tl);
     }
-    if (!nt) { lx_free(tiles); lx_free(b); return NULL; }
-    qsort(tiles, (size_t)nt, sizeof(Tile), tile_cmp);
+    /* Baked Lighting Volumes: a voxel every 1 / density metres through each box */
+    for (int i = 1; i < s->count; i++) {
+        LxEntityData *d = &s->entities[i];
+        if (!d->alive || !d->active || !(d->comps & LX_COMP_BAKE_VOLUME)) continue;
+        LxVec3 sc = lx_mat4_scale_of(&d->world), size = lx_v3(fabsf(d->bvol.size.x) * sc.x, fabsf(d->bvol.size.y) * sc.y, fabsf(d->bvol.size.z) * sc.z);
+        float dens = lx_clampf(d->bvol.density, 0.05f, 16.0f);
+        LxLmVolume v;
+        memset(&v, 0, sizeof v);
+        v.entity = i;
+        v.n[0] = (int)lx_clampf(ceilf(size.x * dens), 2, LX_VOLUME_MAX_RES);
+        v.n[1] = (int)lx_clampf(ceilf(size.y * dens), 2, LX_VOLUME_MAX_RES);
+        v.n[2] = (int)lx_clampf(ceilf(size.z * dens), 2, LX_VOLUME_MAX_RES);
+        v.first = b->voxel_count;
+        LX_VEC_PUSH(b->vols, b->vol_count, b->vol_cap, v);
+        b->voxel_count += v.n[0] * v.n[1] * v.n[2];
+    }
+    if (!nt && !b->vol_count) { lx_free(tiles); lx_free(b); return NULL; }
+    if (nt) qsort(tiles, (size_t)nt, sizeof(Tile), tile_cmp);
     /* shelves in atlases */
     int atlas = 0, x = 0, y = 0, shelf = 0, extent = 0;
     for (int k = 0; k < nt; k++) {
@@ -271,12 +362,13 @@ LxLightmapBake *lx_lightmap_prepare(LxScene *s) {
         if (x > extent) extent = x;
         if (y + t->size > extent) extent = y + t->size;
     }
-    b->atlas_count = atlas + 1;
+    b->atlas_count = nt ? atlas + 1 : 0;
     int size = 64;
     if (b->atlas_count > 1) size = amax;
     else while (size < extent) size <<= 1;
+    if (!nt) size = 0;
     b->atlas_size = size;
-    b->tiles = lx_alloc(sizeof(LxLmTile) * (size_t)nt);
+    b->tiles = lx_alloc(sizeof(LxLmTile) * (size_t)(nt ? nt : 1));
     b->tile_count = nt;
     for (int k = 0; k < nt; k++) {
         b->tiles[k].entity = tiles[k].entity;
@@ -351,6 +443,24 @@ LxLightmapBake *lx_lightmap_prepare(LxScene *s) {
     }
     lx_free(bestd);
     lx_free(tiles);
+    /* voxel centres, in the volume's box (its rotation and scale apply) */
+    b->vox_pos = lx_calloc((size_t)(b->voxel_count ? b->voxel_count : 1) * 4, sizeof(float));
+    b->vox_acc = lx_calloc((size_t)(b->voxel_count ? b->voxel_count : 1) * 20, sizeof(float));
+    for (int k = 0; k < b->vol_count; k++) {
+        const LxLmVolume *v = &b->vols[k];
+        const LxEntityData *d = &s->entities[v->entity];
+        for (int z = 0; z < v->n[2]; z++)
+            for (int y = 0; y < v->n[1]; y++)
+                for (int x2 = 0; x2 < v->n[0]; x2++) {
+                    LxVec3 local = lx_v3(((float)x2 + 0.5f) / (float)v->n[0] - 0.5f, ((float)y + 0.5f) / (float)v->n[1] - 0.5f,
+                                         ((float)z + 0.5f) / (float)v->n[2] - 0.5f);
+                    local = lx_v3(local.x * d->bvol.size.x, local.y * d->bvol.size.y, local.z * d->bvol.size.z);
+                    LxVec3 w = lx_mat4_point(d->world, local);
+                    float *o = &b->vox_pos[(size_t)(v->first + (z * v->n[1] + y) * v->n[0] + x2) * 4];
+                    o[0] = w.x; o[1] = w.y; o[2] = w.z; o[3] = 1;
+                    scene_ext = lx_maxf(scene_ext, lx_maxf(fabsf(w.x), lx_maxf(fabsf(w.y), fabsf(w.z))));
+                }
+    }
     b->eps = lx_maxf(1e-3f, scene_ext * 2e-5f);
 
     /* what the light hits: the level's static geometry */
@@ -374,6 +484,14 @@ LxLightmapBake *lx_lightmap_prepare(LxScene *s) {
         float soft = lx_maxf(0.0f, d->light.shadow_radius);
         if (L.type == LX_LIGHT_DIRECTIONAL) L.cos_size = cosf(lx_clampf(soft, 0.0f, 30.0f) * 0.5f * LX_DEG2RAD);   /* degrees across */
         else L.radius = soft;
+        L.entity = i;
+        /* Mixed lights get a shadowmask channel (4 at most): volumes remember where static objects shade them */
+        L.mask_channel = -1;
+        if (L.mode == LX_LIGHT_MIXED && b->vol_count) {
+            int used = 0;
+            for (int k = 0; k < b->light_count; k++) used += b->lights[k].mask_channel >= 0;
+            if (used < 4) L.mask_channel = used;
+        }
         LX_VEC_PUSH(b->lights, b->light_count, b->light_cap, L);
     }
     b->sky_zenith = s->env.sky_zenith;
@@ -388,6 +506,7 @@ void lx_lightmap_bake_free(LxLightmapBake *b) {
     lx_bvh_free(&b->bvh);
     lx_free(b->lights); lx_free(b->tiles); lx_free(b->texels); lx_free(b->accum); lx_free(b->owner);
     lx_free(b->color); lx_free(b->dir);
+    lx_free(b->vols); lx_free(b->vox_pos); lx_free(b->vox_acc); lx_free(b->vox_out);
     lx_free(b);
 }
 
@@ -493,6 +612,53 @@ void lx_lightmap_resolve(LxLightmapBake *b) {
         b->dir[i * 4 + 3] = lx_clampf(w, 0.0f, 1.0f);
         b->color[i * 4 + 3] = 1;
     }
+    /* volumes: average; voxels inside geometry take their neighbours' light, ring by ring */
+    lx_free(b->vox_out);
+    b->vox_out = lx_calloc((size_t)(b->voxel_count ? b->voxel_count : 1) * 16, sizeof(float));
+    uint8_t *ok = lx_calloc((size_t)(b->voxel_count ? b->voxel_count : 1), 1), *nok = lx_alloc((size_t)(b->voxel_count ? b->voxel_count : 1));
+    for (int v = 0; v < b->voxel_count; v++) {
+        const float *a = &b->vox_acc[(size_t)v * 20];
+        float *o = &b->vox_out[(size_t)v * 16];
+        for (int k = 12; k < 16; k++) o[k] = 1;   /* no shadowmask channel: lit */
+        if (a[12] <= 0) continue;
+        for (int k = 0; k < 4; k++) o[12 + k] = a[16 + k] / a[12];
+        if (a[13] / a[12] > 0.4f) continue;   /* mostly sees the back of geometry: inside a wall */
+        for (int k = 0; k < 12; k++) o[k] = a[k] / a[12];
+        ok[v] = 1;
+    }
+    for (int vi = 0; vi < b->vol_count; vi++) {
+        const LxLmVolume *vol = &b->vols[vi];
+        int nx = vol->n[0], ny = vol->n[1], nz = vol->n[2];
+        for (int pass = 0; pass < LX_VOLUME_MAX_RES; pass++) {
+            int filled = 0;
+            memcpy(nok + vol->first, ok + vol->first, (size_t)nx * ny * nz);
+            for (int z = 0; z < nz; z++)
+                for (int y = 0; y < ny; y++)
+                    for (int x = 0; x < nx; x++) {
+                        int v = vol->first + (z * ny + y) * nx + x;
+                        if (ok[v]) continue;
+                        float sum[16] = {0};
+                        int c = 0;
+                        static const int D[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+                        for (int k = 0; k < 6; k++) {
+                            int xx = x + D[k][0], yy = y + D[k][1], zz = z + D[k][2];
+                            if (xx < 0 || yy < 0 || zz < 0 || xx >= nx || yy >= ny || zz >= nz) continue;
+                            int u = vol->first + (zz * ny + yy) * nx + xx;
+                            if (!ok[u]) continue;
+                            for (int q = 0; q < 16; q++) sum[q] += b->vox_out[(size_t)u * 16 + q];
+                            c++;
+                        }
+                        if (!c) continue;
+                        for (int q = 0; q < 12; q++) b->vox_out[(size_t)v * 16 + q] = sum[q] / (float)c;   /* light; its own shadowmask stays */
+                        nok[v] = 1;
+                        filled++;
+                    }
+            memcpy(ok + vol->first, nok + vol->first, (size_t)nx * ny * nz);
+            if (!filled) break;
+        }
+    }
+    lx_free(ok);
+    lx_free(nok);
 }
 
 /* ------------------------------------------------------------------ files */
@@ -554,6 +720,39 @@ uint16_t *lx_lightmap_read(const char *path, int *size) {
 }
 float lx_lightmap_half(uint16_t h) { return lm_h2f(h); }
 
+#define VOL_FILE_MAGIC 0x564c584cu   /* "LXLV" */
+bool lx_volume_write(const char *path, const int n[3], const float *vox) {
+    size_t count = (size_t)n[0] * n[1] * n[2], bytes = 20 + count * 4 * 4 * 2;
+    uint8_t *buf = lx_alloc(bytes);
+    uint32_t hdr[5] = {VOL_FILE_MAGIC, 1, (uint32_t)n[0], (uint32_t)n[1], (uint32_t)n[2]};
+    memcpy(buf, hdr, 20);
+    uint16_t *h = (uint16_t *)(buf + 20);
+    for (int layer = 0; layer < 4; layer++)
+        for (size_t v = 0; v < count; v++)
+            for (int k = 0; k < 4; k++) h[((size_t)layer * count + v) * 4 + (size_t)k] = lm_f2h(vox[v * 16 + (size_t)layer * 4 + (size_t)k]);
+    bool ok = lx_file_write(path, buf, bytes);
+    lx_free(buf);
+    return ok;
+}
+uint16_t *lx_volume_read(const char *path, int n[3]) {
+    size_t len = 0;
+    char *data = lx_file_read(path, &len);
+    if (!data) return NULL;
+    uint32_t hdr[5] = {0};
+    if (len >= 20) memcpy(hdr, data, 20);
+    size_t count = (size_t)hdr[2] * hdr[3] * hdr[4];
+    if (hdr[0] != VOL_FILE_MAGIC || hdr[1] != 1 || !count || hdr[2] > LX_VOLUME_MAX_RES || hdr[3] > LX_VOLUME_MAX_RES || hdr[4] > LX_VOLUME_MAX_RES ||
+        len < 20 + count * 32) {
+        lx_free(data);
+        return NULL;
+    }
+    uint16_t *out = lx_alloc(count * 32);
+    memcpy(out, data + 20, count * 32);
+    lx_free(data);
+    n[0] = (int)hdr[2]; n[1] = (int)hdr[3]; n[2] = (int)hdr[4];
+    return out;
+}
+
 /* ------------------------------------------------------------------ applying a bake to the scene */
 static uint32_t g_epoch = 1;   /* bumped whenever lightmap files are written or a scene's are cleared */
 uint32_t lx_lightmap_epoch(void) { return g_epoch; }
@@ -572,7 +771,21 @@ bool lx_lightmap_apply(LxLightmapBake *b, LxScene *s, const char *dir_ref) {
             return false;
         }
     }
-    for (int i = 1; i < s->count; i++) s->entities[i].lm_index = -1;
+    for (int v = 0; v < b->vol_count && v < LX_MAX_BAKE_VOLUMES; v++) {
+        char path[LX_PATH_MAX + 32];
+        snprintf(path, sizeof path, "%s/vol%d.lxlv", dir, v);
+        if (!lx_volume_write(path, b->vols[v].n, b->vox_out + (size_t)b->vols[v].first * 16)) {
+            LX_ERROR("Couldn't write the lighting volume %s", path);
+            return false;
+        }
+    }
+    for (int i = 1; i < s->count; i++) {
+        s->entities[i].lm_index = -1;
+        s->entities[i].vol_index = -1;
+        if (s->entities[i].comps & LX_COMP_LIGHT) s->entities[i].light.mask_channel = -1;
+    }
+    for (int v = 0; v < b->vol_count && v < LX_MAX_BAKE_VOLUMES; v++) s->entities[b->vols[v].entity].vol_index = (int16_t)v;
+    for (int k = 0; k < b->light_count; k++) s->entities[b->lights[k].entity].light.mask_channel = (int8_t)b->lights[k].mask_channel;
     for (int k = 0; k < b->tile_count; k++) {
         const LxLmTile *t = &b->tiles[k];
         LxEntityData *d = &s->entities[t->entity];
@@ -583,15 +796,21 @@ bool lx_lightmap_apply(LxLightmapBake *b, LxScene *s, const char *dir_ref) {
     }
     lx_strcpy(s->lightmap_ref, sizeof s->lightmap_ref, dir_ref);
     s->lightmap_count = b->atlas_count;
+    s->volume_count = b->vol_count < LX_MAX_BAKE_VOLUMES ? b->vol_count : LX_MAX_BAKE_VOLUMES;
     s->lightmap_version++;
     g_epoch++;
     return true;
 }
 
 void lx_lightmap_clear(LxScene *s) {
-    for (int i = 1; i < s->count; i++) s->entities[i].lm_index = -1;
+    for (int i = 1; i < s->count; i++) {
+        s->entities[i].lm_index = -1;
+        s->entities[i].vol_index = -1;
+        if (s->entities[i].comps & LX_COMP_LIGHT) s->entities[i].light.mask_channel = -1;
+    }
     s->lightmap_ref[0] = 0;
     s->lightmap_count = 0;
+    s->volume_count = 0;
     s->lightmap_version++;
     g_epoch++;
 }
@@ -612,7 +831,7 @@ bool lx_lightmap_bake_begin(LxScene *s) {
     lx_lightmap_bake_cancel();
     LxLightmapBake *b = lx_lightmap_prepare(s);
     if (!b) {
-        snprintf(BK.status, sizeof BK.status, "Nothing to bake: no Static object with a mesh");
+        snprintf(BK.status, sizeof BK.status, "Nothing to bake: no Static object with a mesh and no Baked Lighting Volume");
         return false;
     }
     BK.b = b;
@@ -621,8 +840,9 @@ bool lx_lightmap_bake_begin(LxScene *s) {
     BK.next_texel = 0;
     BK.started = lx_time();
     BK.gpu = lx_renderer_lightmap_begin(b);
-    snprintf(BK.status, sizeof BK.status, "Baking %d object%s into %d lightmap%s (%d x %d) on the %s", b->tile_count, b->tile_count == 1 ? "" : "s",
-             b->atlas_count, b->atlas_count == 1 ? "" : "s", b->atlas_size, b->atlas_size, BK.gpu ? "GPU" : "CPU");
+    snprintf(BK.status, sizeof BK.status, "Baking %d object%s into %d lightmap%s (%d x %d) and %d volume%s on the %s", b->tile_count,
+             b->tile_count == 1 ? "" : "s", b->atlas_count, b->atlas_count == 1 ? "" : "s", b->atlas_size, b->atlas_size, b->vol_count,
+             b->vol_count == 1 ? "" : "s", BK.gpu ? "GPU" : "CPU");
     LX_INFO("%s", BK.status);
     return true;
 }
@@ -631,7 +851,8 @@ bool lx_lightmap_baking(void) { return BK.b != NULL; }
 float lx_lightmap_bake_progress(void) {
     if (!BK.b) return -1;
     int samples = BK.b->set.samples < 1 ? 1 : BK.b->set.samples;
-    return lx_clampf(((float)BK.sample + (float)BK.next_texel / (float)BK.b->texel_count) / (float)samples, 0.0f, 1.0f);
+    int work = BK.b->texel_count + BK.b->voxel_count;
+    return lx_clampf(((float)BK.sample + (float)BK.next_texel / (float)(work ? work : 1)) / (float)samples, 0.0f, 1.0f);
 }
 const char *lx_lightmap_bake_status(void) { return BK.status; }
 
@@ -653,13 +874,15 @@ int lx_lightmap_bake_update(LxScene *s, double budget_ms) {
     double t0 = lx_time();
     while (BK.sample < samples && (lx_time() - t0) * 1000.0 < budget_ms) {
         /* a slice of texels: whole passes when they're small, else pieces */
-        int chunk = BK.gpu ? 1 << 18 : 1 << 15;
-        int count = b->texel_count - BK.next_texel;
+        int chunk = BK.gpu ? 1 << 16 : 1 << 15;
+        int work = b->texel_count + b->voxel_count;   /* texels, then volume voxels */
+        int count = work - BK.next_texel;
         if (count > chunk) count = chunk;
+        if (BK.next_texel < b->texel_count && BK.next_texel + count > b->texel_count) count = b->texel_count - BK.next_texel;   /* one kind per slice */
         if (BK.gpu) lx_renderer_lightmap_trace(b, BK.next_texel, count, (uint32_t)BK.sample);
         else lx_lightmap_trace_cpu(b, BK.next_texel, count, (uint32_t)BK.sample);
         BK.next_texel += count;
-        if (BK.next_texel >= b->texel_count) { BK.next_texel = 0; BK.sample++; }
+        if (BK.next_texel >= work) { BK.next_texel = 0; BK.sample++; }
     }
     if (BK.sample < samples) return 1;
     if (BK.gpu && !lx_renderer_lightmap_end(b, true)) {
@@ -673,7 +896,10 @@ int lx_lightmap_bake_update(LxScene *s, double budget_ms) {
     snprintf(ref, sizeof ref, "Lightmaps/%s", s->name[0] ? s->name : "Scene");
     bool ok = lx_lightmap_apply(b, s, ref);
     double secs = lx_time() - BK.started;
-    if (ok) snprintf(BK.status, sizeof BK.status, "Baked %d object%s in %.1f s", b->tile_count, b->tile_count == 1 ? "" : "s", secs);
+    if (ok && b->vol_count)
+        snprintf(BK.status, sizeof BK.status, "Baked %d object%s and %d volume%s in %.1f s", b->tile_count, b->tile_count == 1 ? "" : "s", b->vol_count,
+                 b->vol_count == 1 ? "" : "s", secs);
+    else if (ok) snprintf(BK.status, sizeof BK.status, "Baked %d object%s in %.1f s", b->tile_count, b->tile_count == 1 ? "" : "s", secs);
     else snprintf(BK.status, sizeof BK.status, "Bake failed: couldn't save the lightmaps");
     LX_INFO("%s", BK.status);
     lx_lightmap_bake_free(b);

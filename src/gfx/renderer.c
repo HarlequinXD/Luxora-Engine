@@ -91,6 +91,9 @@ typedef struct SceneUBO {
     float light_shadow[MAX_LIGHTS][8];   /* (first tile or -1, near, far, tan half-angle), (up xyz, tile resolution) */
     float gi_casc[LX_GI_CASCADES][4];    /* camera GI grids: first cell's corner, cell size (0 = off) */
     int32_t gi_casc_res[4];
+    float bvol_rows[LX_MAX_BAKE_VOLUMES][3][4];   /* Baked Lighting Volumes: world -> 0..1 box (3 rows of an affine map) */
+    float bvol_info[LX_MAX_BAKE_VOLUMES][4];      /* z offset, nx, ny, nz (texels) */
+    float bvol_params[4];                         /* volumes in use, one layer's depth, the sun's shadowmask channel (-1 none) */
 } SceneUBO;
 _Static_assert(sizeof(SceneUBO) <= 4096, "SceneUBO must fit its 4 KB slot");
 
@@ -220,9 +223,14 @@ static struct {
     VkPipelineLayout lm_pl;
     VkPipeline lm_pipe;
     VkDescriptorSet lm_set;
-    GpuBuffer lm_buf[6];                 /* BVH nodes, triangles, materials, lights, texels, sums */
+    GpuBuffer lm_buf[8];                 /* BVH nodes, triangles, materials, lights, texels, sums, voxels, voxel sums */
     bool lm_baking;
     bool preview;                        /* drawing an asset thumbnail: the scene-wide work belongs to the real views */
+    /* Baked Lighting Volumes: one 3D texture, volumes stacked along z, then that block again per layer
+     * (SH red, green, blue, shadowmask) */
+    GpuImage bvol;
+    int bvol_count, bvol_depth;          /* volumes loaded; their summed depth (one layer) */
+    int bvol_info[LX_MAX_BAKE_VOLUMES][4];   /* z offset, nx, ny, nz */
 } R;
 
 /* ------------------------------------------------------------------ helpers */
@@ -1011,6 +1019,7 @@ static void write_scene_sets(void) {
         for (int c = 0; c < 3; c++) write_image(s, (uint32_t)(8 + c), R.gc[c].view, R.point_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         for (int c = 0; c < 2; c++) write_image(s, (uint32_t)(11 + c), R.gc_vis[c].view, R.point_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         write_image(s, 13, R.lightmap.view, R.linear_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        write_image(s, 14, R.bvol.view, R.linear_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
 }
 
@@ -1308,11 +1317,77 @@ static void lightmap_upload(const uint16_t *data, int size, int atlases) {
     R.lm_count = data ? atlases : 0;
 }
 
+/* the volumes' 3D texture: w x h x (4 * depth) half-float RGBA; NULL = a 1-texel placeholder */
+static void bvol_upload(const uint16_t *data, int w, int h, int depth) {
+    image_destroy(&R.bvol);
+    int d4 = depth * 4;
+    ImageDesc d = {(uint32_t)w, (uint32_t)h, (uint32_t)d4, 1, 1, VK_FORMAT_R16G16B16A16_SFLOAT,
+                   VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_3D, false, 0};
+    image_create(&R.bvol, &d);
+    size_t bytes = (size_t)w * h * d4 * 8;
+    GpuBuffer st;
+    buffer_create(&st, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true);
+    if (data) memcpy(st.mapped, data, bytes);
+    else memset(st.mapped, 0, bytes);
+    VkCommandBuffer cmd = one_shot_begin();
+    image_barrier(cmd, R.bvol.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, 0, 1, 1);
+    VkBufferImageCopy region = {0};
+    region.imageSubresource = (VkImageSubresourceLayers){VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = (VkExtent3D){(uint32_t)w, (uint32_t)h, (uint32_t)d4};
+    vkCmdCopyBufferToImage(cmd, st.buf, R.bvol.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    image_barrier(cmd, R.bvol.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                  VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, 0, 1, 1);
+    one_shot_end(cmd);
+    buffer_destroy(&st);
+    R.bvol_depth = depth;
+}
+
+/* the scene's volume files (vol0.lxlv ...) packed into one 3D texture */
+static void volumes_load(const LxScene *s) {
+    uint16_t *one[LX_MAX_BAKE_VOLUMES] = {0};
+    int n[LX_MAX_BAKE_VOLUMES][3], count = s->volume_count < LX_MAX_BAKE_VOLUMES ? s->volume_count : LX_MAX_BAKE_VOLUMES;
+    int W = 1, H = 1, D = 0;
+    R.bvol_count = 0;
+    for (int v = 0; v < count; v++) {
+        char rel[LX_REF_MAX + 32], path[LX_PATH_MAX];
+        snprintf(rel, sizeof rel, "%s/vol%d.lxlv", s->lightmap_ref, v);
+        lx_asset_path(path, sizeof path, rel);
+        one[v] = lx_volume_read(path, n[v]);
+        if (!one[v]) { LX_WARN("Lighting volume missing or broken: %s (bake again)", path); count = v; break; }
+        if (n[v][0] > W) W = n[v][0];
+        if (n[v][1] > H) H = n[v][1];
+        R.bvol_info[v][0] = D;
+        R.bvol_info[v][1] = n[v][0]; R.bvol_info[v][2] = n[v][1]; R.bvol_info[v][3] = n[v][2];
+        D += n[v][2];
+    }
+    if (!count) { bvol_upload(NULL, 1, 1, 1); for (int v = 0; v < count || v < LX_MAX_BAKE_VOLUMES; v++) lx_free(one[v]); return; }
+    uint16_t *all = lx_calloc((size_t)W * H * D * 4 * 4, sizeof(uint16_t));
+    for (int v = 0; v < count; v++) {
+        size_t vc = (size_t)n[v][0] * n[v][1] * n[v][2];
+        for (int layer = 0; layer < 4; layer++)
+            for (int z = 0; z < n[v][2]; z++)
+                for (int y = 0; y < n[v][1]; y++)
+                    for (int x = 0; x < n[v][0]; x++) {
+                        size_t src = ((size_t)layer * vc + ((size_t)z * n[v][1] + y) * n[v][0] + x) * 4;
+                        size_t dz = (size_t)layer * D + (size_t)R.bvol_info[v][0] + (size_t)z;
+                        size_t dst = ((dz * H + (size_t)y) * W + (size_t)x) * 4;
+                        memcpy(all + dst, one[v] + src, 8);
+                    }
+        lx_free(one[v]);
+    }
+    bvol_upload(all, W, H, D);
+    lx_free(all);
+    R.bvol_count = count;
+}
+
 /* loads the scene's lightmaps when they changed (a bake, a clear, another scene). Only before anything of this
  * frame is drawn: the scene descriptor sets get rewritten. */
 static void lightmaps_sync(LxScene *s, FrameData *fr) {
     uint32_t epoch = lx_lightmap_epoch();
-    if (!strcmp(R.lm_ref, s->lightmap_ref) && R.lm_epoch == epoch && (s->lightmap_count > 0) == (R.lm_count > 0)) return;
+    if (!strcmp(R.lm_ref, s->lightmap_ref) && R.lm_epoch == epoch && (s->lightmap_count > 0) == (R.lm_count > 0) &&
+        (s->volume_count > 0) == (R.bvol_count > 0))
+        return;
     if (fr->ubo_used) return;   /* next frame */
     vkDeviceWaitIdle(R.device);
     lx_strcpy(R.lm_ref, sizeof R.lm_ref, s->lightmap_ref);
@@ -1335,7 +1410,31 @@ static void lightmaps_sync(LxScene *s, FrameData *fr) {
     if (all) lightmap_upload(all, size, n);
     else lightmap_upload(NULL, 1, 0);
     lx_free(all);
+    volumes_load(s);
     write_scene_sets();
+}
+
+/* this frame's volume boxes: world -> 0..1 inside each baked volume */
+static void volumes_fill_ubo(LxScene *s, SceneUBO *ubo) {
+    int used = 0;
+    for (int i = 1; i < s->count && R.bvol_count; i++) {
+        const LxEntityData *d = &s->entities[i];
+        if (!d->alive || !d->active || !(d->comps & LX_COMP_BAKE_VOLUME) || d->vol_index < 0 || d->vol_index >= R.bvol_count) continue;
+        LxVec3 sz = d->bvol.size;
+        if (fabsf(sz.x) < 1e-4f || fabsf(sz.y) < 1e-4f || fabsf(sz.z) < 1e-4f) continue;
+        LxMat4 box = lx_mat4_mul(d->world, lx_mat4_trs(lx_v3(0, 0, 0), lx_quat_identity(), sz));
+        LxMat4 inv = lx_mat4_inverse(box);
+        for (int r = 0; r < 3; r++) {
+            ubo->bvol_rows[used][r][0] = inv.m[0 + r];
+            ubo->bvol_rows[used][r][1] = inv.m[4 + r];
+            ubo->bvol_rows[used][r][2] = inv.m[8 + r];
+            ubo->bvol_rows[used][r][3] = inv.m[12 + r] + 0.5f;
+        }
+        for (int k = 0; k < 4; k++) ubo->bvol_info[used][k] = (float)R.bvol_info[d->vol_index][k];
+        if (++used >= LX_MAX_BAKE_VOLUMES) break;
+    }
+    ubo->bvol_params[0] = (float)used;
+    ubo->bvol_params[1] = (float)R.bvol_depth;
 }
 
 /* the lightmap tile an object draws with (or none) */
@@ -1346,7 +1445,7 @@ static const float *entity_lightmap(const LxEntityData *d, const LxMesh *mesh, f
 }
 
 static void lm_comp_free(void) {
-    for (int i = 0; i < 6; i++) buffer_destroy(&R.lm_buf[i]);
+    for (int i = 0; i < 8; i++) buffer_destroy(&R.lm_buf[i]);
     if (R.lm_pipe) vkDestroyPipeline(R.device, R.lm_pipe, NULL);
     if (R.lm_pl) vkDestroyPipelineLayout(R.device, R.lm_pl, NULL);
     if (R.lm_comp_layout) vkDestroyDescriptorSetLayout(R.device, R.lm_comp_layout, NULL);
@@ -1357,9 +1456,9 @@ static void lm_comp_free(void) {
 
 static bool lm_comp_init(void) {
     if (R.lm_pipe) return true;
-    VkDescriptorSetLayoutBinding b[6];
-    for (uint32_t i = 0; i < 6; i++) b[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL};
-    R.lm_comp_layout = set_layout(b, 6);
+    VkDescriptorSetLayoutBinding b[8];
+    for (uint32_t i = 0; i < 8; i++) b[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL};
+    R.lm_comp_layout = set_layout(b, 8);
     R.lm_pl = pipe_layout(&R.lm_comp_layout, 1, 80, VK_SHADER_STAGE_COMPUTE_BIT);
     VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -1412,18 +1511,23 @@ bool lx_renderer_lightmap_begin(const LxLightmapBake *b) {
         o[0] = L->pos.x; o[1] = L->pos.y; o[2] = L->pos.z; o[3] = (float)L->type;
         o[4] = L->color.x; o[5] = L->color.y; o[6] = L->color.z; o[7] = (float)L->mode;
         o[8] = L->dir.x; o[9] = L->dir.y; o[10] = L->dir.z; o[11] = L->range;
-        o[12] = L->cos_outer; o[13] = L->radius; o[14] = L->cos_size;
+        o[12] = L->cos_outer; o[13] = L->radius; o[14] = L->cos_size; o[15] = (float)(L->mask_channel + 1);
     }
     gi_upload(&R.lm_buf[0], nodes, (size_t)nn * 32);
     gi_upload(&R.lm_buf[1], tris, (size_t)nt * 64);
     gi_upload(&R.lm_buf[2], mats, (size_t)nm * 32);
     gi_upload(&R.lm_buf[3], lights, (size_t)nl * 64);
-    gi_upload(&R.lm_buf[4], b->texels, (size_t)b->texel_count * 48);
-    gi_zero_buffer(&R.lm_buf[5], (size_t)b->texel_count * 32);
+    static const float none[12] = {0};
+    if (b->texel_count) gi_upload(&R.lm_buf[4], b->texels, (size_t)b->texel_count * 48);
+    else gi_upload(&R.lm_buf[4], none, sizeof none);
+    gi_zero_buffer(&R.lm_buf[5], (size_t)(b->texel_count ? b->texel_count : 1) * 32);
+    if (b->voxel_count) gi_upload(&R.lm_buf[6], b->vox_pos, (size_t)b->voxel_count * 16);
+    else gi_upload(&R.lm_buf[6], none, 16);
+    gi_zero_buffer(&R.lm_buf[7], (size_t)(b->voxel_count ? b->voxel_count : 1) * 80);
     lx_free(nodes); lx_free(tris); lx_free(mats); lx_free(lights);
-    VkDescriptorBufferInfo bi[6];
-    VkWriteDescriptorSet w[6];
-    for (int i = 0; i < 6; i++) {
+    VkDescriptorBufferInfo bi[8];
+    VkWriteDescriptorSet w[8];
+    for (int i = 0; i < 8; i++) {
         bi[i] = (VkDescriptorBufferInfo){R.lm_buf[i].buf, 0, VK_WHOLE_SIZE};
         w[i] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         w[i].dstSet = R.lm_set;
@@ -1432,7 +1536,7 @@ bool lx_renderer_lightmap_begin(const LxLightmapBake *b) {
         w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         w[i].pBufferInfo = &bi[i];
     }
-    vkUpdateDescriptorSets(R.device, 6, w, 0, NULL);
+    vkUpdateDescriptorSets(R.device, 8, w, 0, NULL);
     R.lm_baking = true;
     return true;
 }
@@ -1444,8 +1548,11 @@ void lx_renderer_lightmap_trace(LxLightmapBake *b, int first, int count, uint32_
     pc.zenith[0] = b->sky_zenith.x; pc.zenith[1] = b->sky_zenith.y; pc.zenith[2] = b->sky_zenith.z; pc.zenith[3] = b->ambient;
     pc.horizon[0] = b->sky_horizon.x; pc.horizon[1] = b->sky_horizon.y; pc.horizon[2] = b->sky_horizon.z; pc.horizon[3] = b->eps;
     pc.ground[0] = b->ground.x; pc.ground[1] = b->ground.y; pc.ground[2] = b->ground.z;
-    pc.counts[0] = first; pc.counts[1] = count; pc.counts[2] = b->light_count; pc.counts[3] = b->bounces;
+    /* work items: texels first, then volume voxels (a slice is always one kind) */
+    bool vox = first >= b->texel_count;
+    pc.counts[0] = vox ? first - b->texel_count : first; pc.counts[1] = count; pc.counts[2] = b->light_count; pc.counts[3] = b->bounces;
     pc.sample[0] = sample;
+    pc.sample[1] = vox ? 1u : 0u;
     VkCommandBuffer cmd = one_shot_begin();
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, R.lm_pipe);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, R.lm_pl, 0, 1, &R.lm_set, 0, NULL);
@@ -1457,19 +1564,20 @@ void lx_renderer_lightmap_trace(LxLightmapBake *b, int first, int count, uint32_
 bool lx_renderer_lightmap_end(LxLightmapBake *b, bool read_back) {
     if (!R.lm_baking) return false;
     bool ok = true;
-    if (read_back) {
-        size_t bytes = (size_t)b->texel_count * 32;
+    for (int pass = 0; read_back && pass < 2; pass++) {   /* texel sums, then voxel sums (5 vec4 -> 20 floats each, same layout) */
+        size_t bytes = pass ? (size_t)b->voxel_count * 80 : (size_t)b->texel_count * 32;
+        if (!bytes) continue;
         GpuBuffer st;
         buffer_create(&st, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
         VkCommandBuffer cmd = one_shot_begin();
         VkBufferCopy rg = {0, 0, bytes};
-        vkCmdCopyBuffer(cmd, R.lm_buf[5].buf, st.buf, 1, &rg);
+        vkCmdCopyBuffer(cmd, R.lm_buf[pass ? 7 : 5].buf, st.buf, 1, &rg);
         one_shot_end(cmd);
-        if (st.mapped) memcpy(b->accum, st.mapped, bytes);
+        if (st.mapped) memcpy(pass ? b->vox_acc : b->accum, st.mapped, bytes);
         else ok = false;
         buffer_destroy(&st);
     }
-    for (int i = 0; i < 6; i++) buffer_destroy(&R.lm_buf[i]);
+    for (int i = 0; i < 8; i++) buffer_destroy(&R.lm_buf[i]);
     R.lm_baking = false;
     return ok;
 }
@@ -1808,7 +1916,7 @@ static void create_static_resources(void) {
     VK_CHECK(vkCreateDescriptorPool(R.device, &pi, NULL, &R.desc_pool));
 
     VkShaderStageFlags vf = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    VkDescriptorSetLayoutBinding sb[14] = {
+    VkDescriptorSetLayoutBinding sb[15] = {
         {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, vf, NULL},
         {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
         {2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
@@ -1822,8 +1930,9 @@ static void create_static_resources(void) {
         {10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
         {11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
         {12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
-        {13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL}};
-    R.scene_layout = set_layout(sb, 14);
+        {13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
+        {14, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL}};
+    R.scene_layout = set_layout(sb, 15);
     VkDescriptorSetLayoutBinding mb[MAT_TEXTURES];
     for (uint32_t i = 0; i < MAT_TEXTURES; i++) mb[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
     R.material_layout = set_layout(mb, MAT_TEXTURES);
@@ -1959,6 +2068,7 @@ static void create_static_resources(void) {
     create_gi_images(2, 2, 2);
     gc_create(0);
     lightmap_upload(NULL, 1, 0);
+    bvol_upload(NULL, 1, 1, 1);
     write_scene_sets();
     create_dummy_cube();
     R.probe_set = alloc_set(R.probe_layout);
@@ -2028,6 +2138,7 @@ void lx_renderer_shutdown(void) {
     gi_comp_free();
     lm_comp_free();
     image_destroy(&R.lightmap);
+    image_destroy(&R.bvol);
     for (int c = 0; c < 3; c++) image_destroy(&R.gi[c]);
     for (int c = 0; c < 2; c++) image_destroy(&R.gi_vis[c]);
     image_destroy(&R.white);
@@ -3116,13 +3227,17 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
                 sun_shadows = l->cast_shadows;
                 /* w: 1 the sun, 2 a Baked sun (lightmapped surfaces already have its light) */
                 ubo.sun_color[0] = col.x; ubo.sun_color[1] = col.y; ubo.sun_color[2] = col.z; ubo.sun_color[3] = l->mode == LX_LIGHT_BAKED ? 2.0f : 1.0f;
+                ubo.bvol_params[2] = l->mode == LX_LIGHT_MIXED ? (float)l->mask_channel : -1.0f;
             }
         } else if (nl < MAX_LIGHTS) {
             light_casts[nl] = l->cast_shadows;
             float *L = ubo.lights[nl++];
             L[0] = d->world.m[12]; L[1] = d->world.m[13]; L[2] = d->world.m[14]; L[3] = l->range > 0.01f ? l->range : 0.01f;
             /* type 1 point, 2 spot; + 10 for a Baked light (lightmapped surfaces already have its light) */
-            L[4] = col.x; L[5] = col.y; L[6] = col.z; L[7] = (l->type == LX_LIGHT_SPOT ? 2.0f : 1.0f) + (l->mode == LX_LIGHT_BAKED ? 10.0f : 0.0f);
+            /* + 100 * (shadowmask channel + 1) for a Mixed light baked into lighting volumes */
+            L[4] = col.x; L[5] = col.y; L[6] = col.z;
+            L[7] = (l->type == LX_LIGHT_SPOT ? 2.0f : 1.0f) + (l->mode == LX_LIGHT_BAKED ? 10.0f : 0.0f) +
+                   (l->mode == LX_LIGHT_MIXED && l->mask_channel >= 0 ? 100.0f * (float)(l->mask_channel + 1) : 0.0f);
             L[8] = dir.x; L[9] = dir.y; L[10] = dir.z; L[11] = cosf(l->spot_angle_deg * 0.5f * LX_DEG2RAD);
         }
     }
@@ -3220,6 +3335,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
         probes_assign(s, view, gs->reflections_enabled ? scene_look_hash(s) : 0);
     }
     probes_fill_ubo(&ubo);
+    if (!R.preview) volumes_fill_ubo(s, &ubo);
     if (R.preview) { ubo.refl[1] = 0; for (int i = 0; i < PROBE_SLOTS; i++) ubo.probe_pos[i][3] = 0; }   /* the sky only */
     uint32_t ubo_off = fr->ubo_used * 4096;
     memcpy((uint8_t *)fr->ubo.mapped + ubo_off, &ubo, sizeof ubo);

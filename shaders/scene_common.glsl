@@ -35,6 +35,9 @@ layout(set = 0, binding = 0, std140) uniform SceneUBO {
     vec4 light_shadow[LX_MAX_LIGHTS * 2];  // per light: (first atlas tile or -1, near, far, tan half-angle), (up xyz, tile resolution)
     vec4 gi_casc[2];      // camera GI grids, finest first: xyz first cell's corner, w cell size (0 = not in use)
     ivec4 gi_casc_res;    // x cells per side (each cascade is stacked along z in the u_gc_* textures)
+    vec4 bvol_rows[24];   // Baked Lighting Volumes: per volume 3 rows mapping world -> 0..1 inside its box
+    vec4 bvol_info[8];    // per volume: z offset, nx, ny, nz (voxels)
+    vec4 bvol_params;     // x volumes in use, y one layer's depth, z the sun's shadowmask channel (-1 none)
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2DArrayShadow u_shadow;
@@ -50,6 +53,7 @@ layout(set = 0, binding = 10) uniform sampler3D u_gc_b;
 layout(set = 0, binding = 11) uniform sampler3D u_gc_vis_a;  // their cell walls
 layout(set = 0, binding = 12) uniform sampler3D u_gc_vis_b;
 layout(set = 0, binding = 13) uniform sampler2DArray u_lightmap;   // baked lighting: per atlas irradiance, then light direction
+layout(set = 0, binding = 14) uniform sampler3D u_bvol;   // Baked Lighting Volumes: SH red, green, blue, shadowmask (each a block along z)
 
 // The engine builds OpenGL-style matrices; convert clip space for Vulkan (y down, z 0..1).
 vec4 lx_to_vulkan(vec4 p) {

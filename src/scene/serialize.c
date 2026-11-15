@@ -50,6 +50,7 @@ static void write_entity(LxStrBuf *sb, const LxScene *s, LxEntity e, int id_of_p
         lx_sb_printf(sb, "light.spot_angle = %g\nlight.shadows = %d\nlight.gi = %d\n", l->spot_angle_deg, l->cast_shadows, l->contribute_gi);
         static const char *modes[] = {"mixed", "realtime", "baked"};
         lx_sb_printf(sb, "light.mode = %s\nlight.shadow_radius = %g\n", modes[l->mode <= LX_LIGHT_BAKED ? l->mode : 0], l->shadow_radius);
+        if (l->mask_channel >= 0 && !prefab_root) lx_sb_printf(sb, "light.mask = %d\n", l->mask_channel);
     }
     if (d->comps & LX_COMP_MESH) {
         lx_sb_printf(sb, "mesh.mesh = %s\nmesh.material = %s\nmesh.shadows = %d\nmesh.static = %d\n", d->mesh.mesh,
@@ -112,6 +113,10 @@ static void write_entity(LxStrBuf *sb, const LxScene *s, LxEntity e, int id_of_p
         lx_sb_printf(sb, "probe.size = %g %g %g\nprobe.intensity = %g\nprobe.blend = %g\nprobe.box = %d\nprobe.realtime = %d\n", p->size.x,
                      p->size.y, p->size.z, p->intensity, p->blend_distance, p->box_projection, p->realtime);
     }
+    if (d->comps & LX_COMP_BAKE_VOLUME) {
+        lx_sb_printf(sb, "volume.size = %g %g %g\nvolume.density = %g\n", d->bvol.size.x, d->bvol.size.y, d->bvol.size.z, d->bvol.density);
+        if (d->vol_index >= 0 && !prefab_root) lx_sb_printf(sb, "volume.baked = %d\n", d->vol_index);
+    }
     for (LxEntity c = d->first_child; c; c = lx_entity_next_sibling(s, c)) write_entity(sb, s, c, id, next_id, false);
 }
 
@@ -128,7 +133,8 @@ char *lx_scene_serialize(const LxScene *s) {
     const LxBakeSettings *bk = &s->bake;
     lx_sb_printf(&sb, "bake.texels_per_unit = %g\nbake.max_atlas = %d\nbake.bounces = %d\nbake.samples = %d\nbake.directional = %d\nbake.denoise = %d\n",
                  bk->texels_per_unit, bk->max_atlas_size, bk->bounces, bk->samples, bk->directional, bk->denoise);
-    if (s->lightmap_count > 0) lx_sb_printf(&sb, "lightmaps = %d %s\n", s->lightmap_count, s->lightmap_ref);
+    if (s->lightmap_count > 0 || s->volume_count > 0) lx_sb_printf(&sb, "lightmaps = %d %s\n", s->lightmap_count, s->lightmap_ref);
+    if (s->volume_count > 0) lx_sb_printf(&sb, "volumes = %d\n", s->volume_count);
     int next_id = 1;
     for (LxEntity r = s->first_root; r; r = lx_entity_next_sibling(s, r)) write_entity(&sb, s, r, 0, &next_id, false);
     if (!sb.data) lx_sb_printf(&sb, "");
@@ -184,7 +190,10 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
             else if (!strcmp(k, "lightmaps")) {
                 char ref[LX_REF_MAX] = {0};
                 int n = 0;
-                if (sscanf(v, "%d %159[^\n]", &n, ref) == 2 && n > 0) { s->lightmap_count = n; lx_strcpy(s->lightmap_ref, sizeof s->lightmap_ref, ref); }
+                if (sscanf(v, "%d %159[^\n]", &n, ref) == 2 && n >= 0) { s->lightmap_count = n; lx_strcpy(s->lightmap_ref, sizeof s->lightmap_ref, ref); }
+            } else if (!strcmp(k, "volumes")) {
+                int n = atoi(v);
+                s->volume_count = n >= 0 && n < 64 ? n : 0;
             }
             continue;
         }
@@ -234,6 +243,7 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
             else if (!strcmp(f, "gi")) l->contribute_gi = lx_parse_bool(v);
             else if (!strcmp(f, "mode")) l->mode = !strcmp(v, "baked") ? LX_LIGHT_BAKED : !strcmp(v, "realtime") ? LX_LIGHT_REALTIME : LX_LIGHT_MIXED;
             else if (!strcmp(f, "shadow_radius")) l->shadow_radius = (float)atof(v);
+            else if (!strcmp(f, "mask")) { int m = atoi(v); l->mask_channel = (int8_t)(m >= 0 && m < 4 ? m : -1); }
         } else if (!strncmp(k, "mesh.", 5)) {
             const char *f = k + 5;
             LxMeshRenderer *m = (d->comps & LX_COMP_MESH) ? &d->mesh : lx_add_mesh(s, cur_e, NULL, NULL);
@@ -338,6 +348,12 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
                     sl->override_count++;
                 }
             }
+        } else if (!strncmp(k, "volume.", 7)) {
+            const char *f = k + 7;
+            LxBakeVolume *bv = lx_add_bake_volume(s, cur_e);
+            if (!strcmp(f, "size")) bv->size = lx_parse_vec3(v);
+            else if (!strcmp(f, "density")) bv->density = (float)atof(v);
+            else if (!strcmp(f, "baked")) { int vi = atoi(v); lx_entity_data(s, cur_e)->vol_index = (int16_t)(vi >= 0 && vi < 64 ? vi : -1); }
         } else if (!strncmp(k, "probe.", 6)) {
             const char *f = k + 6;
             LxReflectionProbe *p = lx_add_reflection_probe(s, cur_e);

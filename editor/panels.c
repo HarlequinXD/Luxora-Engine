@@ -45,6 +45,7 @@ UiIcon ed_icon_for_entity(LxScene *s, LxEntity e) {
     if (c & LX_COMP_CROWD) return UI_ICON_CROWD;
     if (c & LX_COMP_CHARACTER) return UI_ICON_CHARACTER;
     if (c & LX_COMP_REFLECTION_PROBE) return UI_ICON_PROBE;
+    if (c & LX_COMP_BAKE_VOLUME) return UI_ICON_GRID;
     if (c & LX_COMP_MESH) {
         const char *m = lx_get_mesh(s, e)->mesh;
         if (strstr(m, "sphere")) return UI_ICON_SPHERE;
@@ -472,6 +473,7 @@ static UiNode *comp_section(UiNode *body, UiIcon icon, const char *title, bool *
 }
 
 /* an asset slot: shows the asset (thumbnail + name); clicking opens the asset picker, drops still work */
+static void bvol_fit(UiNode *n);
 static UiNode *asset_field(UiNode *parent, const char *label, char *buf, int cap, const char *kind) {
     UiNode *row = ed_prop_row(parent, label);
     UiNode *sl = ed_slot(row, buf, cap, kind);
@@ -573,6 +575,7 @@ static void add_component(UiNode *n) {
     case LX_COMP_BEHAVIOUR: lx_add_behaviour(s, e, lx_behaviour_count() ? lx_behaviour_at(0)->name : "Rotator"); break;
     case LX_COMP_CROWD: lx_add_crowd(s, e, 500); break;
     case LX_COMP_REFLECTION_PROBE: lx_add_reflection_probe(s, e); break;
+    case LX_COMP_BAKE_VOLUME: lx_add_bake_volume(s, e); break;
     case LX_COMP_COLLIDER: {
         /* pick the shape that fits the mesh */
         LxMeshRenderer *m = lx_get_mesh(s, e);
@@ -601,7 +604,8 @@ static void add_component_menu(UiNode *b) {
         {LX_COMP_BEHAVIOUR, "Behaviour (Script)", UI_ICON_BEHAVIOUR}, {LX_COMP_CROWD, "Crowd", UI_ICON_CROWD},
         {LX_COMP_REFLECTION_PROBE, "Reflection Probe", UI_ICON_PROBE}, {LX_COMP_COLLIDER, "Collider", UI_ICON_COLLIDER},
         {LX_COMP_RIGIDBODY, "Rigidbody", UI_ICON_RIGIDBODY}, {LX_COMP_CHARACTER, "Character Controller", UI_ICON_CHARACTER},
-        {LX_COMP_ANIMATOR, "Animator", UI_ICON_ANIMATOR}, {LX_COMP_STATE_GRAPH, "State Graph", UI_ICON_GRAPH}};
+        {LX_COMP_ANIMATOR, "Animator", UI_ICON_ANIMATOR}, {LX_COMP_STATE_GRAPH, "State Graph", UI_ICON_GRAPH},
+        {LX_COMP_BAKE_VOLUME, "Baked Lighting Volume", UI_ICON_GRID}};
     for (int i = 0; i < (int)(sizeof comps / sizeof comps[0]); i++) {
         UiNode *it = ui_menu_item(ED.ui, p, comps[i].name, NULL, add_component);
         it->icon = comps[i].icon;
@@ -905,6 +909,31 @@ static void build_entity_inspector(UiNode *body) {
         rc->icon = UI_ICON_REFRESH;
         rc->h = 26;
     }
+    if (d->comps & LX_COMP_BAKE_VOLUME) {
+        static bool g_open_bvol = true;
+        sec = comp_section(body, UI_ICON_GRID, "Baked Lighting Volume", &g_open_bvol, LX_COMP_BAKE_VOLUME);
+        ed_vec3_row(sec, "Box Size", &d->bvol.size.x, 0.1f, ed_field_changed);
+        UiNode *dn = float_row(sec, "Density", &d->bvol.density, 0.05f, 0.05f, 16);
+        dn->on_change = ed_field_changed;
+        lx_strcpy(dn->tooltip, sizeof dn->tooltip, "Voxels per metre: more gives sharper baked shadows on characters (max 64 across).");
+        LxVec3 sc = lx_entity_scale(ED.scene, e);
+        int n[3];
+        float axes[3] = {d->bvol.size.x * fabsf(sc.x), d->bvol.size.y * fabsf(sc.y), d->bvol.size.z * fabsf(sc.z)};
+        for (int k = 0; k < 3; k++) n[k] = (int)lx_clampf(ceilf(fabsf(axes[k]) * lx_clampf(d->bvol.density, 0.05f, 16)), 2, LX_VOLUME_MAX_RES);
+        UiNode *info = ui_label(ui, sec, "");
+        ui_set_text(info, "%d x %d x %d voxels  ·  %s", n[0], n[1], n[2], d->vol_index >= 0 ? "baked" : "not baked yet");
+        info->font = UI_FONT_SMALL;
+        info->fg = t->text_dim;
+        UiNode *fit = ui_button(ui, sec, "Fit to Static Objects", bvol_fit);
+        fit->icon = UI_ICON_FOCUS;
+        fit->h = 26;
+        lx_strcpy(fit->tooltip, sizeof fit->tooltip, "Size and place the box around the level's Static objects, with headroom for characters");
+        UiNode *hint = ui_label(ui, sec, "Characters and moving objects inside the box get baked light and baked shadows from it, like "
+                                         "Bakery Volumes. Fill it with Bake in the Lighting panel.");
+        hint->font = UI_FONT_SMALL;
+        hint->fg = t->text_dim;
+        hint->wrap = true;
+    }
     if (d->comps & LX_COMP_ANIMATOR) {
         static bool g_open_animator = true;
         sec = comp_section(body, UI_ICON_ANIMATOR, "Animator", &g_open_animator, LX_COMP_ANIMATOR);
@@ -1135,7 +1164,8 @@ static void build_asset_inspector(UiNode *body) {
             static const struct { uint32_t bit; const char *name; } K[] = {
                 {LX_COMP_MESH, "Mesh"}, {LX_COMP_LIGHT, "Light"}, {LX_COMP_CAMERA, "Camera"}, {LX_COMP_AUDIO_SOURCE, "Audio"},
                 {LX_COMP_BEHAVIOUR, "Behaviour"}, {LX_COMP_COLLIDER, "Collider"}, {LX_COMP_RIGIDBODY, "Rigidbody"},
-                {LX_COMP_CHARACTER, "Character"}, {LX_COMP_REFLECTION_PROBE, "Probe"}, {LX_COMP_CROWD, "Crowd"}, {LX_COMP_ANIMATOR, "Animator"}};
+                {LX_COMP_CHARACTER, "Character"}, {LX_COMP_REFLECTION_PROBE, "Probe"}, {LX_COMP_CROWD, "Crowd"}, {LX_COMP_ANIMATOR, "Animator"},
+                {LX_COMP_BAKE_VOLUME, "Volume"}};
             for (size_t k = 0; k < sizeof K / sizeof K[0]; k++)
                 if (c & K[k].bit) {
                     if (comps[0]) lx_strcpy(comps + strlen(comps), sizeof comps - strlen(comps), ", ");
@@ -1348,6 +1378,44 @@ static void probe_res_changed(UiNode *n) {
     lx_graphics_settings()->reflection_resolution = 64 << g_probe_res_idx;
     graphics_changed(n);
 }
+/* a Baked Lighting Volume around the level: every Static object, plus room above for characters */
+void ed_bake_volume_fit(LxEntity e) {
+    LxScene *s = ED.scene;
+    LxAabb b = lx_aabb_empty();
+    bool any = false;
+    lx_scene_update_transforms(s);
+    for (int i = 0; i < lx_scene_entity_count(s); i++) {
+        LxEntity x = lx_scene_entity_at(s, i);
+        LxMeshRenderer *mr = lx_get_mesh(s, x);
+        const LxMesh *m = mr && mr->static_geometry ? lx_asset_mesh(mr->mesh) : NULL;
+        if (!m) continue;
+        LxMat4 w = lx_entity_world_matrix(s, x);
+        for (int c = 0; c < 8; c++) {
+            LxVec3 p = lx_v3(c & 1 ? m->bounds.max.x : m->bounds.min.x, c & 2 ? m->bounds.max.y : m->bounds.min.y, c & 4 ? m->bounds.max.z : m->bounds.min.z);
+            lx_aabb_grow(&b, lx_mat4_point(w, p));
+        }
+        any = true;
+    }
+    LxBakeVolume *v = lx_get_bake_volume(s, e);
+    if (!v) return;
+    if (!any) { ui_notify(ED.ui, "No Static objects to fit around"); return; }
+    b.max.y += 2.5f;   /* headroom: characters stand on the floor */
+    LxVec3 size = lx_sub3(b.max, b.min);
+    v->size = lx_v3(size.x + 1.0f, size.y + 0.5f, size.z + 1.0f);
+    lx_entity_set_world_pose(s, e, lx_scale3(lx_add3(b.min, b.max), 0.5f), lx_quat_identity());
+    lx_entity_set_scale(s, e, lx_v3(1, 1, 1));
+    /* keep it within 64 voxels across: lower the density for a big level */
+    float big = lx_maxf(v->size.x, lx_maxf(v->size.y, v->size.z));
+    if (big * v->density > LX_VOLUME_MAX_RES) v->density = (float)LX_VOLUME_MAX_RES / big;
+}
+static void bvol_fit(UiNode *n) {
+    LX_UNUSED(n);
+    ed_bake_volume_fit(ED.selected);
+    ed_mark_changed();
+    ed_commit();
+    ED.inspector_dirty = true;
+}
+
 static void reset_gi(UiNode *n) { LX_UNUSED(n); lx_gi_reset(); ui_notify(ED.ui, "Global illumination restarted"); }
 
 /* ---- baked lighting ---- */

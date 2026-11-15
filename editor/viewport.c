@@ -505,6 +505,22 @@ static void draw_probe_box(UiCtx *ui, LxEntity e, LxVec3 c) {
     }
 }
 
+/* the box of a selected Baked Lighting Volume (it turns and scales with its object) */
+static void draw_volume_box(UiCtx *ui, LxEntity e) {
+    LxBakeVolume *v = lx_get_bake_volume(ED.scene, e);
+    if (!v) return;
+    LxMat4 w = lx_entity_world_matrix(ED.scene, e);
+    LxVec3 c[8];
+    for (int i = 0; i < 8; i++)
+        c[i] = lx_mat4_point(w, lx_v3((i & 1 ? 0.5f : -0.5f) * v->size.x, (i & 2 ? 0.5f : -0.5f) * v->size.y, (i & 4 ? 0.5f : -0.5f) * v->size.z));
+    static const int edges[12][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3}, {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+    uint32_t col = UI_RGBA(255, 196, 92, 210);
+    for (int i = 0; i < 12; i++) {
+        LxVec2 a, b;
+        if (to_screen(c[edges[i][0]], &a) && to_screen(c[edges[i][1]], &b)) ui_draw_line(ui, a.x, a.y, b.x, b.y, 1.5f * ui_scale(ui), col);
+    }
+}
+
 static void draw_icons(UiCtx *ui) {
     if (ED.selected && lx_entity_valid(ED.scene, ED.selected) &&
         (lx_entity_components(ED.scene, ED.selected) & (LX_COMP_COLLIDER | LX_COMP_CHARACTER)))
@@ -525,6 +541,7 @@ static void draw_icons(UiCtx *ui) {
         /* direction hint for selected lights and cameras */
         uint32_t c = lx_entity_components(ED.scene, e);
         if (sel && (c & LX_COMP_REFLECTION_PROBE)) draw_probe_box(ui, e, wp);
+        if (sel && (c & LX_COMP_BAKE_VOLUME)) draw_volume_box(ui, e);
         if (sel && (c & (LX_COMP_LIGHT | LX_COMP_CAMERA))) {
             LxVec3 f = lx_entity_forward(ED.scene, e);
             LxVec2 tip;

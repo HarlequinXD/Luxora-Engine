@@ -14,13 +14,15 @@ layout(std430, set = 0, binding = 2) readonly buffer Mats { vec4 mats[]; };     
 layout(std430, set = 0, binding = 3) readonly buffer Lights { Light lights[]; };
 layout(std430, set = 0, binding = 4) readonly buffer Texels { vec4 texels[]; };    // 3 per texel: position + valid, normal + size, face normal
 layout(std430, set = 0, binding = 5) buffer Accum { vec4 acc[]; };                 // 2 per texel: irradiance + samples, direction + back faces
+layout(std430, set = 0, binding = 6) readonly buffer Voxels { vec4 voxels[]; };    // Baked Lighting Volumes: 1 per voxel, position
+layout(std430, set = 0, binding = 7) buffer VoxAccum { vec4 vacc[]; };             // 5 per voxel: SH red, green, blue, (samples, back faces), shadowmask
 
 layout(push_constant) uniform PC {
     vec4 zenith;     // w: sky brightness (ambient)
     vec4 horizon;    // w: surface offset
     vec4 ground;
     ivec4 counts;    // first texel, texel count, light count, bounces
-    uvec4 sample_;   // x: sample index
+    uvec4 sample_;   // x: sample index, y: 1 = volume voxels (counts.x is then the first voxel)
 } pc;
 
 const float PI = 3.14159265;
@@ -117,12 +119,10 @@ vec3 sky(vec3 d) {
     return c * pc.zenith.w;
 }
 
-// light from one light arriving at x, shadows included; dir_out = the way to it
-vec3 light_at(int i, vec3 x, vec3 n, vec3 ng) {
+// a point on light i (soft shadows): the way to it, how far, its falloff there
+void light_sample(int i, vec3 x, out vec3 dir, out float dist, out float att) {
     Light L = lights[i];
     int type = int(L.pos_type.w + 0.5);
-    vec3 dir;
-    float dist, att;
     if (type == DIRECTIONAL) {
         vec3 c = -L.dir_range.xyz, t, b;
         basis(c, t, b);
@@ -153,16 +153,81 @@ vec3 light_at(int i, vec3 x, vec3 n, vec3 ng) {
             att *= smoothstep(L.cone.x, L.cone.x + (1.0 - L.cone.x) * 0.25, cd);
         }
     }
+}
+bool blocked(vec3 x, vec3 dir, float dist) {
+    float tmax = dist < 1e29 ? dist - pc.horizon.w : 1e30, hd;
+    return trace(x, dir, tmax, true, hd) >= 0;
+}
+
+// light from one light arriving at x, shadows included
+vec3 light_at(int i, vec3 x, vec3 n, vec3 ng) {
+    vec3 dir;
+    float dist, att;
+    light_sample(i, x, dir, dist, att);
     float cs = dot(n, dir);
     if (att <= 0.0 || cs <= 0.0 || dot(ng, dir) <= 0.0) return vec3(0.0);
-    float tmax = dist < 1e29 ? dist - pc.horizon.w : 1e30, hd;
-    if (trace(x, dir, tmax, true, hd) >= 0) return vec3(0.0);
-    return L.color_mode.rgb * (att * cs);
+    if (blocked(x, dir, dist)) return vec3(0.0);
+    return lights[i].color_mode.rgb * (att * cs);
+}
+
+// L1 SH (L0, y, z, x) of light c arriving from direction d
+void sh_add(inout vec4 r, inout vec4 g, inout vec4 b, vec3 d, vec3 c) {
+    vec4 y = vec4(0.282095, 0.488603 * d.y, 0.488603 * d.z, 0.488603 * d.x);
+    r += c.r * y; g += c.g * y; b += c.b * y;
+}
+
+// a Baked Lighting Volume voxel (as trace_voxel in src/gi/lightmapper.c)
+void voxel(int i) {
+    int vox = pc.counts.x + i;
+    vec3 x = voxels[vox].xyz;
+    rng = hash(uint(vox) * 7919u + 0x51ed27u + hash(pc.sample_.x + 0x9e3779b9u));
+    vec4 r = vec4(0.0), g = vec4(0.0), b = vec4(0.0), mask = vec4(0.0);
+    int nl = pc.counts.z, bounces = pc.counts.w;
+    for (int l = 0; l < nl; l++) {
+        vec3 dir;
+        float dist, att;
+        light_sample(l, x, dir, dist, att);
+        bool lit = att > 0.0 && !blocked(x, dir, dist);
+        int ch = int(lights[l].cone.w + 0.5) - 1;   // stored + 1 (0 = none)
+        if (ch >= 0) mask[ch] += (lit || att <= 0.0) ? 1.0 : 0.0;
+        if (int(lights[l].color_mode.w + 0.5) == BAKED && lit) sh_add(r, g, b, dir, lights[l].color_mode.rgb * att);
+    }
+    float z = 1.0 - 2.0 * rnd(), rr = sqrt(max(0.0, 1.0 - z * z)), ph = 2.0 * PI * rnd();
+    vec3 d = vec3(rr * cos(ph), rr * sin(ph), z), first = d, T = vec3(1.0), o = x, rad = vec3(0.0);
+    float back = 0.0;
+    for (int k = 0; k < 16; k++) {
+        float h;
+        int hit = trace(o, d, 1e30, false, h);
+        if (hit < 0) { rad += T * sky(d); break; }
+        Tri tr = tris[hit];
+        vec3 hn = tr.n.xyz;
+        if (dot(hn, d) > 0.0) { if (k == 0) back = 1.0; break; }
+        int m = floatBitsToInt(tr.v0.w);
+        rad += T * mats[m * 2 + 1].rgb / PI;
+        if (k >= bounces) break;
+        vec3 p = o + d * h + hn * pc.horizon.w;
+        T *= mats[m * 2].rgb / PI;
+        vec3 eh = vec3(0.0);
+        for (int l = 0; l < nl; l++)
+            if (int(lights[l].color_mode.w + 0.5) != REALTIME) eh += light_at(l, p, hn, hn);
+        rad += T * eh;
+        T *= PI;
+        if (lum(T) < 1e-5) break;
+        o = p;
+        d = rnd_cosine(hn);
+    }
+    sh_add(r, g, b, first, rad * (4.0 * PI));
+    vacc[vox * 5] += r;
+    vacc[vox * 5 + 1] += g;
+    vacc[vox * 5 + 2] += b;
+    vacc[vox * 5 + 3] += vec4(1.0, back, 0.0, 0.0);
+    vacc[vox * 5 + 4] += mask;
 }
 
 void main() {
     int i = int(gl_GlobalInvocationID.x);
     if (i >= pc.counts.y) return;
+    if (pc.sample_.y == 1u) { voxel(i); return; }
     int texel = pc.counts.x + i;
     vec4 t0 = texels[texel * 3], t1 = texels[texel * 3 + 1], t2 = texels[texel * 3 + 2];
     if (t0.w <= 0.0) return;

@@ -666,6 +666,7 @@ LxEntity ed_create(const char *what) {
         else if (!strcmp(what, "Spot Light")) { lx_add_light(s, e, LX_LIGHT_SPOT); lx_entity_set_position(s, e, lx_v3(at.x, 4, at.z)); lx_entity_set_euler(s, e, lx_v3(-90, 0, 0)); }
         else if (!strcmp(what, "Audio Source")) lx_add_audio_source(s, e, "");
         else if (!strcmp(what, "Reflection Probe")) { lx_add_reflection_probe(s, e); lx_entity_set_position(s, e, lx_v3(at.x, 2.0f, at.z)); }
+        else if (!strcmp(what, "Baked Lighting Volume")) { lx_add_bake_volume(s, e); ed_bake_volume_fit(e); }
         else if (!strcmp(what, "Crowd")) { lx_add_crowd(s, e, 500); lx_entity_set_position(s, e, lx_v3(at.x, 0.5f, at.z)); }
         else if (!strcmp(what, "Empty")) lx_entity_set_position(s, e, at);
     }
@@ -879,6 +880,7 @@ static void create_items(UiNode *p) {
     item(p, "Point Light", NULL, UI_ICON_BULB, m_create);
     item(p, "Spot Light", NULL, UI_ICON_SPOT, m_create);
     item(p, "Reflection Probe", NULL, UI_ICON_PROBE, m_create);
+    item(p, "Baked Lighting Volume", NULL, UI_ICON_GRID, m_create);
     ui_menu_separator(ED.ui, p);
     ui_menu_separator(ED.ui, p);
     item(p, "Character", NULL, UI_ICON_CHARACTER, m_create);

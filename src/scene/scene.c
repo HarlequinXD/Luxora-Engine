@@ -119,6 +119,7 @@ LxEntity lx_entity_create(LxScene *s, const char *name) {
     d->world = lx_mat4_identity();
     d->audio_voice = -1;
     d->lm_index = -1;
+    d->vol_index = -1;
     d->order = s->next_order++;
     LxEntity h = handle_of(s, d);
     s->order_dirty = true;
@@ -423,7 +424,8 @@ LxLight *lx_add_light(LxScene *s, LxEntity e, LxLightType type) {
     d->light.cast_shadows = true;   /* every light: point and spot lights use the shadow atlas */
     d->light.contribute_gi = true;
     d->light.mode = LX_LIGHT_MIXED;
-    d->light.shadow_radius = 0.15f;   /* point/spot: 15 cm sphere; directional: 0.15 degrees */
+    d->light.shadow_radius = 0.15f;
+    d->light.mask_channel = -1;   /* point/spot: 15 cm sphere; directional: 0.15 degrees */
     s->static_version++;
     return &d->light;
 }
@@ -592,6 +594,18 @@ LxReflectionProbe *lx_add_reflection_probe(LxScene *s, LxEntity e) {
     return &d->probe;
 }
 
+LxBakeVolume *lx_add_bake_volume(LxScene *s, LxEntity e) {
+    LxEntityData *d = lx_entity_data(s, e);
+    if (!d) return NULL;
+    if (!(d->comps & LX_COMP_BAKE_VOLUME)) {
+        d->bvol.size = lx_v3(10, 4, 10);
+        d->bvol.density = 1.0f;
+        d->vol_index = -1;
+    }
+    d->comps |= LX_COMP_BAKE_VOLUME;
+    return &d->bvol;
+}
+
 #define GETTER(fn, type, bit, field)                                  \
     type *fn(LxScene *s, LxEntity e) {                                \
         LxEntityData *d = lx_entity_data(s, e);                       \
@@ -604,6 +618,7 @@ GETTER(lx_get_audio_source, LxAudioSource, LX_COMP_AUDIO_SOURCE, audio)
 GETTER(lx_get_behaviour, LxBehaviourRef, LX_COMP_BEHAVIOUR, behaviour)
 GETTER(lx_get_crowd, LxCrowdComponent, LX_COMP_CROWD, crowd)
 GETTER(lx_get_reflection_probe, LxReflectionProbe, LX_COMP_REFLECTION_PROBE, probe)
+GETTER(lx_get_bake_volume, LxBakeVolume, LX_COMP_BAKE_VOLUME, bvol)
 GETTER(lx_get_collider, LxCollider, LX_COMP_COLLIDER, collider)
 GETTER(lx_get_rigidbody, LxRigidbody, LX_COMP_RIGIDBODY, body)
 GETTER(lx_get_character, LxCharacterController, LX_COMP_CHARACTER, character)
@@ -633,6 +648,7 @@ void lx_remove_component(LxScene *s, LxEntity e, LxComponentBits c) {
     d->comps &= ~(uint32_t)c;
     if (c & (LX_COMP_ANIMATOR | LX_COMP_MESH)) lx_anim_free_entity(d);
     if (c & LX_COMP_STATE_GRAPH) lx_fsm_entity_free(d);
+    if (c & LX_COMP_BAKE_VOLUME) d->vol_index = -1;
 }
 
 LxEntity lx_spawn_primitive(LxScene *s, LxPrimitive p, const char *name, LxVec3 pos) {

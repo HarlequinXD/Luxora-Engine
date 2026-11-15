@@ -102,6 +102,24 @@ void lx_bvh_free(LxBvh *b) {
 }
 
 /* which objects a build takes: the level's static geometry, or (moving) everything that moves */
+/* the average colour of an albedo texture (linear), so bounced light takes the surface's real colour; white without one */
+static LxVec3 texture_average(const char *ref) {
+    if (!ref || !ref[0]) return lx_v3(1, 1, 1);
+    LxTexture *t = lx_asset_texture(ref);
+    if (!t || !t->pixels || t->width <= 0 || t->height <= 0) return lx_v3(1, 1, 1);
+    double sum[3] = {0};
+    long n = 0;
+    int step = (t->width * t->height > 65536) ? (int)sqrt((double)t->width * t->height / 65536.0) : 1;
+    for (int y = 0; y < t->height; y += step)
+        for (int x = 0; x < t->width; x += step) {
+            const uint8_t *p = &t->pixels[((size_t)y * t->width + x) * 4];
+            for (int c = 0; c < 3; c++) sum[c] += pow(p[c] / 255.0, 2.2);   /* sRGB -> linear */
+            n++;
+        }
+    if (!n) return lx_v3(1, 1, 1);
+    return lx_v3((float)(sum[0] / n), (float)(sum[1] / n), (float)(sum[2] / n));
+}
+
 static bool takes(LxScene *s, int i, bool moving) {
     LxEntityData *d = &s->entities[i];
     if (!d->alive || !d->active || !(d->comps & LX_COMP_MESH)) return false;
@@ -188,7 +206,7 @@ static void build(LxBvh *b, LxScene *s, bool moving) {
         const LxMaterial *m = mats[k];
         /* metals reflect little diffuse light; approximate their GI albedo */
         float diffuse = 1.0f - m->metallic * 0.9f;
-        b->materials[k].albedo = lx_scale3(lx_v3(m->albedo.x, m->albedo.y, m->albedo.z), diffuse);
+        b->materials[k].albedo = lx_scale3(lx_mul3(lx_v3(m->albedo.x, m->albedo.y, m->albedo.z), texture_average(m->albedo_map)), diffuse);
         b->materials[k].emissive = lx_scale3(m->emissive, m->emissive_strength);
         b->materials[k].absorption = m->acoustic_absorption;
         b->materials[k].transmission = m->acoustic_transmission;
