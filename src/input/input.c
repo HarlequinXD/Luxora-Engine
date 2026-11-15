@@ -172,6 +172,7 @@ void lx_input_map_defaults(LxInputMap *m) {
     int look = add_touch(m, "Look Area", LX_TOUCH_LOOK_AREA, 0.5f, 0.0f, 0.5f, 1.0f);
     int jump = add_touch(m, "Jump Button", LX_TOUCH_BUTTON, 0.9f, 0.74f, 0.075f, 0);
     int fire = add_touch(m, "Fire Button", LX_TOUCH_BUTTON, 0.79f, 0.86f, 0.065f, 0);
+    int use = add_touch(m, "Use Button", LX_TOUCH_BUTTON, 0.92f, 0.5f, 0.05f, 0);
 
     LxInputAction *a = lx_input_add_action(m, "MoveX", true);
     lx_input_add_binding(a, B(LX_BIND_KEY_AXIS, LX_KEY_D, LX_KEY_A, 1));
@@ -207,9 +208,21 @@ void lx_input_map_defaults(LxInputMap *m) {
     a = lx_input_add_action(m, "Interact", false);
     lx_input_add_binding(a, B(LX_BIND_KEY, LX_KEY_E, 0, 1));
     lx_input_add_binding(a, B(LX_BIND_PAD_BUTTON, LX_PAD_X, 0, 1));
+    lx_input_add_binding(a, B(LX_BIND_TOUCH_BUTTON, use, 0, 1));
     a = lx_input_add_action(m, "Sprint", false);
     lx_input_add_binding(a, B(LX_BIND_KEY, LX_KEY_SHIFT, 0, 1));
     lx_input_add_binding(a, B(LX_BIND_PAD_BUTTON, LX_PAD_LSTICK, 0, 1));
+    a = lx_input_add_action(m, "Crouch", false);   /* crouch (first person), dodge roll (third person) */
+    lx_input_add_binding(a, B(LX_BIND_KEY, LX_KEY_C, 0, 1));
+    lx_input_add_binding(a, B(LX_BIND_KEY, LX_KEY_CTRL, 0, 1));
+    lx_input_add_binding(a, B(LX_BIND_PAD_BUTTON, LX_PAD_B, 0, 1));
+    a = lx_input_add_action(m, "Reload", false);
+    lx_input_add_binding(a, B(LX_BIND_KEY, LX_KEY_R, 0, 1));
+    lx_input_add_binding(a, B(LX_BIND_PAD_BUTTON, LX_PAD_Y, 0, 1));
+    a = lx_input_add_action(m, "Lock On", false);
+    lx_input_add_binding(a, B(LX_BIND_KEY, LX_KEY_TAB, 0, 1));
+    lx_input_add_binding(a, B(LX_BIND_MOUSE_BUTTON, LX_MOUSE_MIDDLE, 0, 1));
+    lx_input_add_binding(a, B(LX_BIND_PAD_BUTTON, LX_PAD_RSTICK, 0, 1));
     a = lx_input_add_action(m, "Pause", false);
     lx_input_add_binding(a, B(LX_BIND_KEY, LX_KEY_ESCAPE, 0, 1));
     lx_input_add_binding(a, B(LX_BIND_PAD_BUTTON, LX_PAD_START, 0, 1));

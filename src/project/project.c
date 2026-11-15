@@ -473,7 +473,8 @@ bool lx_project_create(LxProject *p, const char *parent, const char *name, LxPro
     lx_path_join(sp, sizeof sp, p->assets, "Scenes/Main.lxscene");
     bool ok = lx_scene_save(s, sp);
     lx_scene_destroy(s);
-    write_text(p->assets, "Scripts/game.c", SAMPLE_BEHAVIOUR);
+    if (tpl != LX_TEMPLATE_FPS && tpl != LX_TEMPLATE_THIRD_PERSON)   /* those come with their own scripts */
+        write_text(p->assets, "Scripts/game.c", SAMPLE_BEHAVIOUR);
     LxMaterial def = lx_material_default();
     lx_strcpy(def.name, sizeof def.name, "Default");
     char dp[LX_PATH_MAX];

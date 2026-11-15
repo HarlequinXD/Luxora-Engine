@@ -588,6 +588,5 @@ bool lx_take_quit_request(void);
 /* ---------- engine state ---------- */
 void lx_engine_set_project(const LxProject *p);
 
-bool lx_physics_raycast_ignore(LxScene *s, LxVec3 origin, LxVec3 dir, float max_dist, uint32_t mask, LxEntity ignore, LxRaycastHit *hit);
 bool lx_project_template_build(int tpl, const char *assets, LxScene *s);
 #endif

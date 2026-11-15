@@ -44,6 +44,15 @@ set(LUXORA_SOURCES
   src/input/input.c
   src/engine.c)
 
+# the game templates' files (scripts) embedded as text: tools/embed_templates.cmake
+file(GLOB_RECURSE LUXORA_TEMPLATE_INPUTS CONFIGURE_DEPENDS resources/templates/*)
+set(LUXORA_TEMPLATES_C ${CMAKE_CURRENT_BINARY_DIR}/template_files.c)
+add_custom_command(OUTPUT ${LUXORA_TEMPLATES_C}
+  COMMAND ${CMAKE_COMMAND} -DOUT=${LUXORA_TEMPLATES_C} -DROOT=${CMAKE_CURRENT_SOURCE_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_templates.cmake
+  DEPENDS ${LUXORA_TEMPLATE_INPUTS} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_templates.cmake
+  COMMENT "Embedding the game templates")
+list(APPEND LUXORA_SOURCES ${LUXORA_TEMPLATES_C})
+
 if(WIN32)
   list(APPEND LUXORA_SOURCES src/platform/platform_win32.c)
 elseif(ANDROID)

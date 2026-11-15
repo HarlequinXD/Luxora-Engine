@@ -799,6 +799,50 @@ static const LxFsmActionDesc A_TRANSFORM_POINT = {"Transform Point", "Transform"
      PENUM("Convert", "Local Point To World|World Point To Local|Local Direction To World|World Direction To Local", "Local Point To World"), POUT("Store Result", LX_FSM_VEC3)},
     0, 0, LX_FSM_EVERY_FRAME, transform_point, transform_point, NULL};
 
+
+/* PlayMaker's Smooth Look At Direction: turn to face a direction (a velocity, an input vector) rather than a point */
+static void smooth_look_dir(LxFsmCtx *c) {
+    LxEntity e = obj(c, 0);
+    if (!e) return;
+    LxVec3 d = lx_fsm_vec3(c, 1);
+    if (lx_fsm_int(c, 5) == 0) {   /* Self: the direction is in the object's own space */
+        LxEntity par = lx_entity_parent(c->scene, e);
+        if (par) d = lx_quat_rotate(lx_entity_world_rotation(c->scene, par), d);
+    }
+    if (lx_fsm_bool(c, 4)) d.y = 0;
+    float min = lx_maxf(lx_fsm_float(c, 2), 1e-4f);
+    if (!(lx_len3sq(d) >= min * min)) return;   /* too short to mean a direction (a stick at rest): keep facing */
+    LxVec3 up = lx_fsm_vec3(c, 3);
+    if (!(lx_len3sq(up) > 1e-8f)) up = lx_v3(0, 1, 0);
+    up = lx_norm3(up);
+    LxVec3 f = lx_norm3(d);
+    if (fabsf(lx_dot3(f, up)) > 0.999f) up = fabsf(f.x) < 0.9f ? lx_v3(1, 0, 0) : lx_v3(0, 0, 1);   /* straight along up */
+    LxQuat want = lx_quat_look(f, up), cur = lx_entity_world_rotation(c->scene, e);
+    if (cur.x * want.x + cur.y * want.y + cur.z * want.z + cur.w * want.w < 0) { want.x = -want.x; want.y = -want.y; want.z = -want.z; want.w = -want.w; }
+    float speed = lx_fsm_float(c, 6);
+    float k = !(speed > 0) ? 1 : c->dt > 0 ? lx_clampf(1 - expf(-speed * c->dt), 0, 1) : 0;   /* 0 = at once */
+    LxQuat r = {cur.x + (want.x - cur.x) * k, cur.y + (want.y - cur.y) * k, cur.z + (want.z - cur.z) * k, cur.w + (want.w - cur.w) * k};
+    if (r.x * r.x + r.y * r.y + r.z * r.z + r.w * r.w < 1e-12f) r = want;
+    r = lx_quat_norm(r);
+    lx_entity_set_world_pose(c->scene, e, lx_entity_world_position(c->scene, e), r);
+    /* close enough: send Finish (once per visit) */
+    float dot = fabsf(r.x * want.x + r.y * want.y + r.z * want.z + r.w * want.w);
+    float angle = 2 * acosf(lx_clampf(dot, -1, 1)) * LX_RAD2DEG;
+    lx_fsm_set_float(c, 9, angle);
+    bool *sent = c->state;
+    if (angle <= lx_fsm_float(c, 7) && !*sent) { *sent = true; ev(c, 8); }
+    else if (angle > lx_fsm_float(c, 7) * 2 + 1) *sent = false;
+}
+static const LxFsmActionDesc A_SMOOTH_LOOK_DIR = {"Smooth Look At Direction", "Transform",
+    "Turns an object smoothly to face a direction - where it's moving, or a stick's vector from Get Axis Vector. "
+    "Directions shorter than Min Magnitude are ignored, so it keeps facing the last way when the stick is let go.",
+    "Turn {0} to face {1} (speed {6})",
+    {POBJ("Object"), P("Target Direction", LX_FSM_VEC3, "0 0 -1"), PT("Min Magnitude", LX_FSM_FLOAT, "0.1", "shorter directions are ignored"),
+     PT("Up Vector", LX_FSM_VEC3, "0 1 0", "which way is up for the object"), PT("Keep Vertical", LX_FSM_BOOL, "true", "only turn left and right (ignores the direction's height)"),
+     PENUM("Space", "Self|World", "World"), PT("Speed", LX_FSM_FLOAT, "8", "how fast it turns; 0 = at once"), PT("Finish Tolerance", LX_FSM_FLOAT, "1", "degrees"),
+     PEV("Finish Event"), POPT("Store Angle Left", LX_FSM_FLOAT)},
+    sizeof(bool), 0, LX_FSM_EVERY_FRAME, smooth_look_dir, smooth_look_dir, NULL};
+
 /* ======================================================================
  *  Objects
  * ====================================================================== */
@@ -1009,7 +1053,7 @@ void lx_fsm_register_playmaker_actions(void) {
         &A_VEC_CLAMP, &A_VEC_LENGTH, &A_VEC_INVERT, &A_VEC_PER_SECOND, &A_VEC_ROTATE_TOWARDS, &A_VEC_INTERP, &A_VEC_FILTER, &A_TRIG, &A_ATAN2, &A_FLOAT_REMAP,
         &A_SUBSTRING, &A_STRING_REPLACE, &A_STRING_CASE, &A_STRING_PART, &A_STRING_TO_NUMBER,
         &A_GET_RGBA, &A_SET_RGBA, &A_COLOR_INTERP, &A_SEL_COLOR, &A_COLOR_RAMP,
-        &A_SYSTEM_TIME, &A_RANDOM_ROTATION, &A_ANGLE_TO_TARGET, &A_TRANSFORM_POINT,
+        &A_SYSTEM_TIME, &A_RANDOM_ROTATION, &A_ANGLE_TO_TARGET, &A_TRANSFORM_POINT, &A_SMOOTH_LOOK_DIR,
         &A_DESTROY_CHILDREN, &A_CHILD_AT, &A_RANDOM_CHILD, &A_GET_ROOT, &A_NEXT_CHILD, &A_NEXT_WITH_TAG,
         &A_RB_PROPS, &A_WAKE_UP, &A_SET_AUDIO_CLIP,
         &A_SCREEN_SIZE, &A_TARGET_FPS, &A_PLATFORM,

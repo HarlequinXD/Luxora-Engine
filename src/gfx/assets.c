@@ -22,7 +22,9 @@ static uint64_t fnv(const char *s, AssetKind k) {
 }
 
 void lx_assets_set_root(const char *dir) {
+    bool changed = strcmp(g_root, dir ? dir : "") != 0;
     lx_strcpy(g_root, sizeof g_root, dir ? dir : "");
+    if (changed) lx_fsm_globals_reload();   /* another project's global variables */
 }
 const char *lx_assets_root(void) { return g_root; }
 

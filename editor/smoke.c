@@ -757,15 +757,16 @@ static void s_tpl_play(void) {
     SMOKE_CHECK(ED.has_project && ED.scene && lx_entity_find(ED.scene, "Player"), "the template scene opens");
     ed_play();
 }
-static void tpl_playing(const char *shot, const char *first_state) {
-    LxEntity p = lx_entity_find(ED.scene, "Player"), gm = lx_entity_find(ED.scene, "Game Manager");
-    const char *ps = p ? lx_fsm_current_state(ED.scene, p, 0) : "", *gs = gm ? lx_fsm_current_state(ED.scene, gm, 0) : "";
-    SMOKE_CHECK(!strcmp(ps, first_state) && !strcmp(gs, "Playing"), "the template plays (%s, %s)", ps, gs);
+static void tpl_playing(const char *shot, const char *player_script) {
+    LxEntity p = lx_entity_find(ED.scene, "Player");
+    LxBehaviourRef *b = p ? lx_get_behaviour(ED.scene, p) : NULL;
+    SMOKE_CHECK(b && !strcmp(b->name, player_script) && lx_behaviour_find(player_script), "the template's scripts compiled and run (%s)", b ? b->name : "none");
+    SMOKE_CHECK(lx_fsm_global_float("Game Phase") == 0 && lx_fsm_global_float("Health") > 0 && lx_fsm_global_float("Max Health") == 100, "the game is playing (phase %g, health %g / %g)", lx_fsm_global_float("Game Phase"), lx_fsm_global_float("Health"), lx_fsm_global_float("Max Health"));
     SMOKE_CHECK(lx_mouse_lock_wanted(), "the game asks for the mouse");
     sg_shot(shot);
 }
-static void s_tpl_fps_playing(void) { tpl_playing("fps_template.ppm", "Playing"); }
-static void s_tpl_tps_playing(void) { tpl_playing("tps_template.ppm", "Playing"); }
+static void s_tpl_fps_playing(void) { tpl_playing("fps_template.ppm", "FPS Player"); }
+static void s_tpl_tps_playing(void) { tpl_playing("tps_template.ppm", "TPS Player"); }
 static void s_tpl_stop(void) {
     ED.in_frame = true;
     ed_stop();

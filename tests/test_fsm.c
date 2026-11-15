@@ -727,6 +727,15 @@ static void test_fsm_playmaker(void) {
     CHECK(NEAR(sv("f"), 2, 1e-5f) && !strcmp(sst(), "Done") && sv("i") == 0, "Get Next With Tag visits both enemies, then Finished (%g %s)", sv("f"), sst());
     sem_end();
 
+    /* Smooth Look At Direction: turns to face +X over time, then sends its event */
+    sem_begin(ONE("[action]\ntype = Smooth Look At Direction\nupdate = every_frame\np0 = Owner\np1 = 3 0 0\np2 = 0.1\np3 = 0 1 0\np4 = true\np5 = World\np6 = 10\np7 = 1\np8 = YES\np9 = $f\n"));
+    sem_run(3, DT);
+    float part = sv("f");
+    sem_run(60, DT);
+    LxVec3 fw = lx_quat_rotate(lx_entity_world_rotation(g_ss, g_so), lx_v3(0, 0, -1));
+    CHECK(part > 5 && part < 89 && VEQ(fw, 1, 0, 0, 0.03f) && !strcmp(sst(), "Yes"), "Smooth Look At Direction turns gradually, then finishes (%g, %.2f %.2f %.2f, %s)", part, fw.x, fw.y, fw.z, sst());
+    sem_end();
+
     /* ---- keys: a press on the entering frame belongs to the state before ---- */
     sem_begin(ONE("[action]\ntype = Get Key Down\np0 = Space\np1 = YES\n[action]\ntype = Get Key\np0 = Space\np1 = $b\n"));
     pm_frame(); g_lx_input.keys[LX_KEY_SPACE] = true; pm_step();
@@ -836,146 +845,215 @@ static LxScene *tp_open(const char *name, LxProjectTemplate tpl, LxProject *proj
         graphs++;
     }
     lx_free(ents);
-    CHECK(graphs >= 6, "%s has its graphs (%d)", name, graphs);
+    CHECK(graphs == 0, "%s is all scripts: no graphs (%d)", name, graphs);
     char sp[LX_PATH_MAX];
     lx_path_join(sp, sizeof sp, proj->assets, "Scenes/Main.lxscene");
     LxScene *s = lx_scene_load(sp);
     CHECK(s != 0, "%s scene loads", name);
     return s;
 }
-static void tp_run(LxScene *s, float seconds) { for (int i = 0; i < (int)(seconds * 60); i++) lx_scene_simulate(s, 1.0f / 60); }
-static const char *tp_state(LxScene *s, const char *ent, int slot) { LxEntity e = lx_entity_find(s, ent); return e ? lx_fsm_current_state(s, e, slot) : "(gone)"; }
 static int tp_count_tag(LxScene *s, const char *tag) {
     int n = 0;
     for (int i = 0; i < lx_scene_entity_count(s); i++) { LxEntity e = lx_scene_entity_at(s, i); if (e && !strcmp(lx_entity_tag(s, e), tag)) n++; }
     return n;
 }
 
+#if LUXORA_SCRIPT_COMPILER
+/* compiles and loads a project's Assets/Scripts like the editor does */
+static bool tp_scripts(const LxProject *proj) {
+    char dir[LX_PATH_MAX], sdk[LX_PATH_MAX], out[LX_PATH_MAX];
+    lx_path_join(dir, sizeof dir, proj->assets, "Scripts");
+    lx_path_join(sdk, sizeof sdk, proj->root, "Library/sdk");
+    lx_path_join(out, sizeof out, proj->root, "Library/scripts.lxo");
+    LxDirEntry *ents = NULL;
+    int n = lx_dir_list(dir, &ents);
+    static char paths[32][LX_PATH_MAX];
+    const char *files[32];
+    int nf = 0;
+    for (int i = 0; i < n && nf < 32; i++) {
+        size_t l = strlen(ents[i].name);
+        if (ents[i].is_dir || l < 3 || strcmp(ents[i].name + l - 2, ".c")) continue;
+        lx_path_join(paths[nf], sizeof paths[nf], dir, ents[i].name);
+        files[nf] = paths[nf];
+        nf++;
+    }
+    lx_free(ents);
+    LxScriptCompileStats st;
+    g_diag_errors = 0;
+    bool ok = lx_script_compile(files, nf, sdk, out, test_diag, NULL, &st);
+    CHECK(ok && st.errors == 0 && st.warnings == 0, "%s: %d scripts compile without errors or warnings (%d errors, %d warnings)", proj->name, nf, st.errors, st.warnings);
+    CHECK(ok && lx_scripts_load(out), "%s: scripts load", proj->name);
+    return ok;
+}
+static void tp_frame(LxScene *s) {
+    lx_game_ui_begin_frame(0, 0, 1280, 720, true);
+    lx_input_update(1.0f / 60);
+    lx_scene_simulate(s, 1.0f / 60);
+}
+/* hold or tap something for one frame, then let go */
+static void tp_tap(LxScene *s, bool *button) {
+    lx_input_begin_frame(); *button = true; tp_frame(s);
+    lx_input_begin_frame(); *button = false; tp_frame(s);
+}
+static float tp_param(LxScene *s, const char *ent, int i) {
+    LxEntity e = lx_entity_find(s, ent);
+    LxBehaviourRef *b = e ? lx_get_behaviour(s, e) : NULL;
+    return b ? b->params[i] : -999;
+}
+static float G(const char *name) { return lx_fsm_global_float(name); }
+
 static void test_templates(void) {
-    printf("game templates\n");
+    printf("game templates (C scripts)\n");
     lx_input_begin_frame();   /* no mouse movement left over from the input tests */
     g_lx_input.prev_mouse_pos = g_lx_input.mouse_pos;
+    memset(g_lx_input.keys, 0, sizeof g_lx_input.keys);
+    memset(g_lx_input.mouse, 0, sizeof g_lx_input.mouse);
+    lx_input_map_defaults(lx_input_map());
     lx_input_update(1.0f / 60);
     LxProject proj;
     /* ---- first person ---- */
     LxScene *s = tp_open("luxora_tpl_fps", LX_TEMPLATE_FPS, &proj);
-    if (s) {
+    if (s && tp_scripts(&proj)) {
+        lx_scene_destroy(s);   /* loaded again now its behaviours exist */
+        char sp[LX_PATH_MAX];
+        lx_path_join(sp, sizeof sp, proj.assets, "Scenes/Main.lxscene");
+        s = lx_scene_load(sp);
         LxEntity player = lx_entity_find(s, "Player"), cam = lx_entity_find(s, "Main Camera");
         CHECK(player && cam && lx_entity_parent(s, cam) == player, "FPS: the camera rides on the player");
-        CHECK(tp_count_tag(s, "Enemy") == 6, "FPS: six enemies");
-        tp_run(s, 0.2f);
-        CHECK(!strcmp(tp_state(s, "Game Manager", 0), "Playing"), "FPS: game manager playing (%s)", tp_state(s, "Game Manager", 0));
-        CHECK(!strcmp(tp_state(s, "Player", 0), "Playing") && !strcmp(tp_state(s, "Player", 1), "Ready"), "FPS: controller and weapon ready (%s, %s)",
-              tp_state(s, "Player", 0), tp_state(s, "Player", 1));
+        CHECK(tp_count_tag(s, "Enemy") == 6 && lx_entity_find(s, "Door"), "FPS: six enemies and a door");
+        for (int i = 0; i < 20; i++) tp_frame(s);
+        CHECK(G("Game Phase") == 0 && G("Ammo") == 24 && G("Reserve Ammo") == 72 && G("Health") == 100, "FPS: the game starts (ammo %g / %g)", G("Ammo"), G("Reserve Ammo"));
         CHECK(lx_mouse_lock_wanted(), "FPS: the mouse is locked for looking");
-        CHECK(!strcmp(tp_state(s, "Enemy 1", 0), "Idle") || !strcmp(tp_state(s, "Enemy 1", 0), "Wander"), "FPS: enemies idle (%s)", tp_state(s, "Enemy 1", 0));
-        /* shooting: put Enemy 1 straight in front of the camera and pull the trigger */
+        LxVec3 p0 = lx_entity_world_position(s, player);
+        CHECK(p0.y > -0.1f && p0.y < 0.1f, "FPS: the player stands on the ground (%.2f)", p0.y);
+        /* walking forward with W */
+        lx_input_begin_frame(); g_lx_input.keys[LX_KEY_W] = true;
+        for (int i = 0; i < 30; i++) { tp_frame(s); lx_input_begin_frame(); }
+        g_lx_input.keys[LX_KEY_W] = false;
+        tp_frame(s);
+        LxVec3 p1 = lx_entity_world_position(s, player);
+        CHECK(p1.z < p0.z - 1.5f, "FPS: W walks forward (%.2f -> %.2f)", p0.z, p1.z);
+        /* shooting: Enemy 1 straight ahead, then the trigger */
         LxEntity e1 = lx_entity_find(s, "Enemy 1");
-        LxVec3 pp = lx_entity_world_position(s, player);
-        lx_entity_set_position(s, e1, lx_v3(pp.x, 0, pp.z - 4));
-        lx_fsm_send_event(s, player, "FIRE", 0, 0);
-        tp_run(s, 0.1f);
-        CHECK(NEAR(lx_fsm_global_float("Ammo"), 11, 0.01f), "FPS: a shot uses a bullet (%g)", lx_fsm_global_float("Ammo"));
-        CHECK(NEAR(lx_fsm_get_var_float(s, e1, 0, "Health"), 35, 0.01f), "FPS: the bullet hits the enemy (health %g, %s)",
-              lx_fsm_get_var_float(s, e1, 0, "Health"), tp_state(s, "Enemy 1", 0));
-        CHECK(tp_count_tag(s, "Untagged") >= 0 && lx_entity_find(s, "Impact"), "FPS: an impact spark spawns");
-        /* reload moves bullets from the reserve */
-        tp_run(s, 0.5f);
-        lx_fsm_send_event(s, player, "RELOAD", 0, 0);
-        tp_run(s, 1.5f);
-        CHECK(NEAR(lx_fsm_global_float("Ammo"), 12, 0.01f) && NEAR(lx_fsm_global_float("Reserve Ammo"), 35, 0.01f), "FPS: reload (%g / %g)",
-              lx_fsm_global_float("Ammo"), lx_fsm_global_float("Reserve Ammo"));
-        /* killing an enemy scores and removes it */
-        lx_fsm_send_event(s, e1, "HIT", 1000, 0);
-        tp_run(s, 1.0f);
-        CHECK(!lx_entity_find(s, "Enemy 1") && NEAR(lx_fsm_global_float("Score"), 100, 0.01f), "FPS: a dead enemy scores and goes (score %g)",
-              lx_fsm_global_float("Score"));
+        lx_entity_set_position(s, e1, lx_v3(p1.x, 0, p1.z - 5));
+        tp_frame(s);
+        tp_tap(s, &g_lx_input.mouse[LX_MOUSE_LEFT]);
+        for (int i = 0; i < 5; i++) tp_frame(s);
+        float hp = tp_param(s, "Enemy 1", 0);
+        CHECK(G("Ammo") == 23 && hp < 60, "FPS: a shot uses a bullet and hits (ammo %g, enemy health %g)", G("Ammo"), hp);
+        CHECK(lx_entity_find(s, "Impact") != 0, "FPS: an impact spark");
+        /* reload */
+        for (int i = 0; i < 30; i++) tp_frame(s);
+        tp_tap(s, &g_lx_input.keys[LX_KEY_R]);
+        for (int i = 0; i < 100; i++) tp_frame(s);
+        CHECK(G("Ammo") == 24 && G("Reserve Ammo") == 71, "FPS: reload (%g / %g)", G("Ammo"), G("Reserve Ammo"));
+        /* a dead enemy scores and goes */
+        lx_send_message(s, e1, "Damage", 1000, player);
+        for (int i = 0; i < 60; i++) tp_frame(s);
+        CHECK(!lx_entity_find(s, "Enemy 1") && G("Score") == 100, "FPS: a dead enemy scores and goes (score %g)", G("Score"));
         /* an enemy near the player chases and hurts them */
         LxEntity e2 = lx_entity_find(s, "Enemy 2");
-        pp = lx_entity_world_position(s, player);
-        lx_entity_set_position(s, e2, lx_v3(pp.x + 5, 0, pp.z));
-        tp_run(s, 4);
-        CHECK(lx_fsm_global_float("Health") < 100, "FPS: the enemy chases and attacks (health %g, %s)", lx_fsm_global_float("Health"), tp_state(s, "Enemy 2", 0));
-        /* pause and resume */
-        lx_fsm_send_event(s, lx_entity_find(s, "Game Manager"), "OPEN_MENU", 0, 0);
-        tp_run(s, 0.1f);
-        CHECK(!strcmp(tp_state(s, "Game Manager", 0), "Paused") && !strcmp(tp_state(s, "Player", 0), "Paused") && !lx_mouse_lock_wanted(),
-              "FPS: pause menu frees the mouse (%s)", tp_state(s, "Player", 0));
-        CHECK(lx_time_scale() == 0, "FPS: pausing freezes time");
-        tp_run(s, 0.2f);
-        CHECK(!strcmp(tp_state(s, "Game Manager", 0), "Paused"), "FPS: stays paused");
-        /* Esc (the Pause action) closes the menu again */
-        lx_input_begin_frame();
-        g_lx_input.keys[LX_KEY_ESCAPE] = true;
-        lx_input_update(1.0f / 60);
-        lx_scene_simulate(s, 1.0f / 60);
-        lx_input_begin_frame();
-        g_lx_input.keys[LX_KEY_ESCAPE] = false;
-        lx_input_update(1.0f / 60);
-        tp_run(s, 0.1f);
-        CHECK(lx_time_scale() == 1, "FPS: Esc resumes (%s)", tp_state(s, "Game Manager", 0));
-        CHECK(!strcmp(tp_state(s, "Player", 0), "Playing") && !strcmp(tp_state(s, "Player", 1), "Ready") && lx_mouse_lock_wanted(), "FPS: resume");
+        LxVec3 pp = lx_entity_world_position(s, player);
+        lx_entity_set_position(s, e2, lx_v3(pp.x + 6, 0, pp.z));
+        tp_tap(s, &g_lx_input.mouse[LX_MOUSE_LEFT]);   /* the shot is heard */
+        for (int i = 0; i < 300 && G("Health") >= 100; i++) tp_frame(s);
+        CHECK(G("Health") < 100, "FPS: an enemy behind the player hears the shot, chases and attacks (health %g)", G("Health"));
+        lx_send_message(s, e2, "Damage", 1000, player);
+        for (int i = 0; i < 40; i++) tp_frame(s);
+        /* the door: stand in front of it, look at it, press E */
+        LxEntity door = lx_entity_find(s, "Door");
+        LxVec3 d0 = lx_entity_world_position(s, door);
+        lx_entity_set_position(s, player, lx_v3(d0.x, 0, d0.z + 2.0f));
+        for (int i = 0; i < 3; i++) tp_frame(s);
+        tp_tap(s, &g_lx_input.keys[LX_KEY_E]);
+        for (int i = 0; i < 60; i++) tp_frame(s);
+        LxVec3 d1 = lx_entity_world_position(s, door);
+        CHECK(fabsf(d1.x - d0.x) > 2, "FPS: E opens the door it looks at (x %.2f -> %.2f)", d0.x, d1.x);
+        /* pause and resume with Esc */
+        tp_tap(s, &g_lx_input.keys[LX_KEY_ESCAPE]);
+        CHECK(G("Game Phase") == 1 && lx_time_scale() == 0 && !lx_mouse_lock_wanted(), "FPS: Esc pauses, freezes time and frees the mouse");
+        tp_tap(s, &g_lx_input.keys[LX_KEY_ESCAPE]);
+        CHECK(G("Game Phase") == 0 && lx_time_scale() == 1 && lx_mouse_lock_wanted(), "FPS: Esc again resumes");
         /* winning: every enemy gone */
         for (int i = 2; i <= 6; i++) {
             char n[16];
             snprintf(n, sizeof n, "Enemy %d", i);
             LxEntity e = lx_entity_find(s, n);
-            if (e) lx_fsm_send_event(s, e, "HIT", 1000, 0);
+            if (e) lx_send_message(s, e, "Damage", 1000, player);
         }
-        tp_run(s, 1.0f);
-        CHECK(!strcmp(tp_state(s, "Game Manager", 0), "Victory") && NEAR(lx_fsm_global_float("Score"), 600, 0.01f), "FPS: clearing the area wins (%s, %g)",
-              tp_state(s, "Game Manager", 0), lx_fsm_global_float("Score"));
-        CHECK(!strcmp(tp_state(s, "Player", 0), "Stopped"), "FPS: controller stops on WIN");
+        for (int i = 0; i < 60; i++) tp_frame(s);
+        CHECK(G("Game Phase") == 2 && G("Score") == 3 * 100 + 3 * 150, "FPS: clearing the area wins (phase %g, score %g)", G("Game Phase"), G("Score"));
         lx_scene_stop_simulation(s);
         lx_scene_destroy(s);
-    }
+        lx_scripts_unload();
+    } else if (s) lx_scene_destroy(s);
     lx_assets_clear();
 
     /* ---- third person ---- */
     s = tp_open("luxora_tpl_tps", LX_TEMPLATE_THIRD_PERSON, &proj);
-    if (s) {
+    if (s && tp_scripts(&proj)) {
+        lx_scene_destroy(s);
+        char sp[LX_PATH_MAX];
+        lx_path_join(sp, sizeof sp, proj.assets, "Scenes/Main.lxscene");
+        s = lx_scene_load(sp);
         LxEntity player = lx_entity_find(s, "Player");
-        int coins = tp_count_tag(s, "Coin");
-        CHECK(coins == 12 && tp_count_tag(s, "Enemy") == 4, "TPS: coins and enemies (%d)", coins);
-        tp_run(s, 1.0f);
-        CHECK(!strcmp(tp_state(s, "Player", 0), "Playing") && !strcmp(tp_state(s, "Player", 1), "Ready"), "TPS: controller and attack ready (%s, %s)",
-              tp_state(s, "Player", 0), tp_state(s, "Player", 1));
-        /* the camera orbits behind the player */
+        CHECK(tp_count_tag(s, "Coin") == 12 && tp_count_tag(s, "Enemy") == 4, "TPS: coins and enemies");
+        for (int i = 0; i < 60; i++) tp_frame(s);
         LxVec3 cp = lx_entity_world_position(s, lx_entity_find(s, "Main Camera")), pp = lx_entity_world_position(s, player);
         float d = lx_len3(lx_sub3(cp, pp));
-        CHECK(d > 2 && d < 8, "TPS: the camera follows (%.2f m)", d);
+        CHECK(d > 3 && d < 8 && cp.z > pp.z, "TPS: the camera follows from behind (%.2f m)", d);
         CHECK(pp.y > -0.1f && pp.y < 0.2f, "TPS: the player stands on the ground (y %.2f)", pp.y);
-        /* collect a coin */
-        LxEntity c1 = lx_entity_find(s, "Coin 1");
-        LxVec3 cpos = lx_entity_world_position(s, c1);
-        lx_entity_set_position(s, player, lx_v3(cpos.x, 0, cpos.z));
-        tp_run(s, 0.6f);
-        CHECK(!lx_entity_find(s, "Coin 1") && NEAR(lx_fsm_global_float("Score"), 50, 0.01f) && NEAR(lx_fsm_global_float("Coins"), 1, 0.01f),
-              "TPS: a coin is picked up (score %g, coins %g)", lx_fsm_global_float("Score"), lx_fsm_global_float("Coins"));
-        /* sword: an enemy within reach takes a HIT */
+        /* a coin */
+        LxVec3 c1 = lx_entity_world_position(s, lx_entity_find(s, "Coin 1"));
+        lx_entity_set_position(s, player, lx_v3(c1.x, 0, c1.z));
+        for (int i = 0; i < 30; i++) tp_frame(s);
+        CHECK(!lx_entity_find(s, "Coin 1") && G("Score") == 50 && G("Coins") == 1, "TPS: a coin is picked up (score %g, coins %g)", G("Score"), G("Coins"));
+        /* the sword: a three-hit combo on a tough enemy right next to the player */
         LxEntity e1 = lx_entity_find(s, "Enemy 1");
+        lx_get_behaviour(s, e1)->params[0] = 500;
+        lx_get_behaviour(s, e1)->params[4] = 0;   /* a punching bag: it doesn't hit back */
         pp = lx_entity_world_position(s, player);
-        lx_entity_set_position(s, e1, lx_v3(pp.x + 1.5f, 0, pp.z));
-        tp_run(s, 0.05f);
-        float hp = lx_fsm_get_var_float(s, e1, 0, "Health");
-        lx_fsm_send_event(s, player, "ATTACK", 0, 0);
-        tp_run(s, 0.1f);
-        CHECK(lx_fsm_get_var_float(s, e1, 0, "Health") <= hp - 30 + 0.01f, "TPS: the sword hits (%g -> %g)", hp, lx_fsm_get_var_float(s, e1, 0, "Health"));
-        /* game over at 0 health */
-        lx_fsm_send_event(s, player, "DAMAGE", 1000, 0);
-        tp_run(s, 0.2f);
-        CHECK(!strcmp(tp_state(s, "Game Manager", 0), "Game Over") && !strcmp(tp_state(s, "Player", 0), "Stopped") && NEAR(lx_fsm_global_float("Health"), 0, 0.01f),
-              "TPS: dying ends the game (%s)", tp_state(s, "Game Manager", 0));
-        /* heal pickups don't bring the dead back */
-        lx_fsm_send_event(s, player, "HEAL", 25, 0);
-        tp_run(s, 0.1f);
-        CHECK(NEAR(lx_fsm_global_float("Health"), 0, 0.01f), "TPS: no healing after death");
+        lx_entity_set_position(s, e1, lx_v3(pp.x + 1.4f, 0, pp.z));
+        tp_frame(s);
+        for (int k = 0; k < 3; k++) {
+            tp_tap(s, &g_lx_input.mouse[LX_MOUSE_LEFT]);
+            for (int i = 0; i < 10; i++) { lx_entity_set_position(s, e1, lx_v3(pp.x + 1.4f, 0, pp.z)); tp_frame(s); }
+        }
+        for (int i = 0; i < 40; i++) tp_frame(s);
+        float hp = tp_param(s, "Enemy 1", 0);
+        CHECK(hp < 500 - 24 * 2 - 24 * 1.9f + 0.5f, "TPS: a three-hit combo (enemy health 500 -> %g)", hp);
+        /* the dodge roll can't be hit early on */
+        float before = G("Health");
+        lx_input_begin_frame(); g_lx_input.keys[LX_KEY_C] = true; tp_frame(s);
+        lx_send_message(s, player, "Damage", 10, e1);
+        lx_input_begin_frame(); g_lx_input.keys[LX_KEY_C] = false; tp_frame(s);
+        CHECK(G("Health") == before, "TPS: dodging avoids damage (%g -> %g)", before, G("Health"));
+        for (int i = 0; i < 60; i++) tp_frame(s);
+        before = G("Health");
+        lx_send_message(s, player, "Damage", 10, e1);
+        tp_frame(s);
+        CHECK(G("Health") == before - 10, "TPS: ...but not standing still (%g)", G("Health"));
+        /* lock on: the camera turns to keep the target in view */
+        tp_tap(s, &g_lx_input.keys[LX_KEY_TAB]);
+        for (int i = 0; i < 90; i++) tp_frame(s);
+        LxVec3 camf = lx_quat_rotate(lx_entity_world_rotation(s, lx_entity_find(s, "Main Camera")), lx_v3(0, 0, -1));
+        LxVec3 to = lx_sub3(lx_entity_world_position(s, e1), lx_entity_world_position(s, lx_entity_find(s, "Main Camera")));
+        CHECK(lx_dot3(lx_norm3(lx_v3(camf.x, 0, camf.z)), lx_norm3(lx_v3(to.x, 0, to.z))) > 0.9f, "TPS: lock-on keeps the enemy in view");
+        /* dying ends the game, and pickups don't bring you back */
+        lx_send_message(s, player, "Damage", 1000, e1);
+        for (int i = 0; i < 10; i++) tp_frame(s);
+        CHECK(G("Game Phase") == 3 && G("Health") == 0 && !lx_mouse_lock_wanted(), "TPS: dying ends the game (phase %g)", G("Game Phase"));
         lx_scene_stop_simulation(s);
         lx_scene_destroy(s);
-    }
+        lx_scripts_unload();
+    } else if (s) lx_scene_destroy(s);
     lx_assets_clear();
+    lx_time_set_scale(1);
     lx_mouse_reset();
 }
+#else
+static void test_templates(void) {}
+#endif
 
 /* what a user built: Get Axis ("Move X" with a space) into a vector, into Character Move */
 static void test_axis_into_character_move(void) {

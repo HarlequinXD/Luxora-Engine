@@ -1519,7 +1519,7 @@ static void test_input(void) {
     LxInputMap *m = lx_input_map();
     lx_input_map_defaults(m);
     g_lx_pad_polling_disabled = true; /* don't let real devices overwrite injected state */
-    CHECK(lx_input_find(m, "Jump") && lx_input_find(m, "MoveX") && m->touch_count == 4, "default map");
+    CHECK(lx_input_find(m, "Jump") && lx_input_find(m, "MoveX") && m->touch_count == 5 && lx_input_find(m, "Crouch") && lx_input_find(m, "Reload") && lx_input_find(m, "Lock On"), "default map");
     /* keyboard */
     memset(&g_lx_input, 0, sizeof g_lx_input);
     g_lx_input.width = 1280; g_lx_input.height = 720;

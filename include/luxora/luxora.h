@@ -930,6 +930,8 @@ typedef struct LxRaycastHit {
 
 /* Queries test colliders (and character controllers) as they are right now. Triggers are ignored. */
 bool lx_physics_raycast(LxScene *s, LxVec3 origin, LxVec3 dir, float max_dist, uint32_t layer_mask, LxRaycastHit *hit);
+/* the same, skipping colliders on `ignore` and everything under it (a gun's ray never hits its own player) */
+bool lx_physics_raycast_ignore(LxScene *s, LxVec3 origin, LxVec3 dir, float max_dist, uint32_t layer_mask, LxEntity ignore, LxRaycastHit *hit);
 bool lx_physics_sphere_cast(LxScene *s, LxVec3 origin, float radius, LxVec3 dir, float max_dist, uint32_t layer_mask,
                             LxRaycastHit *hit);
 int lx_physics_overlap_sphere(LxScene *s, LxVec3 center, float radius, uint32_t layer_mask, LxEntity *out, int max_out);
