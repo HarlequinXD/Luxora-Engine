@@ -1466,12 +1466,33 @@ static bool char_own(const CharCtx *k, const Body *b) {
     return false;
 }
 
+/* is what it ran into really a step? Where the capsule touches a wall says little (against a tall box the contact
+ * is at the height of the capsule's rounded bottom, which looks like a step): lifted by the step height, the capsule
+ * must be clear of the obstacle's side, so its top is within reach */
+static bool char_can_step(CharCtx *k, LxVec3 feet, LxVec3 n, const Body *b) {
+    /* lifted, and pressed a little into it (other contacts this pass may already have pushed the capsule back off) */
+    LxVec3 into = lx_v3(-n.x, 0, -n.z);
+    float il = lx_len3(into);
+    if (il > 1e-4f) feet = lx_madd3(feet, into, (k->radius * 0.5f + 0.05f) / il);   /* over the edge it would stand on */
+    float top = feet.y + k->step_height + 0.01f;
+    Body cap = char_body(k, lx_v3(feet.x, top, feet.z));
+    if (!aabb_overlap(cap.box, b->box)) return true;
+    Manifold m;
+    collide(k->w, &cap, b, &m);
+    for (int c = 0; c < m.count; c++) {
+        LxVec3 n = scl(m.n[c], -1.0f);
+        if (m.sep[c] < -0.002f && (n.y < k->cos_slope || m.p[c].y > top)) return false;   /* still against its side, or its top is higher */
+    }
+    return true;
+}
+
 /* pushes the capsule out of everything it overlaps; returns flags, slides `motion` along what it hit */
 static int char_resolve(CharCtx *k, LxVec3 *feet, LxVec3 *motion, bool allow_step, bool push_bodies) {
     int flags = 0;
     Manifold m;
     for (int iter = 0; iter < 4; iter++) {
         Body cap = char_body(k, *feet);
+        const LxVec3 feet0 = *feet;   /* where the contacts were found */
         bool any = false;
         for (int i = 0; i < k->w->nb; i++) {
             Body *b = &k->w->bodies[i];
@@ -1479,8 +1500,10 @@ static int char_resolve(CharCtx *k, LxVec3 *feet, LxVec3 *motion, bool allow_ste
             if (!layers_collide(0, b->layer)) continue;
             collide(k->w, &cap, b, &m);
             for (int c = 0; c < m.count; c++) {
-                float sep = m.sep[c];
                 LxVec3 n = scl(m.n[c], -1.0f);           /* from the obstacle to the character */
+                /* how deep it is now: earlier contacts may already have pushed it out (a mesh face is two triangles,
+                 * each reporting the same overlap; pushing for both doubled the push and made it jitter) */
+                float sep = m.sep[c] + dot(sub(*feet, feet0), n);
                 if (sep > 0.002f) {
                     if (n.y >= k->cos_slope && sep < 0.03f) flags |= LX_CHAR_GROUNDED;   /* resting on it */
                     continue;
@@ -1488,7 +1511,17 @@ static int char_resolve(CharCtx *k, LxVec3 *feet, LxVec3 *motion, bool allow_ste
                 any = true;
                 float rise = m.p[c].y - feet->y;
                 bool walkable = n.y >= k->cos_slope;
-                if (!walkable && allow_step && n.y > -0.3f && rise > 0.01f && rise <= k->step_height) {
+                /* ground is at the feet: a contact higher than a step (the top edge of a crate, the top face of a
+                 * mesh caught by the capsule's side) is a wall, however the push happens to point */
+                if (walkable && rise > k->step_height + 0.02f) {
+                    walkable = false;
+                    n = lx_v3(n.x, 0, n.z);
+                    float hl = lx_len3(n);
+                    if (hl < 1e-4f) continue;   /* straight overhead or underneath: nothing sideways to do */
+                    n = scl(n, 1.0f / hl);
+                    sep *= hl;
+                }
+                if (!walkable && allow_step && n.y > -0.3f && rise > 0.01f && rise <= k->step_height && char_can_step(k, feet0, n, b)) {
                     feet->y += rise + 0.01f;                    /* climb the step */
                     flags |= LX_CHAR_GROUNDED;
                     break;

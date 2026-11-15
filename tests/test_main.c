@@ -211,6 +211,31 @@ static void test_character_no_sinking(void) {
     }
     CHECK(lowest > -0.02f, "never below the floor (lowest feet %.3f)", lowest);
     lx_scene_destroy(s);
+    /* walking into boxes: one lower than the step height is climbed, a 1 m one (box or mesh collider) never is, and
+     * pushing into it must not bob the character up and down */
+    static const float heights[3] = {0.25f, 1.0f, 1.0f};
+    for (int t = 0; t < 3; t++) {
+        LxScene *w = lx_scene_create("Steps");
+        LxEntity g = lx_spawn_primitive(w, LX_PRIM_CUBE, "Ground", lx_v3(0, -0.5f, 0));
+        lx_entity_set_scale(w, g, lx_v3(40, 1, 40));
+        LxEntity bx = lx_spawn_primitive(w, LX_PRIM_CUBE, "Crate", lx_v3(0, heights[t] * 0.5f, 2));
+        lx_entity_set_scale(w, bx, lx_v3(1, heights[t], 1));
+        if (t == 2) { lx_remove_component(w, bx, LX_COMP_COLLIDER); lx_add_collider(w, bx, LX_COLLIDER_MESH); }
+        LxEntity ch = lx_entity_create(w, "Player");
+        lx_add_character(w, ch)->step_height = 0.35f;
+        float highest = 0, prev = 0;
+        int bobs = 0;
+        for (int f = 0; f < 300; f++) {
+            lx_character_move(w, ch, lx_v3(0, lx_character_grounded(w, ch) ? -0.03f : -0.15f, 0.1f));
+            float y = lx_entity_world_position(w, ch).y;
+            highest = lx_maxf(highest, y);
+            if (f > 30 && fabsf(y - prev) > 0.05f && heights[t] > 0.5f) bobs++;
+            prev = y;
+        }
+        if (t == 0) CHECK(highest > 0.24f, "climbs a 0.25 m step (highest %.2f)", highest);
+        else CHECK(highest < 0.05f && bobs == 0, "a 1 m %s collider is a wall (highest %.2f, %d bobs)", t == 2 ? "mesh" : "box", highest, bobs);
+        lx_scene_destroy(w);
+    }
 }
 
 static void test_physics(void) {
