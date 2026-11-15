@@ -430,6 +430,29 @@ static void test_fsm_semantics(void) {
     CHECK(NEAR(sv("f"), 90, 1e-3f) && NEAR(sv("f2"), 1, 1e-5f), "Atan2 and Sin in degrees (%g %g)", sv("f"), sv("f2"));
     sem_end();
 
+    /* the whole int range, including the values that used to overflow the doubling loop */
+    sem_begin(ONE("[action]\ntype = Closest Power Of Two\np0 = 100\np1 = $i\n"
+                  "[action]\ntype = Next Power Of Two\np0 = 100\np1 = $i2\n"));
+    sem_run(2, DT);
+    CHECK(sv("i") == 128 && sv("i2") == 128, "Closest and Next Power Of Two for 100 (%g %g)", sv("i"), sv("i2"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Closest Power Of Two\np0 = 2000000000\np1 = $i\n"));
+    sem_run(2, DT);
+    CHECK(sv("i") == 1073741824, "Closest Power Of Two near the top of the int range stops at 2^30 (%g)", sv("i"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Closest Power Of Two\np0 = -5\np1 = $i\n"));
+    sem_run(2, DT);
+    CHECK(sv("i") == 1, "Closest Power Of Two of a negative number is 1 (%g)", sv("i"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Int Operator\np0 = 2000000000\np1 = 2000000000\np2 = Add\np3 = $i\n"
+                  "[action]\ntype = Int Multiply\np0 = $i2\np1 = 2\n"));
+    sem_run(2, DT);
+    CHECK(sv("i") == 2147483647, "Int Operator saturates instead of overflowing (%g)", sv("i"));
+    sem_end();
+
     sem_begin(ONE("[action]\ntype = Enum Switch\np0 = 2\np1 = \np2 = \np3 = YES\np4 = \np5 = \np6 = \np7 = NO\n"));
     sem_run(2, DT);
     CHECK(!strcmp(sst(), "Yes"), "Enum Switch picks the event for case 2 (%s)", sst());

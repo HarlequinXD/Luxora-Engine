@@ -7,6 +7,16 @@
 /* ==========================================================================================
  *  shared bits
  * ========================================================================================== */
+/* Int arithmetic from a graph, kept well defined. Overflowing a signed int is undefined behaviour,
+ * not a wrap: the compiler may assume it cannot happen and optimise on that basis. Every Int action
+ * works out its answer in 64 bits and saturates, so a runaway sum sticks at the limit instead of
+ * wrapping to a negative number or, worse, licensing the compiler to do anything at all. */
+static int fsm_sat(long long v) {
+    if (v > 2147483647LL) return 2147483647;
+    if (v < -2147483648LL) return -2147483647 - 1;
+    return (int)v;
+}
+
 static float fsm_repeat(float t, float length) {
     if (length <= 0) return 0;
     return lx_clampf(t - floorf(t / length) * length, 0, length);
@@ -334,13 +344,14 @@ static void i_set(LxFsmCtx *c) { lx_fsm_set_int(c, 1, lx_fsm_int(c, 0)); }
 static const LxFsmActionDesc A_INT_SET = {"Int Set Value", "Integer", "Stores a whole number in an Int variable.", "{1} = {0}",
     {P("Value", LX_FSM_INT, "0"), POUT("Store Result", LX_FSM_INT)}, 0, 0, LX_FSM_ONCE, i_set, i_set, NULL};
 
-static void i_add(LxFsmCtx *c) { lx_fsm_set_int(c, 0, lx_fsm_int(c, 0) + lx_fsm_int(c, 1)); }
+static void i_add(LxFsmCtx *c) { lx_fsm_set_int(c, 0, fsm_sat((long long)lx_fsm_int(c, 0) + lx_fsm_int(c, 1))); }
 static const LxFsmActionDesc A_INT_ADD = {"Int Add", "Integer", "Adds a whole number to an Int variable (scores, counters).", "{0} += {1}",
     {POUT("Int Variable", LX_FSM_INT), P("Add", LX_FSM_INT, "1")}, 0, 0, LX_FSM_ONCE, i_add, i_add, NULL};
 
 static void i_add_clamped(LxFsmCtx *c) {
-    int v = lx_fsm_int(c, 0) + lx_fsm_int(c, 1), lo = lx_fsm_int(c, 2), hi = lx_fsm_int(c, 3);
-    lx_fsm_set_int(c, 0, v < lo ? lo : (v > hi ? hi : v));
+    long long v = (long long)lx_fsm_int(c, 0) + lx_fsm_int(c, 1);
+    int lo = lx_fsm_int(c, 2), hi = lx_fsm_int(c, 3);
+    lx_fsm_set_int(c, 0, v < lo ? lo : (v > hi ? hi : (int)v));
 }
 static const LxFsmActionDesc A_INT_ADD_CLAMPED = {"Int Add Clamped", "Integer", "Adds to an Int variable and keeps it between Min and Max (lives, ammo).",
     "{0} += {1} ({2}..{3})",
@@ -348,11 +359,11 @@ static const LxFsmActionDesc A_INT_ADD_CLAMPED = {"Int Add Clamped", "Integer", 
     0, 0, LX_FSM_ONCE, i_add_clamped, i_add_clamped, NULL};
 
 static void i_add_wrap(LxFsmCtx *c) {
-    int lo = lx_fsm_int(c, 2), hi = lx_fsm_int(c, 3);
-    int v = lx_fsm_int(c, 0) + lx_fsm_int(c, 1);
-    int span = hi - lo + 1;
+    long long lo = lx_fsm_int(c, 2), hi = lx_fsm_int(c, 3);
+    long long v = (long long)lx_fsm_int(c, 0) + lx_fsm_int(c, 1);
+    long long span = hi - lo + 1;
     if (span > 0) { v = (v - lo) % span; if (v < 0) v += span; v += lo; }
-    lx_fsm_set_int(c, 0, v);
+    lx_fsm_set_int(c, 0, fsm_sat(v));
 }
 static const LxFsmActionDesc A_INT_ADD_WRAP = {"Int Add Wrap", "Integer", "Adds to an Int variable; past Max it wraps round to Min (menu selection, weapon cycling).",
     "{0} += {1} wrap {2}..{3}",
@@ -360,20 +371,20 @@ static const LxFsmActionDesc A_INT_ADD_WRAP = {"Int Add Wrap", "Integer", "Adds 
     0, 0, LX_FSM_ONCE, i_add_wrap, i_add_wrap, NULL};
 
 static void i_add_multiple(LxFsmCtx *c) {
-    int sum = 0;
+    long long sum = lx_fsm_int(c, 0);
     for (int i = 1; i <= 5; i++) if (!lx_fsm_is_none(c, i)) sum += lx_fsm_int(c, i);
-    lx_fsm_set_int(c, 0, lx_fsm_int(c, 0) + sum);
+    lx_fsm_set_int(c, 0, fsm_sat(sum));
 }
 static const LxFsmActionDesc A_INT_ADD_MULTIPLE = {"Int Add Multiple", "Integer", "Adds up to five whole numbers to an Int variable at once.", "{0} += {1}+{2}+{3}",
     {POUT("Int Variable", LX_FSM_INT), PIN_OPT("Add 1", LX_FSM_INT), PIN_OPT("Add 2", LX_FSM_INT),
      PIN_OPT("Add 3", LX_FSM_INT), PIN_OPT("Add 4", LX_FSM_INT), PIN_OPT("Add 5", LX_FSM_INT)},
     0, 0, LX_FSM_ONCE, i_add_multiple, i_add_multiple, NULL};
 
-static void i_subtract(LxFsmCtx *c) { lx_fsm_set_int(c, 0, lx_fsm_int(c, 0) - lx_fsm_int(c, 1)); }
+static void i_subtract(LxFsmCtx *c) { lx_fsm_set_int(c, 0, fsm_sat((long long)lx_fsm_int(c, 0) - lx_fsm_int(c, 1))); }
 static const LxFsmActionDesc A_INT_SUBTRACT = {"Int Subtract", "Integer", "Subtracts a whole number from an Int variable.", "{0} -= {1}",
     {POUT("Int Variable", LX_FSM_INT), P("Subtract", LX_FSM_INT, "1")}, 0, 0, LX_FSM_ONCE, i_subtract, i_subtract, NULL};
 
-static void i_multiply(LxFsmCtx *c) { lx_fsm_set_int(c, 0, lx_fsm_int(c, 0) * lx_fsm_int(c, 1)); }
+static void i_multiply(LxFsmCtx *c) { lx_fsm_set_int(c, 0, fsm_sat((long long)lx_fsm_int(c, 0) * lx_fsm_int(c, 1))); }
 static const LxFsmActionDesc A_INT_MULTIPLY = {"Int Multiply", "Integer", "Multiplies an Int variable by a whole number.", "{0} *= {1}",
     {POUT("Int Variable", LX_FSM_INT), P("Multiply By", LX_FSM_INT, "2")}, 0, 0, LX_FSM_ONCE, i_multiply, i_multiply, NULL};
 
@@ -385,18 +396,19 @@ static const LxFsmActionDesc A_INT_DIVIDE = {"Int Divide", "Integer", "Divides a
     {POUT("Int Variable", LX_FSM_INT), P("Divide By", LX_FSM_INT, "2")}, 0, 0, LX_FSM_ONCE, i_divide, i_divide, NULL};
 
 static void i_operator(LxFsmCtx *c) {
-    int a = lx_fsm_int(c, 0), b = lx_fsm_int(c, 1), r = 0;
+    long long a = lx_fsm_int(c, 0), b = lx_fsm_int(c, 1), r = 0;
     switch (lx_fsm_int(c, 2)) {
     case 0: r = a + b; break;
     case 1: r = a - b; break;
     case 2: r = a * b; break;
+    /* dividing the smallest int by -1 has no int answer, so it saturates like any other overflow */
     case 3: r = b != 0 ? a / b : 0; break;
     case 4: r = a < b ? a : b; break;
     case 5: r = a > b ? a : b; break;
     case 6: r = b != 0 ? a % b : 0; break;
     default: r = a; break;
     }
-    lx_fsm_set_int(c, 3, r);
+    lx_fsm_set_int(c, 3, fsm_sat(r));
 }
 static const LxFsmActionDesc A_INT_OPERATOR = {"Int Operator", "Integer", "Adds, subtracts, multiplies, divides, or takes the smaller, larger or remainder of two whole numbers.",
     "{0} {2} {1} -> {3}",
@@ -889,11 +901,17 @@ static const LxFsmActionDesc A_NEXT_POW2 = {"Next Power Of Two", "Math Utilities
     {P("Value", LX_FSM_INT, "100"), POUT("Store Result", LX_FSM_INT)}, 0, 0, LX_FSM_ONCE, u_next_pow2, u_next_pow2, NULL};
 
 static void u_closest_pow2(LxFsmCtx *c) {
-    int v = lx_fsm_int(c, 0) < 1 ? 1 : lx_fsm_int(c, 0);
-    int lo = 1;
-    while (lo * 2 <= v && lo < (1 << 30)) lo *= 2;
-    int hi = lo * 2;
-    lx_fsm_set_int(c, 1, (v - lo) < (hi - v) ? lo : hi);
+    int v = lx_fsm_int(c, 0);
+    if (v < 1) { lx_fsm_set_int(c, 1, 1); return; }
+    /* All of this is done unsigned, and the step up is tested by division rather than by doubling and
+     * comparing. Doubling a signed int past its range is undefined behaviour, not a wrap: a compiler
+     * may assume it cannot happen, and then a loop guarded by the doubled value never ends. */
+    const unsigned top = 1u << 30;   /* the largest power of two an int can hold */
+    unsigned lo = 1;
+    while (lo < top && lo <= (unsigned)v / 2u) lo *= 2u;
+    if (lo >= top) { lx_fsm_set_int(c, 1, (int)top); return; }
+    unsigned hi = lo * 2u;
+    lx_fsm_set_int(c, 1, (int)(((unsigned)v - lo) < (hi - (unsigned)v) ? lo : hi));
 }
 static const LxFsmActionDesc A_CLOSEST_POW2 = {"Closest Power Of Two", "Math Utilities", "The power of two nearest a whole number.", "closest pow2 {0} -> {1}",
     {P("Value", LX_FSM_INT, "100"), POUT("Store Result", LX_FSM_INT)}, 0, 0, LX_FSM_ONCE, u_closest_pow2, u_closest_pow2, NULL};
