@@ -95,6 +95,19 @@ LX_INLINE LxQuat lx_quat_euler_deg(LxVec3 e) {
 }
 
 LX_INLINE LxQuat lx_quat_conj(LxQuat q) { LxQuat r = {-q.x, -q.y, -q.z, q.w}; return r; }
+/* The part of a rotation that turns about Y, with the leaning and tilting taken out (a swing-twist
+ * split). Root motion uses it to give a clip's turn to the object and leave the rest in the pose. */
+LX_INLINE LxQuat lx_quat_twist_y(LxQuat q) {
+    float l = sqrtf(q.y * q.y + q.w * q.w);
+    if (l < 1e-6f) return lx_quat_identity();   /* turned bodily onto its side: no Y turn to read */
+    LxQuat t = {0, q.y / l, 0, q.w / l};
+    return t;
+}
+/* its angle, in radians, in -pi..pi */
+LX_INLINE float lx_quat_twist_y_angle(LxQuat q) {
+    LxQuat t = lx_quat_twist_y(q);
+    return 2.0f * atan2f(t.y, t.w);
+}
 /* Turn from a to b, at an even rate: half way along is half the angle. Takes the short way round (q and
  * -q are the same rotation, so the sign is aligned first) and falls back to a straight mix for rotations
  * close enough together that the angle maths would lose its precision. */

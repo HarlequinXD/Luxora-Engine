@@ -902,6 +902,8 @@ LxModel *lx_model_load_file(const char *path, const char *ref, char *err, size_t
         for (int i = m->imp.clip_count; i < m->clip_count && i < LX_MAX_CLIPS; i++) {
             lx_strcpy(m->imp.clips[i].name, sizeof m->imp.clips[i].name, m->clips[i].name);
             m->imp.clips[i].loop = true;
+            m->imp.clips[i].bake_position_y = true;    /* hops belong to the animation */
+            m->imp.clips[i].bake_rotation = true;      /* so does turning, until a clip is meant to steer */
         }
         m->imp.clip_count = m->clip_count < LX_MAX_CLIPS ? m->clip_count : LX_MAX_CLIPS;
     }
@@ -1007,6 +1009,9 @@ bool lx_model_import_load(const char *model_path, LxModelImport *out) {
             if (idx >= out->clip_count) out->clip_count = idx + 1;
             if (!strcmp(f + 1, "name")) lx_strcpy(out->clips[idx].name, sizeof out->clips[idx].name, v);
             else if (!strcmp(f + 1, "loop")) out->clips[idx].loop = atoi(v) != 0;
+            else if (!strcmp(f + 1, "bake_xz")) out->clips[idx].bake_position_xz = atoi(v) != 0;
+            else if (!strcmp(f + 1, "bake_y")) out->clips[idx].bake_position_y = atoi(v) != 0;
+            else if (!strcmp(f + 1, "bake_rot")) out->clips[idx].bake_rotation = atoi(v) != 0;
         }
     }
     lx_free(text);
@@ -1026,7 +1031,9 @@ bool lx_model_import_save(const char *model_path, const LxModelImport *imp) {
     for (int b = 0; b < LX_HB_COUNT; b++)
         if (imp->avatar[b][0]) lx_sb_printf(&sb, "avatar.%s = %s\n", lx_human_bone_name((LxHumanBone)b), imp->avatar[b]);
     for (int i = 0; i < imp->clip_count && i < LX_MAX_CLIPS; i++)
-        lx_sb_printf(&sb, "clip.%d.name = %s\nclip.%d.loop = %d\n", i, imp->clips[i].name, i, imp->clips[i].loop);
+        lx_sb_printf(&sb, "clip.%d.name = %s\nclip.%d.loop = %d\nclip.%d.bake_xz = %d\nclip.%d.bake_y = %d\nclip.%d.bake_rot = %d\n",
+                     i, imp->clips[i].name, i, imp->clips[i].loop, i, imp->clips[i].bake_position_xz,
+                     i, imp->clips[i].bake_position_y, i, imp->clips[i].bake_rotation);
     bool ok = lx_file_write(path, sb.data, sb.len);
     lx_free(sb.data);
     return ok;

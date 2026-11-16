@@ -62,6 +62,14 @@ typedef struct LxAnimState {
     float look_weight;
     bool look_active;
     float hip_drop;        /* foot grounding: how far the hips are eased down */
+    float ankle_rest[2];   /* how high each ankle sits above the sole, from the model's rest pose */
+    bool ankles_measured;
+    /* root motion: where the clip's root was last frame, and the step it took */
+    LxVec3 rm_prev_pos, rm_last_step;
+    float rm_prev_yaw, rm_last_yaw_step;
+    bool rm_have_prev;
+    bool rm_wrapped;       /* the clip looped or the state changed: this frame's jump is not movement */
+    int rm_cycle;          /* which time round the single-clip path is */
 } LxAnimState;
 
 typedef struct LxSkinState {
@@ -245,18 +253,17 @@ static void sample(const ModelClip *c, int t, float time, bool loop, LxVec3 *p, 
     *q = lx_quat_norm(r);
 }
 
-/* the target pose (local TRS per target node) for a binding at a time */
-static void evaluate(const Binding *b, LxModel *dst, float time, bool loop, bool root_motion, LxVec3 *pos, LxQuat *rot, LxVec3 *scl) {
+/* The target pose (local TRS per target node) for a binding at a time.
+ *
+ * The clip's root movement is left in the pose here, exactly as it was authored. Taking it out - and
+ * deciding whether the object gets it instead - happens once, after everything has been blended, in
+ * root_motion() below; doing it here would have to be undone for every clip in a blend tree. */
+static void evaluate(const Binding *b, LxModel *dst, float time, bool loop, LxVec3 *pos, LxQuat *rot, LxVec3 *scl) {
     for (int i = 0; i < dst->node_count; i++) { pos[i] = dst->nodes[i].pos; rot[i] = dst->nodes[i].rot; scl[i] = dst->nodes[i].scale; }
     if (!b->clip) return;
     if (!b->humanoid) {
         for (int i = 0; i < dst->node_count; i++)
             if (b->track_of[i] >= 0) sample(b->clip, b->track_of[i], time, loop, &pos[i], &rot[i], &scl[i]);
-        if (!root_motion && dst->avatar[LX_HB_HIPS] >= 0 && b->track_of[dst->avatar[LX_HB_HIPS]] >= 0) {
-            int h = dst->avatar[LX_HB_HIPS];
-            pos[h].x = dst->nodes[h].pos.x;
-            pos[h].z = dst->nodes[h].pos.z;
-        }
         return;
     }
     /* humanoid: source pose -> canonical deltas from its T-pose -> applied to the target's T-pose */
@@ -297,7 +304,6 @@ static void evaluate(const Binding *b, LxModel *dst, float time, bool loop, bool
     if (sh >= 0) {
         LxVec3 off = lx_quat_rotate(src->to_canon, lx_sub3(swp[sh], src->hips_rest));
         off = lx_scale3(off, dst->hips_height / src->hips_height);
-        if (!root_motion) { off.x = 0; off.z = 0; }
         hips_world = lx_add3(dst->hips_rest, lx_quat_rotate(lx_quat_conj(dst->to_canon), off));
     }
     /* target FK in node order, replacing mapped rotations */
@@ -447,6 +453,8 @@ void lx_animator_play(LxScene *s, LxEntity e, const char *clip_ref, float fade) 
     st->playing = true;
     st->started = true;
     st->loop = d->animator.loop;
+    st->rm_wrapped = true;   /* a new clip: wherever its root starts is not a step from the old one */
+    st->rm_cycle = 0;
     /* the clip's own loop setting from its model's import settings */
     for (int i = 0; i < nb.src->clip_count && i < LX_MAX_CLIPS; i++)
         if (&nb.src->clips[i] == nb.clip && i < nb.src->imp.clip_count) st->loop = d->animator.loop && nb.src->imp.clips[i].loop;
@@ -642,9 +650,9 @@ static void mirror_pose(LxPose *p, const LxModel *m) {
     }
 }
 
-static void motion_eval(LxAnimState *st, const LxAnimNode *n, float norm, bool rm, LxPose *out, int depth);
+static void motion_eval(LxAnimState *st, const LxAnimNode *n, float norm, LxPose *out, int depth);
 
-static void tree_eval(LxAnimState *st, const LxAnimTree *t, float norm, bool rm, LxPose *out, int depth) {
+static void tree_eval(LxAnimState *st, const LxAnimTree *t, float norm, LxPose *out, int depth) {
     float w[LX_ANIM_MAX_CHILDREN];
     ParamLookup pl = {st};
     lx_anim_tree_weights_ex(t, param_lookup, &pl, w);
@@ -655,12 +663,12 @@ static void tree_eval(LxAnimState *st, const LxAnimTree *t, float norm, bool rm,
         if (!(w[i] > 0)) continue;
         const LxAnimChild *c = &t->child[i];
         if (c->tree >= 0 && st->graph && c->tree < st->graph->tree_count && depth + 1 < LX_ANIM_MAX_DEPTH) {
-            tree_eval(st, &st->graph->trees[c->tree], norm, rm, scratch, depth + 1);
+            tree_eval(st, &st->graph->trees[c->tree], norm, scratch, depth + 1);
         } else {
             Binding *b = bind_cached(st, c->clip);
             if (!b) continue;
             float len = clip_len_of(b);
-            evaluate(b, st->model, norm * len, true, rm, scratch->pos, scratch->rot, scratch->scl);
+            evaluate(b, st->model, norm * len, true, scratch->pos, scratch->rot, scratch->scl);
             if (c->mirror) mirror_pose(scratch, st->model);
         }
         lx_pose_blend_add(out, scratch, w[i], &total);
@@ -669,15 +677,15 @@ static void tree_eval(LxAnimState *st, const LxAnimTree *t, float norm, bool rm,
     if (!(total > 0)) lx_pose_rest(out, st->model);   /* nothing had any weight: the rest pose, not rubbish */
 }
 
-static void motion_eval(LxAnimState *st, const LxAnimNode *n, float norm, bool rm, LxPose *out, int depth) {
+static void motion_eval(LxAnimState *st, const LxAnimNode *n, float norm, LxPose *out, int depth) {
     if (n->motion == LX_AM_TREE) {
         if (!st->graph || n->tree < 0 || n->tree >= st->graph->tree_count) { lx_pose_rest(out, st->model); return; }
-        tree_eval(st, &st->graph->trees[n->tree], norm, rm, out, depth);
+        tree_eval(st, &st->graph->trees[n->tree], norm, out, depth);
     } else {
         Binding *b = bind_cached(st, n->clip);
         if (!b) { lx_pose_rest(out, st->model); return; }
         float len = clip_len_of(b);
-        evaluate(b, st->model, norm * len, n->loop, rm, out->pos, out->rot, out->scl);
+        evaluate(b, st->model, norm * len, n->loop, out->pos, out->rot, out->scl);
     }
     if (n->mirror) mirror_pose(out, st->model);
 }
@@ -742,6 +750,7 @@ static void start_transition(LxAnimState *st, const LxAnimLayer *l, LayerRun *lr
     lr->fade = 0;
     lr->fade_len = fade > 0 ? fade : 0;
     lr->cur_interrupt = t->interrupt;
+    st->rm_wrapped = true;   /* a different motion: the root is somewhere else, which is not a step */
     if (lr->fade_len <= 0) lr->from = -1;
     consume_triggers(st, t);
 }
@@ -824,13 +833,13 @@ static void build_mask(LxAnimState *st, const LxAnimLayer *l, LayerRun *lr) {
     lr->mask_valid = true;
 }
 
-static void layer_pose(LxAnimState *st, const LxAnimLayer *l, LayerRun *lr, bool rm) {
+static void layer_pose(LxAnimState *st, const LxAnimLayer *l, LayerRun *lr) {
     if (lr->state < 0 || lr->state >= l->state_count) { lx_pose_rest(&lr->pose, st->model); return; }
-    motion_eval(st, &l->states[lr->state], lr->norm, rm, &lr->a, 0);
+    motion_eval(st, &l->states[lr->state], lr->norm, &lr->a, 0);
     if (lr->from != -1 && lr->fade_len > 0) {
         float w = lx_clampf(lr->fade / lr->fade_len, 0, 1);
         if (lr->from >= 0 && lr->from < l->state_count)
-            motion_eval(st, &l->states[lr->from], lr->from_norm, rm, &lr->b, 0);
+            motion_eval(st, &l->states[lr->from], lr->from_norm, &lr->b, 0);
         /* from == -2: lr->b already holds the pose this fade started from */
         float total;
         lx_pose_blend_begin(&lr->pose, &total);
@@ -957,6 +966,135 @@ static void sync_graph(LxScene *s, LxEntity e, LxAnimState *st) {
     bind_graph(st, g);
 }
 
+/* ======================================================================
+ *  root motion
+ *
+ *  A clip that walks forward moves its root bone forward. Two things can be done with that movement:
+ *  leave it in the pose, where the body drifts away from the object it belongs to and its collider
+ *  stays behind, or take it out of the pose and give it to the object, so the character actually
+ *  travels and takes its collider with it. The second is root motion, and it is what this does.
+ *
+ *  Which of the root's channels travel is per clip (its import settings): a locomotion clip gives its
+ *  travel to the object and keeps its hops and its turning in the pose. The Animator's Root Motion
+ *  switch is above all of that - with it off, nothing moves and the character animates in place.
+ * ====================================================================== */
+
+/* The root of the skeleton: the hips of a humanoid, else the topmost bone. */
+static int root_node_of(const LxModel *m) {
+    if (m->avatar[LX_HB_HIPS] >= 0) return m->avatar[LX_HB_HIPS];
+    for (int i = 0; i < m->node_count; i++)
+        if (m->nodes[i].bone && m->nodes[i].parent < 0) return i;
+    for (int i = 0; i < m->node_count; i++)
+        if (m->nodes[i].parent < 0) return i;
+    return -1;
+}
+
+/* The settings of the clip that is driving the root. With a graph that is the base layer's current
+ * state; otherwise the one clip the animator is playing. A clip with no settings of its own travels. */
+static LxClipSettings root_clip_settings(LxAnimState *st) {
+    LxClipSettings out;
+    memset(&out, 0, sizeof out);
+    out.bake_position_y = true;
+    out.bake_rotation = true;
+    const char *ref = NULL;
+    if (st->graph && st->layers && st->layer_count > 0 && st->graph->layer_count > 0) {
+        const LxAnimLayer *l = &st->graph->layers[0];
+        int si = st->layers[0].state;
+        if (si >= 0 && si < l->state_count && l->states[si].motion == LX_AM_CLIP) ref = l->states[si].clip;
+    } else if (st->clip_ref[0]) ref = st->clip_ref;
+    if (!ref || !ref[0]) return out;
+    Binding *b = st->graph ? bind_cached(st, ref) : &st->cur;
+    if (!b || !b->clip || !b->src) return out;
+    for (int i = 0; i < b->src->clip_count && i < LX_MAX_CLIPS; i++)
+        if (&b->src->clips[i] == b->clip && i < b->src->imp.clip_count) return b->src->imp.clips[i];
+    return out;
+}
+
+/* The step the root took this frame. On the frame a clip loops, the sample jumps back to where the clip
+ * starts - a long way backwards, which is not movement - so the last frame's step is used instead and
+ * the travel stays continuous. */
+LxVec3 lx_root_motion_step(LxVec3 prev, LxVec3 now, bool wrapped, LxVec3 last_step) {
+    if (wrapped) return last_step;
+    return lx_sub3(now, prev);
+}
+
+/* the same for turning, in radians, taking the short way round */
+float lx_root_motion_turn(float prev, float now, bool wrapped, float last_step) {
+    if (wrapped) return last_step;
+    float d = now - prev;
+    const float pi = 3.14159265358979f;
+    while (d > pi) d -= 2 * pi;
+    while (d < -pi) d += 2 * pi;
+    return d;
+}
+
+/* the object that carries the character: the nearest one with a body, else the top of the hierarchy */
+static LxEntity mover_of(LxScene *s, LxEntity e) {
+    LxEntity top = e;
+    for (LxEntity c = e; c; c = lx_entity_parent(s, c)) {
+        uint32_t comps = lx_entity_components(s, c);
+        if (comps & (LX_COMP_CHARACTER | LX_COMP_RIGIDBODY)) return c;
+        top = c;
+    }
+    return top;
+}
+
+static void root_motion(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *d, float dt) {
+    LX_UNUSED(dt);
+    const LxModel *m = st->model;
+    int r = root_node_of(m);
+    if (r < 0 || r >= st->out.count) return;
+    LxClipSettings cs = root_clip_settings(st);
+    LxVec3 rest_p = m->nodes[r].pos;
+    LxQuat rest_r = m->nodes[r].rot;
+    LxVec3 raw_p = st->out.pos[r];
+    LxQuat raw_r = st->out.rot[r];
+    float yaw = lx_quat_twist_y_angle(raw_r);
+
+    LxVec3 step = lx_v3(0, 0, 0);
+    float turn = 0;
+    if (st->rm_have_prev) {
+        step = lx_root_motion_step(st->rm_prev_pos, raw_p, st->rm_wrapped, st->rm_last_step);
+        turn = lx_root_motion_turn(st->rm_prev_yaw, yaw, st->rm_wrapped, st->rm_last_yaw_step);
+    }
+    st->rm_prev_pos = raw_p;
+    st->rm_prev_yaw = yaw;
+    st->rm_have_prev = true;
+    st->rm_wrapped = false;
+    st->rm_last_step = step;
+    st->rm_last_yaw_step = turn;
+
+    /* Take out of the pose everything that is not baked into it. A channel the object is not given
+       either - because Root Motion is off - is simply pinned, which is what animating in place is. */
+    if (!cs.bake_position_xz) { st->out.pos[r].x = rest_p.x; st->out.pos[r].z = rest_p.z; }
+    if (!cs.bake_position_y) st->out.pos[r].y = rest_p.y;
+    if (!cs.bake_rotation) {
+        LxQuat tw = lx_quat_twist_y(raw_r);
+        st->out.rot[r] = lx_quat_norm(lx_quat_mul(lx_quat_twist_y(rest_r), lx_quat_mul(lx_quat_conj(tw), raw_r)));
+    }
+    if (!d->animator.root_motion) return;
+
+    LxEntity mover = mover_of(s, e);
+    if (!mover || !lx_entity_valid(s, mover)) return;
+    LxVec3 local = lx_v3(cs.bake_position_xz ? 0 : step.x, cs.bake_position_y ? 0 : step.y,
+                         cs.bake_position_xz ? 0 : step.z);
+    float speed = d->animator.speed;
+    LX_UNUSED(speed);   /* the step is already in the pose, which the speed has moved */
+    if (lx_len3(local) > 1e-9f) {
+        /* the step is in the model's own space: the object's rotation and scale put it in the world */
+        LxMat4 w = lx_entity_world_matrix(s, e);
+        float scale = lx_len3(lx_v3(w.m[4], w.m[5], w.m[6]));
+        if (!(scale > 1e-4f)) scale = 1;
+        LxVec3 world = lx_scale3(lx_quat_rotate(lx_entity_world_rotation(s, e), local), scale);
+        if (lx_get_character(s, mover)) lx_character_move(s, mover, world);
+        else lx_entity_set_position(s, mover, lx_add3(lx_entity_position(s, mover), world));
+    }
+    if (!cs.bake_rotation && fabsf(turn) > 1e-7f) {
+        LxQuat spin = lx_quat_axis_angle(lx_v3(0, 1, 0), turn);
+        lx_entity_set_rotation(s, mover, lx_quat_norm(lx_quat_mul(spin, lx_entity_rotation(s, mover))));
+    }
+}
+
 /* ---------------- inverse kinematics on the posed skeleton ---------------- */
 /* Model-space transforms of every node, from a pose. Nodes come parent-first, so one pass does it. */
 static void pose_fk(const LxAnimState *st, const LxPose *p, LxVec3 *wp, LxQuat *wr) {
@@ -1001,13 +1139,28 @@ static LxVec3 to_world_p(const IkFrame *f, LxVec3 model) { return lx_mat4_point(
 static LxVec3 to_model_p(const IkFrame *f, LxVec3 world) { return lx_mat4_point(f->to_model, world); }
 
 /* Solves one limb towards a world-space target and writes the result back into the pose. */
+/* `bend` is the way the joint should point - the character's forward, for a knee. Without one the limb
+ * keeps the bend it already has, which is fine until it is nearly straight: then the midpoint sits on
+ * the line between the ends, there is no bend direction left to read, and the joint can snap to either
+ * side. A hint is what stops a knee turning inside out as the leg straightens. */
 static void solve_limb(LxAnimState *st, IkFrame *f, Limb lb, LxVec3 target_world, float weight,
-                       const LxQuat *end_rot_world, float end_rot_weight) {
+                       const LxQuat *end_rot_world, float end_rot_weight, const LxVec3 *bend) {
     if (lb.root < 0 || lb.mid < 0 || lb.end < 0 || !(weight > 0)) return;
     const LxModel *m = st->model;
     LxVec3 root_w = to_world_p(f, f->wp[lb.root]), mid_w = to_world_p(f, f->wp[lb.mid]), end_w = to_world_p(f, f->wp[lb.end]);
-    /* the knee points where it already does, pushed out from the limb's line: no pole to author */
-    LxVec3 pole = lx_add3(mid_w, lx_scale3(lx_sub3(mid_w, lx_scale3(lx_add3(root_w, end_w), 0.5f)), 2.0f));
+    LxVec3 limb = lx_sub3(end_w, root_w);
+    float limb_len = lx_len3(limb);
+    LxVec3 off = lx_sub3(mid_w, lx_scale3(lx_add3(root_w, end_w), 0.5f));
+    /* how much of a bend there is to read: little, on a straight limb */
+    float bent = limb_len > 1e-5f ? lx_len3(off) / limb_len : 0;
+    LxVec3 pole;
+    if (bend && bent < 0.25f) {
+        float t = bent / 0.25f;   /* ease between the two, so the knee never jumps as the leg straightens */
+        LxVec3 hint = lx_scale3(lx_norm3(*bend), limb_len > 1e-5f ? limb_len : 1.0f);
+        pole = lx_add3(mid_w, lx_add3(lx_scale3(hint, 1.0f - t), lx_scale3(off, 2.0f * t)));
+    } else {
+        pole = lx_add3(mid_w, lx_scale3(off, 2.0f));
+    }
     LxQuat root_rot_w = lx_quat_mul(f->root_rot, f->wr[lb.root]);
     LxQuat mid_rot_w = lx_quat_mul(f->root_rot, f->wr[lb.mid]);
     LxIkResult r;
@@ -1027,34 +1180,72 @@ static void solve_limb(LxAnimState *st, IkFrame *f, Limb lb, LxVec3 target_world
     pose_fk(st, &st->out, f->wp, f->wr);
 }
 
-/* Foot grounding: each foot is dropped onto whatever is under it, and the hips come down far enough that
- * neither leg has to stretch. Authored on the flat, walked up a slope, the feet still land on it. */
+/* How high each ankle sits above the sole. Measured once from the model's rest pose - where the
+ * character stands on the ground, so the ankle's height above the lowest bone is exactly it - rather
+ * than from the pose being played, where the foot rolls and the number changes every frame. */
+static void measure_ankles(LxAnimState *st) {
+    const LxModel *m = st->model;
+    int n = m->node_count;
+    st->ankles_measured = true;
+    st->ankle_rest[0] = st->ankle_rest[1] = 0.08f;   /* a plausible ankle, if the rest pose says nothing */
+    if (n <= 0) return;
+    LxPose rest;
+    if (!lx_pose_alloc(&rest, n)) return;
+    lx_pose_rest(&rest, m);
+    LxVec3 *wp = lx_alloc(sizeof(LxVec3) * (size_t)n);
+    LxQuat *wr = lx_alloc(sizeof(LxQuat) * (size_t)n);
+    if (wp && wr) {
+        pose_fk(st, &rest, wp, wr);
+        float sole = wp[0].y;
+        for (int i = 1; i < n; i++) if (wp[i].y < sole) sole = wp[i].y;
+        for (int side = 0; side < 2; side++) {
+            int a = m->avatar[side == 0 ? LX_HB_LEFT_FOOT : LX_HB_RIGHT_FOOT];
+            if (a < 0 || a >= n) continue;
+            float h = wp[a].y - sole;
+            if (h > 0.01f) st->ankle_rest[side] = h;
+        }
+    }
+    lx_free(wp);
+    lx_free(wr);
+    lx_pose_free(&rest);
+}
+
+/* Foot grounding: a foot that is on the ground is put on the ground it is actually over, and lies along
+ * it. A foot in the air is left alone - a stride has one of those half the time, and dragging it down is
+ * what turns a walk into a shuffle - so the grounding fades out as the foot lifts.
+ *
+ * The hips come down only when a leg cannot reach what it is standing on. Dropping them by how far a
+ * foot is *above* the ground instead would sink the whole body every time a foot came up. */
 static void foot_ik(LxScene *s, LxEntity e, LxAnimState *st, IkFrame *f, float weight, float dt) {
     const LxModel *m = st->model;
     if (m->imp.rig != LX_RIG_HUMANOID || !m->humanoid_ok) return;
-    const float probe_up = 0.5f, probe_down = 0.8f;
+    if (!st->ankles_measured) measure_ankles(st);
+    /* The collider belongs to the character, which is usually an ancestor of the object holding the
+       Animator: ignoring only that object would let a foot take its own body for the ground. */
+    LxEntity ignore = e;
+    for (LxEntity p = lx_entity_parent(s, e); p; p = lx_entity_parent(s, p)) ignore = p;
+    /* the ankle heights are in the model's own units; the object may be scaled */
+    float scale = lx_len3(lx_v3(f->to_world.m[4], f->to_world.m[5], f->to_world.m[6]));
+    if (!(scale > 1e-4f)) scale = 1;
+    const float probe_up = 0.45f, probe_down = 1.0f;
     LxVec3 up = lx_v3(0, 1, 0);
     LxVec3 targets[2];
     LxQuat rots[2];
-    bool hit_any[2] = {false, false};
+    float side_weight[2] = {0, 0};
     float drop = 0;
     for (int side = 0; side < 2; side++) {
         Limb lb = limb_of(m, side == 0 ? LX_IK_LEFT_FOOT : LX_IK_RIGHT_FOOT);
-        if (lb.end < 0) continue;
+        if (lb.root < 0 || lb.mid < 0 || lb.end < 0) continue;
         LxVec3 foot = to_world_p(f, f->wp[lb.end]);
-        /* how high the ankle sits above the sole, so the foot lands on the ground instead of in it */
-        float ankle_h = 0;
-        int toes = m->avatar[side == 0 ? LX_HB_LEFT_TOES : LX_HB_RIGHT_TOES];
-        if (toes >= 0) {
-            LxVec3 t = to_world_p(f, f->wp[toes]);
-            ankle_h = foot.y - t.y;
-        }
-        if (ankle_h < 0.02f) ankle_h = 0.08f;   /* no toe bone to measure: a plausible ankle height */
         LxRaycastHit hit;
         LxVec3 origin = lx_add3(foot, lx_scale3(up, probe_up));
-        if (!lx_physics_raycast_ignore(s, origin, lx_v3(0, -1, 0), probe_up + probe_down, LX_ALL_LAYERS, e, &hit)) continue;
-        hit_any[side] = true;
-        targets[side] = lx_add3(hit.point, lx_scale3(up, ankle_h));
+        if (!lx_physics_raycast_ignore(s, origin, lx_v3(0, -1, 0), probe_up + probe_down, LX_ALL_LAYERS, ignore, &hit)) continue;
+        float ankle_h = st->ankle_rest[side] * scale;
+        LxVec3 target = lx_add3(hit.point, lx_scale3(up, ankle_h));
+        float w = lx_ik_ground_weight(foot.y - target.y, LX_FOOT_IK_BAND * scale);
+        if (!(w > 0)) continue;
+        side_weight[side] = w * weight;
+        targets[side] = target;
         /* the foot lies along the ground it stands on */
         LxVec3 n = lx_len3(hit.normal) > 0.1f ? lx_norm3(hit.normal) : up;
         LxQuat cur = lx_quat_mul(f->root_rot, f->wr[lb.end]);
@@ -1065,13 +1256,15 @@ static void foot_ik(LxScene *s, LxEntity e, LxAnimState *st, IkFrame *f, float w
             if (lx_len3(axis) > 1e-6f) align = lx_quat_axis_angle(lx_norm3(axis), acosf(lx_clampf(d, -1, 1)));
         }
         rots[side] = lx_quat_norm(lx_quat_mul(align, cur));
-        float need = foot.y - targets[side].y;
-        if (need > drop) drop = need;   /* the deepest foot decides how far the hips come down */
+        /* can this leg still reach? only a leg that is short of its target asks the hips to come down */
+        LxVec3 hip = to_world_p(f, f->wp[lb.root]), knee = to_world_p(f, f->wp[lb.mid]);
+        float leg = lx_len3(lx_sub3(knee, hip)) + lx_len3(lx_sub3(foot, knee));
+        float deficit = lx_ik_hip_drop(lx_len3(lx_sub3(target, hip)), leg);
+        if (deficit > drop) drop = deficit;
     }
     /* ease the hips, so stepping onto a kerb is a movement rather than a jump */
-    float want_drop = drop > 0 ? drop : 0;
     float k = dt > 0 ? 1.0f - expf(-dt * 12.0f) : 1.0f;
-    st->hip_drop += (want_drop - st->hip_drop) * k;
+    st->hip_drop += (drop - st->hip_drop) * k;
     if (st->hip_drop > 0.001f) {
         int hips = m->avatar[LX_HB_HIPS];
         if (hips >= 0 && hips < st->out.count) {
@@ -1081,10 +1274,12 @@ static void foot_ik(LxScene *s, LxEntity e, LxAnimState *st, IkFrame *f, float w
             pose_fk(st, &st->out, f->wp, f->wr);
         }
     }
+    /* knees bend the way the character faces */
+    LxVec3 forward = lx_quat_rotate(f->root_rot, lx_v3(0, 0, 1));
     for (int side = 0; side < 2; side++) {
-        if (!hit_any[side]) continue;
+        if (!(side_weight[side] > 0)) continue;
         Limb lb = limb_of(m, side == 0 ? LX_IK_LEFT_FOOT : LX_IK_RIGHT_FOOT);
-        solve_limb(st, f, lb, targets[side], weight, &rots[side], weight);
+        solve_limb(st, f, lb, targets[side], side_weight[side], &rots[side], side_weight[side], &forward);
     }
 }
 
@@ -1137,7 +1332,7 @@ static void run_ik(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *d, flo
         if (!st->ik[i].active || !(st->ik[i].weight > 0)) continue;
         Limb lb = limb_of(m, (LxIkGoal)i);
         solve_limb(st, &f, lb, st->ik[i].pos, lx_clampf(st->ik[i].weight, 0, 1),
-                   st->ik[i].rot_active ? &st->ik[i].rot : NULL, st->ik[i].rot_weight);
+                   st->ik[i].rot_active ? &st->ik[i].rot : NULL, st->ik[i].rot_weight, NULL);
     }
     look_at_ik(st, &f);
     lx_free(f.wp);
@@ -1147,7 +1342,6 @@ static void run_ik(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *d, flo
 /* ---------------- the graph's frame ---------------- */
 static void graph_update(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *d, float dt) {
     LxAnimGraph *g = st->graph;
-    bool rm = d->animator.root_motion;
     float global_speed = d->animator.speed;
     bool state_foot_ik = false;
     for (int li = 0; li < st->layer_count && li < g->layer_count; li++) {
@@ -1168,6 +1362,7 @@ static void graph_update(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *
         if (len > 0) lr->norm += dt * speed / len;
         if (!n->loop && lr->norm > 1) lr->norm = 1;
         if (lr->norm != lr->norm) lr->norm = prev;   /* a NaN here would stop the layer dead */
+        if (li == 0 && floorf(lr->norm) != floorf(prev)) st->rm_wrapped = true;   /* it came round again */
         if (lr->from >= 0 && lr->from < l->state_count) {
             const LxAnimNode *fn = &l->states[lr->from];
             float flen = state_length(st, fn);
@@ -1180,10 +1375,11 @@ static void graph_update(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *
             if (lr->fade >= lr->fade_len) lr->from = -1;
         }
         layer_transitions(st, l, lr, prev);
-        layer_pose(st, l, lr, rm);
+        layer_pose(st, l, lr);
     }
     if (st->layer_count > 0) combine_layers(st, g);
     else lx_pose_rest(&st->out, st->model);
+    root_motion(s, e, st, d, dt);
     apply_pose(s, st);
     run_ik(s, e, st, d, dt, state_foot_ik);
     apply_pose(s, st);
@@ -1365,12 +1561,11 @@ void lx_animator_update(LxScene *s, LxEntity e, float dt) {
         }
     }
     LxModel *m = st->model;
-    bool rm = d->animator.root_motion;
-    evaluate(&st->cur, m, st->time, st->loop, rm, st->a.pos, st->a.rot, st->a.scl);
+    evaluate(&st->cur, m, st->time, st->loop, st->a.pos, st->a.rot, st->a.scl);
     if (st->prev.clip && st->fade_len > 0) {
         /* cross-fade: the clip being left and the one being entered, blended by how far through it is */
         float w = lx_clampf(st->fade / st->fade_len, 0, 1);
-        evaluate(&st->prev, m, st->prev_time, true, rm, st->b.pos, st->b.rot, st->b.scl);
+        evaluate(&st->prev, m, st->prev_time, true, st->b.pos, st->b.rot, st->b.scl);
         float total;
         lx_pose_blend_begin(&st->out, &total);
         lx_pose_blend_add(&st->out, &st->b, 1.0f - w, &total);
@@ -1379,6 +1574,17 @@ void lx_animator_update(LxScene *s, LxEntity e, float dt) {
     } else {
         lx_pose_copy(&st->out, &st->a);
     }
+    /* the clip comes round again: the root jumps back to the start, which is not a step */
+    if (st->cur.clip && st->loop) {
+        float len = st->cur.clip->length;
+        if (len > 0) {
+            int cycle = (int)floorf(st->time / len);
+            if (cycle != st->rm_cycle) { st->rm_wrapped = true; st->rm_cycle = cycle; }
+        }
+    }
+    root_motion(s, e, st, d, dt);
+    apply_pose(s, st);
+    run_ik(s, e, st, d, dt, false);
     apply_pose(s, st);
 }
 

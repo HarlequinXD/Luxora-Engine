@@ -383,6 +383,14 @@ typedef struct LxPose {
     int count;      /* nodes; the arrays are this long */
 } LxPose;
 
+/* foot grounding, as two rules (anim_ik.c) */
+#define LX_FOOT_IK_BAND 0.12f   /* a foot this far above the ground is in the air and is left there */
+float lx_ik_ground_weight(float foot_above_target, float band);
+/* root motion: the step the root took, with the jump at a clip's loop point handled (anim.c) */
+LxVec3 lx_root_motion_step(LxVec3 prev, LxVec3 now, bool wrapped, LxVec3 last_step);
+float lx_root_motion_turn(float prev, float now, bool wrapped, float last_step);
+float lx_ik_hip_drop(float reach, float leg_length);
+
 bool lx_pose_alloc(LxPose *p, int nodes);   /* false when it cannot allocate; a zeroed pose is safe to free */
 void lx_pose_free(LxPose *p);
 void lx_pose_rest(LxPose *p, const LxModel *m);          /* the model's own rest pose */

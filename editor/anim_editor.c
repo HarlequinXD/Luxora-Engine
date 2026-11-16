@@ -1020,6 +1020,18 @@ bool ed_animator_add_transition(const char *from, const char *to) {
     return true;
 }
 
+/* the Animator component's buttons: show this object's graph, or give it one */
+void ed_animator_show(LxEntity e) {
+    if (!ED.scene || !lx_entity_valid(ED.scene, e)) return;
+    LxEntity a = lx_find_animator(ED.scene, e);
+    LxAnimator *an = a ? lx_get_animator(ED.scene, a) : NULL;
+    AE.locked = false;
+    set_target(an && an->graph[0] ? an->graph : "", e);
+    if (ED.view_tabs) ED.view_tabs->tab_index = 2;
+}
+
+void ed_animator_new_for(LxEntity e) { ae_new_graph_for(e); }
+
 bool ed_animator_has_focus(void) {
     return AE.focused && AE.panel && !AE.panel->hidden && ED.view_tabs && ED.view_tabs->tab_index == 2 && !ui_wants_keyboard(ED.ui);
 }

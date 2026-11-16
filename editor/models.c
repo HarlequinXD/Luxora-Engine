@@ -195,7 +195,36 @@ void ed_model_inspector(UiNode *body, const char *ref) {
         UiNode *lp = ui_checkbox(ui, cr, "Loop", &g_imp.clips[i].loop);
         lp->on_change = imp_changed;
         lp->w = 64;
+        /* What the clip's root does: travel the object, or stay in the pose. Only worth showing for a
+           rig that has a root to move. */
+        if (g_imp.rig != LX_RIG_NONE) {
+            UiNode *rr = ui_box(ui, sec, UI_ROW);
+            rr->h = 24;
+            rr->gap = 8;
+            rr->cross_align = UI_ALIGN_CENTER;
+            ui_pad(rr, 24, 0, 0, 0);
+            UiNode *lbl = ui_label(ui, rr, "Root motion:");
+            lbl->font = UI_FONT_SMALL;
+            lbl->fg = t->text_dim;
+            lbl->w = 86;
+            UiNode *bx = ui_checkbox(ui, rr, "Bake Travel", &g_imp.clips[i].bake_position_xz);
+            bx->on_change = imp_changed;
+            bx->w = 110;
+            lx_strcpy(bx->tooltip, sizeof bx->tooltip,
+                      "Keep the clip's forward travel in the pose instead of moving the object with it");
+            UiNode *by = ui_checkbox(ui, rr, "Bake Up/Down", &g_imp.clips[i].bake_position_y);
+            by->on_change = imp_changed;
+            by->w = 124;
+            lx_strcpy(by->tooltip, sizeof by->tooltip, "Keep hops and crouches in the pose");
+            UiNode *br = ui_checkbox(ui, rr, "Bake Turn", &g_imp.clips[i].bake_rotation);
+            br->on_change = imp_changed;
+            br->w = 100;
+            lx_strcpy(br->tooltip, sizeof br->tooltip, "Keep the clip's turning in the pose instead of turning the object");
+        }
     }
+    if (lx_model_clip_count(m) && g_imp.rig != LX_RIG_NONE)
+        hint(sec, "Unbaked root movement drives the object itself, so the character travels and its collider goes with it - "
+                  "switch it on with Root Motion on the Animator.");
     UiNode *btns = ui_box(ui, body, UI_ROW);
     ui_pad(btns, 12, 10, 12, 4);
     btns->h = 46;
@@ -260,49 +289,271 @@ static void preview_toggle(UiNode *n) {
     n->icon = g_preview ? UI_ICON_STOP : UI_ICON_PLAY;
 }
 
+/* ======================================================================
+ *  the Animator component
+ *
+ *  The component is the animator graph's: the graph is the first thing on it, and what follows -
+ *  the parameters, the layers, what each one is playing - is that graph on this object. While the
+ *  game runs those are live, so a parameter can be pushed by hand to see what the graph does with it.
+ *
+ *  An animator with no graph still plays a single clip, which is all a door or a flag needs; those
+ *  fields appear only when there is no graph to drive it instead.
+ * ====================================================================== */
+#define ANIM_BIND_MAX 48
+typedef struct AnimBind {
+    LxEntity owner;                 /* the object whose animator this is */
+    char param[LX_ANIM_NAME];
+    int layer;
+    LxAnimParamType type;
+    float f;
+    int i;
+    bool b;
+} AnimBind;
+static AnimBind g_abind[ANIM_BIND_MAX];
+static int g_abind_n;
+
+/* the live animator of the object being inspected, or 0 when it is not playing */
+static LxEntity anim_live(LxEntity e) {
+    if (ED.play == ED_EDIT || !ED.scene || !e || !lx_entity_valid(ED.scene, e)) return 0;
+    LxEntity a = lx_find_animator(ED.scene, e);
+    return a && lx_animator_layer_count(ED.scene, a) ? a : 0;
+}
+
+/* a parameter edited on the component: while playing it goes to the animator, otherwise it becomes the
+   graph's own starting value, which is what the object will begin with next time */
+static void param_changed(UiNode *n) {
+    AnimBind *b = n->user;
+    if (!b) return;
+    LxEntity live = anim_live(b->owner);
+    if (live) {
+        switch (b->type) {
+        case LX_AP_FLOAT: lx_animator_set_float(ED.scene, live, b->param, b->f); break;
+        case LX_AP_INT: lx_animator_set_int(ED.scene, live, b->param, b->i); break;
+        default: lx_animator_set_bool(ED.scene, live, b->param, b->b); break;
+        }
+        return;
+    }
+    LxAnimator *a = ED.scene ? lx_get_animator(ED.scene, b->owner) : NULL;
+    LxAnimGraph *g = a && a->graph[0] ? lx_asset_anim_graph(a->graph) : NULL;
+    LxAnimParam *p = g ? lx_anim_find_param(g, b->param) : NULL;
+    if (!p) return;
+    p->f = b->f;
+    p->i = b->i;
+    p->b = b->b;
+    lx_anim_graph_touch(g);
+    char path[LX_PATH_MAX];
+    lx_asset_path(path, sizeof path, a->graph);
+    lx_anim_graph_save(g, path);
+}
+
+static void trigger_clicked(UiNode *n) {
+    AnimBind *b = n->user;
+    LxEntity live = b ? anim_live(b->owner) : 0;
+    if (live) lx_animator_set_trigger(ED.scene, live, b->param);
+    else ui_notify(ED.ui, "Triggers fire while the game is playing");
+}
+
+/* while playing, the rows follow the animator rather than the other way round */
+static void param_frame(UiNode *n) {
+    AnimBind *b = n->user;
+    LxEntity live = b ? anim_live(b->owner) : 0;
+    if (!live || ui_active(ED.ui) == n) return;   /* not while it is being typed into */
+    switch (b->type) {
+    case LX_AP_FLOAT: b->f = lx_animator_get_float(ED.scene, live, b->param); break;
+    case LX_AP_INT: b->i = lx_animator_get_int(ED.scene, live, b->param); break;
+    default: b->b = lx_animator_get_bool(ED.scene, live, b->param); break;
+    }
+}
+
+static void layer_weight_changed(UiNode *n) {
+    AnimBind *b = n->user;
+    LxEntity live = b ? anim_live(b->owner) : 0;
+    if (live) { lx_animator_set_layer_weight(ED.scene, live, b->layer, b->f); return; }
+    LxAnimator *a = ED.scene && b ? lx_get_animator(ED.scene, b->owner) : NULL;
+    LxAnimGraph *g = a && a->graph[0] ? lx_asset_anim_graph(a->graph) : NULL;
+    if (!g || !b || b->layer < 0 || b->layer >= g->layer_count) return;
+    g->layers[b->layer].weight = b->f;
+    lx_anim_graph_touch(g);
+    char path[LX_PATH_MAX];
+    lx_asset_path(path, sizeof path, a->graph);
+    lx_anim_graph_save(g, path);
+}
+
+static void layer_frame(UiNode *n) {
+    AnimBind *b = n->user;
+    LxEntity live = b ? anim_live(b->owner) : 0;
+    if (!live) { ui_set_text(n, "%s", ""); return; }
+    const char *state = lx_animator_state(ED.scene, live, b->layer);
+    float t = lx_animator_normalized_time(ED.scene, live, b->layer);
+    if (lx_animator_in_transition(ED.scene, live, b->layer)) ui_set_text(n, "%s (blending)", state);
+    else ui_set_text(n, "%s  %.0f%%", state, (double)((t - floorf(t)) * 100));
+    n->fg = UI_HEX(0xffb03a);
+}
+
+static void open_animator_clicked(UiNode *n) { ed_animator_show((LxEntity)n->tag); }
+static void new_graph_clicked(UiNode *n) { ed_animator_new_for((LxEntity)n->tag); }
+
+static void graph_slot_changed(UiNode *n) {
+    LX_UNUSED(n);
+    ed_mark_changed();
+    ed_commit();
+    ED.inspector_dirty = true;
+}
+
 void ed_animator_section(UiNode *sec, LxEntity e) {
     UiCtx *ui = ED.ui;
     LxAnimator *a = lx_get_animator(ED.scene, e);
     if (!a) return;
     if (g_anim_entity != e) { g_preview = false; g_preview_time = 0; }
     g_anim_entity = e;
+    g_abind_n = 0;
     UiNode *r = ed_prop_row(sec, "Model");
     UiNode *mf = ed_slot(r, a->model, sizeof a->model, "model");
     mf->on_change = model_slot_changed;
     LxModel *m = lx_asset_model(a->model);
-    r = ed_prop_row(sec, "Clip");
-    UiNode *cs = ed_slot(r, a->clip, sizeof a->clip, "animation");
-    ed_slot_set_context(cs, a->model);
-    cs->on_change = clip_slot_changed;
-    r = ed_prop_row(sec, "Speed");
-    UiNode *sp = ui_slider(ui, r, &a->speed, 0, 3);
-    sp->grow = 1;
-    sp->h = 22;
-    sp->on_change = anim_changed;
-    row_bool(sec, "Loop", &a->loop, anim_changed);
-    row_bool(sec, "Play On Start", &a->play_on_start, anim_changed);
+
+    /* ---- the graph ---- */
+    r = ed_prop_row(sec, "Animator Graph");
+    UiNode *gf = ed_slot(r, a->graph, sizeof a->graph, "animator");
+    gf->on_change = graph_slot_changed;
+    lx_strcpy(gf->tooltip, sizeof gf->tooltip, "The state machine that decides what this object plays");
+    LxAnimGraph *g = a->graph[0] ? lx_asset_anim_graph(a->graph) : NULL;
+    UiNode *btns = ui_box(ui, sec, UI_ROW);
+    btns->h = 28;
+    btns->gap = 6;
+    btns->cross_align = UI_ALIGN_CENTER;
+    if (g) {
+        UiNode *ob = ui_button(ui, btns, "Open in Animator", open_animator_clicked);
+        ob->icon = UI_ICON_ANIMATOR;
+        ob->h = 24;
+        ob->grow = 1;
+        ob->tag = (intptr_t)e;
+    } else {
+        UiNode *nb = ui_button(ui, btns, a->graph[0] ? "Replace With A New Graph" : "New Animator Graph", new_graph_clicked);
+        nb->icon = UI_ICON_PLUS;
+        nb->h = 24;
+        nb->grow = 1;
+        nb->tag = (intptr_t)e;
+    }
+
+    row_float(sec, "Speed", &a->speed, 0.05f, -10, 10, anim_changed);
     UiNode *rm = row_bool(sec, "Root Motion", &a->root_motion, anim_changed);
     lx_strcpy(rm->tooltip, sizeof rm->tooltip, "Let the clip move the character across the ground (otherwise it animates in place)");
+    UiNode *fk = row_bool(sec, "Foot IK", &a->foot_ik, anim_changed);
+    lx_strcpy(fk->tooltip, sizeof fk->tooltip, "Put the feet on the ground under them - needs a humanoid rig and something to stand on");
+    if (a->foot_ik) row_float(sec, "Foot IK Weight", &a->foot_ik_weight, 0.05f, 0, 1, anim_changed);
+
+    if (!g) {
+        /* ---- no graph: the single clip it plays instead ---- */
+        if (a->graph[0]) hint(sec, "This animator graph can't be read.");
+        r = ed_prop_row(sec, "Clip");
+        UiNode *cs = ed_slot(r, a->clip, sizeof a->clip, "animation");
+        ed_slot_set_context(cs, a->model);
+        cs->on_change = clip_slot_changed;
+        row_bool(sec, "Loop", &a->loop, anim_changed);
+        row_bool(sec, "Play On Start", &a->play_on_start, anim_changed);
+        hint(sec, "One clip at a time. Give it an animator graph for states, blend trees and transitions.");
+    } else {
+        /* ---- the graph's parameters, live while the game runs ---- */
+        LxEntity live = anim_live(e);
+        if (g->param_count) {
+            UiNode *h = ui_label(ui, sec, "Parameters");
+            h->font = UI_FONT_BOLD;
+            h->h = 24;
+            for (int i = 0; i < g->param_count && g_abind_n < ANIM_BIND_MAX; i++) {
+                LxAnimParam *p = &g->params[i];
+                AnimBind *b = &g_abind[g_abind_n++];
+                memset(b, 0, sizeof *b);
+                b->owner = e;
+                b->type = p->type;
+                lx_strcpy(b->param, sizeof b->param, p->name);
+                b->f = live ? lx_animator_get_float(ED.scene, live, p->name) : p->f;
+                b->i = live ? lx_animator_get_int(ED.scene, live, p->name) : p->i;
+                b->b = live ? lx_animator_get_bool(ED.scene, live, p->name) : p->b;
+                UiNode *pr = ed_prop_row(sec, p->name);
+                UiNode *w;
+                if (p->type == LX_AP_TRIGGER) {
+                    w = ui_button(ui, pr, "Fire", trigger_clicked);
+                    w->h = 22;
+                    w->grow = 1;
+                } else if (p->type == LX_AP_BOOL) {
+                    w = ui_checkbox(ui, pr, "", &b->b);
+                    w->on_change = param_changed;
+                } else if (p->type == LX_AP_INT) {
+                    w = ui_int(ui, pr, &b->i, -1000000, 1000000);
+                    w->grow = 1;
+                    w->h = 22;
+                    w->on_change = param_changed;
+                } else {
+                    w = ui_number(ui, pr, &b->f, 0.05f);
+                    w->grow = 1;
+                    w->h = 22;
+                    w->on_change = param_changed;
+                }
+                w->user = b;
+                if (p->type != LX_AP_TRIGGER) w->on_frame = param_frame;
+            }
+        }
+        /* ---- the layers, and what each is playing ---- */
+        UiNode *h = ui_label(ui, sec, g->layer_count > 1 ? "Layers" : "Layer");
+        h->font = UI_FONT_BOLD;
+        h->h = 24;
+        for (int i = 0; i < g->layer_count && g_abind_n < ANIM_BIND_MAX; i++) {
+            AnimBind *b = &g_abind[g_abind_n++];
+            memset(b, 0, sizeof *b);
+            b->owner = e;
+            b->layer = i;
+            b->f = live ? lx_animator_layer_weight(ED.scene, live, i) : g->layers[i].weight;
+            UiNode *lr = ed_prop_row(sec, g->layers[i].name);
+            if (i == 0) {
+                UiNode *base = ui_label(ui, lr, "base");
+                base->fg = ui_theme(ui)->text_dim;
+                base->font = UI_FONT_SMALL;
+                base->grow = 1;
+            } else {
+                UiNode *sl = ui_slider(ui, lr, &b->f, 0, 1);
+                sl->grow = 1;
+                sl->h = 22;
+                sl->user = b;
+                sl->on_change = layer_weight_changed;
+            }
+            UiNode *st = ui_label(ui, lr, "");
+            st->w = 120;
+            st->font = UI_FONT_SMALL;
+            st->user = b;
+            st->on_frame = layer_frame;
+        }
+        char line[200];
+        int states = 0;
+        for (int i = 0; i < g->layer_count; i++) states += g->layers[i].state_count;
+        snprintf(line, sizeof line, "%s: %d state%s, %d parameter%s", g->name, states, states == 1 ? "" : "s",
+                 g->param_count, g->param_count == 1 ? "" : "s");
+        hint(sec, line);
+        if (ED.play == ED_EDIT) hint(sec, "Press Play to drive the parameters and watch the states change.");
+    }
+
     if (m) {
         char line[160];
         snprintf(line, sizeof line, "%s rig · %d bones%s", lx_model_rig(m) == LX_RIG_HUMANOID ? "Humanoid" : lx_model_rig(m) == LX_RIG_GENERIC ? "Generic" : "No",
                  lx_model_bone_count(m), lx_model_rig(m) == LX_RIG_HUMANOID ? " · plays any humanoid clip" : "");
         hint(sec, line);
     }
-    UiNode *pr = ui_box(ui, sec, UI_ROW);
-    pr->h = 30;
-    pr->gap = 8;
-    pr->cross_align = UI_ALIGN_CENTER;
-    pr->on_frame = preview_frame;
-    UiNode *pb = ui_button(ui, pr, g_preview ? "Stop Preview" : "Preview", preview_toggle);
-    pb->icon = g_preview ? UI_ICON_STOP : UI_ICON_PLAY;
-    pb->w = 140;
-    pb->h = 26;
-    pb->disabled = ED.play != ED_EDIT || !a->clip[0];
-    g_time_label = ui_label(ui, pr, "");
-    ui_track(&g_time_label);
-    g_time_label->fg = ui_theme(ui)->text_dim;
-    g_time_label->grow = 1;
+    if (!g) {
+        UiNode *pr = ui_box(ui, sec, UI_ROW);
+        pr->h = 30;
+        pr->gap = 8;
+        pr->cross_align = UI_ALIGN_CENTER;
+        pr->on_frame = preview_frame;
+        UiNode *pb = ui_button(ui, pr, g_preview ? "Stop Preview" : "Preview", preview_toggle);
+        pb->icon = g_preview ? UI_ICON_STOP : UI_ICON_PLAY;
+        pb->w = 140;
+        pb->h = 26;
+        pb->disabled = ED.play != ED_EDIT || !a->clip[0];
+        g_time_label = ui_label(ui, pr, "");
+        ui_track(&g_time_label);
+        g_time_label->fg = ui_theme(ui)->text_dim;
+        g_time_label->grow = 1;
+    }
 }
 
 /* ======================================================================

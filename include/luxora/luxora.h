@@ -823,7 +823,17 @@ bool lx_human_bone_required(LxHumanBone b);         /* the 15 an avatar must hav
  * doesn't; Generate always unwraps; Model's Own never does (meshes without one can't take baked lighting). */
 typedef enum LxLightmapUvMode { LX_LMUV_AUTO, LX_LMUV_GENERATE, LX_LMUV_OWN } LxLightmapUvMode;
 #define LX_MAX_CLIPS 64
-typedef struct LxClipSettings { char name[64]; bool loop; } LxClipSettings;
+/* Root motion settings, per clip. A clip that travels can either move the object it is played on - so
+ * the character actually goes somewhere, and its collider goes with it - or have that travel baked into
+ * the pose, where it stays part of the animation and the object does not move. In place is the third
+ * case, and that is the Animator's Root Motion switch: with it off nothing moves whatever is set here. */
+typedef struct LxClipSettings {
+    char name[64];
+    bool loop;
+    bool bake_position_xz;   /* keep the clip's travel in the pose (default: it moves the object) */
+    bool bake_position_y;    /* keep its up and down in the pose (default: yes - hops stay animation) */
+    bool bake_rotation;      /* keep its turning in the pose (default: yes) */
+} LxClipSettings;
 typedef struct LxModelImport {
     float scale;                     /* extra scale on top of the file's units (1 = as authored, in metres) */
     bool import_materials, import_animations, calculate_normals;

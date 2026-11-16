@@ -2252,6 +2252,33 @@ static void test_ik(void) {
         CHECK(d_full < 0.9999f && d_was < 0.9999f, "half weight is part of the way (%g to the answer, %g to the pose)", d_full, d_was);
     }
 
+    /* ---- foot grounding, as the two rules it is made of ----
+     * Both of these came from a bug: the hips were being dropped by how far a foot was *above* the
+     * ground, so a character sank into a crouch whenever it lifted a foot. */
+    CHECK(NEAR(lx_ik_ground_weight(0, LX_FOOT_IK_BAND), 1, 1e-5f), "a foot on the ground is fully grounded");
+    CHECK(NEAR(lx_ik_ground_weight(-0.3f, LX_FOOT_IK_BAND), 1, 1e-5f), "a foot through the ground is lifted out of it");
+    CHECK(NEAR(lx_ik_ground_weight(LX_FOOT_IK_BAND * 0.5f, LX_FOOT_IK_BAND), 0.5f, 1e-5f),
+          "a foot just off the ground is grounded in part (%g)", lx_ik_ground_weight(LX_FOOT_IK_BAND * 0.5f, LX_FOOT_IK_BAND));
+    CHECK(lx_ik_ground_weight(LX_FOOT_IK_BAND, LX_FOOT_IK_BAND) == 0 && lx_ik_ground_weight(2.0f, LX_FOOT_IK_BAND) == 0,
+          "a foot in the air is left where the animation put it");
+    CHECK(NEAR(lx_ik_ground_weight((float)NAN, LX_FOOT_IK_BAND), 1, 1e-5f) && lx_ik_ground_weight(1, 0) == 0,
+          "a NaN height or a band of nothing still gives a usable weight");
+    {
+        /* continuous: no step in the weight as a foot lifts, or the pose would jump */
+        float worst = 0, prev = lx_ik_ground_weight(-0.05f, LX_FOOT_IK_BAND);
+        for (int i = 1; i <= 100; i++) {
+            float h = -0.05f + (float)i * 0.003f;
+            float w = lx_ik_ground_weight(h, LX_FOOT_IK_BAND);
+            worst = lx_maxf(worst, fabsf(w - prev));
+            prev = w;
+        }
+        CHECK(worst < 0.1f, "the grounding fades in and out smoothly (worst step %g)", worst);
+    }
+    CHECK(lx_ik_hip_drop(0.5f, 1.0f) == 0, "a leg that can reach asks for no hip drop");
+    CHECK(lx_ik_hip_drop(0.99f, 1.0f) == 0, "nor one reaching almost its whole length");
+    CHECK(NEAR(lx_ik_hip_drop(1.2f, 1.0f), 0.21f, 1e-4f), "a leg too short asks for the difference (%g)", lx_ik_hip_drop(1.2f, 1.0f));
+    CHECK(lx_ik_hip_drop(0.1f, 1.0f) == 0, "a foot raised high above the ground does not sink the hips");
+
     /* a limb with no length has nothing to solve */
     CHECK(!lx_ik_two_bone(hip, hip, hip, target, pole, was, was, 1, &r), "a limb with no length is refused");
     /* a target on top of the hip, and a pole in line with the limb: no NaN, no crash */
@@ -2601,6 +2628,82 @@ static void test_anim_exit_time(void) {
 
     lx_scene_destroy(s);
     lx_anim_graphs_clear();
+    lx_model_reload("BarModel.fbx");
+}
+
+/* Root motion: the clip's own travel, taken out of the pose and given to the object. */
+static void test_root_motion(void) {
+    printf("root motion\n");
+    /* ---- the step rule, which is all of the timing ---- */
+    LxVec3 a = lx_v3(0, 0, 1), b = lx_v3(0, 0, 1.25f), last = lx_v3(0, 0, 0.25f);
+    LxVec3 s1 = lx_root_motion_step(a, b, false, last);
+    CHECK(NEAR(s1.z, 0.25f, 1e-5f), "a step is where the root went (%g)", s1.z);
+    LxVec3 s2 = lx_root_motion_step(lx_v3(0, 0, 4), lx_v3(0, 0, 0), true, last);
+    CHECK(NEAR(s2.z, 0.25f, 1e-5f), "at the loop point the jump back is not a step: it keeps going (%g)", s2.z);
+    CHECK(NEAR(lx_root_motion_turn(0.1f, 0.3f, false, 0), 0.2f, 1e-5f), "a turn is the angle it turned");
+    {
+        const float pi = 3.14159265358979f;
+        float t = lx_root_motion_turn(pi - 0.1f, -pi + 0.1f, false, 0);
+        CHECK(NEAR(t, 0.2f, 1e-4f), "a turn across the wrap goes the short way (%g, not ~-6.1)", t);
+    }
+    CHECK(NEAR(lx_root_motion_turn(3.0f, 0.0f, true, 0.05f), 0.05f, 1e-5f), "and the loop point keeps turning too");
+
+    /* ---- the twist it is measured with ---- */
+    {
+        LxQuat yaw = lx_quat_euler_deg(lx_v3(0, 40, 0));
+        CHECK(NEAR(lx_quat_twist_y_angle(yaw) * LX_RAD2DEG, 40, 0.01f), "a turn about Y reads back (%g deg)",
+              lx_quat_twist_y_angle(yaw) * LX_RAD2DEG);
+        LxQuat lean = lx_quat_euler_deg(lx_v3(25, 0, 0));
+        CHECK(fabsf(lx_quat_twist_y_angle(lean)) < 0.01f, "leaning forward is not turning (%g)", lx_quat_twist_y_angle(lean));
+        LxQuat both = lx_quat_mul(lx_quat_euler_deg(lx_v3(0, 40, 0)), lx_quat_euler_deg(lx_v3(25, 0, 0)));
+        CHECK(NEAR(lx_quat_twist_y_angle(both) * LX_RAD2DEG, 40, 0.5f), "a lean on top of a turn still reads the turn (%g deg)",
+              lx_quat_twist_y_angle(both) * LX_RAD2DEG);
+        /* taking the twist out leaves the lean behind */
+        LxQuat tw = lx_quat_twist_y(both);
+        LxQuat rest = lx_quat_mul(lx_quat_conj(tw), both);
+        CHECK(fabsf(lx_quat_twist_y_angle(rest)) < 0.5f * LX_DEG2RAD, "and taking it out leaves no turn behind");
+    }
+
+    /* ---- on a real animator ---- */
+    char dir[LX_PATH_MAX], path[LX_PATH_MAX];
+    lx_path_join(dir, sizeof dir, tmpdir(), "luxora_test_rootmotion");
+    lx_path_remove(dir);
+    lx_mkdir_p(dir);
+    lx_assets_set_root(dir);
+    lx_path_join(path, sizeof path, dir, "BarModel.fbx");
+    lx_file_write(path, TEST_FBX, strlen(TEST_FBX));
+
+    LxScene *s = lx_scene_create("RootMotion");
+    LxEntity root = lx_model_instantiate(s, "BarModel.fbx", lx_v3(0, 0, 0), 0);
+    LxAnimator *an = lx_get_animator(s, root);
+    CHECK(an != NULL, "the model has an Animator");
+    if (!an) { lx_scene_destroy(s); return; }
+    an->play_on_start = false;
+    an->root_motion = true;
+    lx_animator_play(s, root, "BarModel.fbx#Bend", 0);
+    LxVec3 before = lx_entity_position(s, root);
+    for (int i = 0; i < 40; i++) lx_animator_update(s, root, 0.05f);
+    LxVec3 after = lx_entity_position(s, root);
+    /* the clip bends a bar: it does not travel, so neither does the object - no drift either way */
+    CHECK(lx_len3(lx_sub3(after, before)) < 1e-3f, "a clip that does not travel moves nothing (%g %g %g)",
+          after.x, after.y, after.z);
+
+    /* the root stays where the model has it, rather than drifting off with the animation */
+    LxEntity bar = lx_entity_find(s, "Bar");
+    if (bar) {
+        LxVec3 p = lx_entity_position(s, bar);
+        CHECK(fabsf(p.x) < 1e-3f && fabsf(p.z) < 1e-3f, "the root bone stays over its object (%g %g)", p.x, p.z);
+    }
+
+    /* root motion off: still nothing moves, and the pose is still pinned */
+    an = lx_get_animator(s, root);
+    an->root_motion = false;
+    before = lx_entity_position(s, root);
+    for (int i = 0; i < 20; i++) lx_animator_update(s, root, 0.05f);
+    after = lx_entity_position(s, root);
+    CHECK(lx_len3(lx_sub3(after, before)) < 1e-3f, "with root motion off the object stays put");
+
+    lx_scene_destroy(s);
     lx_model_reload("BarModel.fbx");
 }
 
@@ -2996,6 +3099,7 @@ int main(void) {
     test_anim_graph_asset();
     test_animator_runtime();
     test_anim_exit_time();
+    test_root_motion();
     test_models();
     test_state_graph();
     test_fsm_fuzz();

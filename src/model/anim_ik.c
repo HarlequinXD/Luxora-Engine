@@ -10,6 +10,29 @@
 #include "model_internal.h"
 #include <math.h>
 
+/* ---------------- the grounding rules ----------------
+ * These two decide what foot grounding does, and they are the whole of it: everything else is the
+ * solver above. They are plain functions of numbers so they can be checked directly - the first
+ * version of this got the second one backwards and sank every character into a crouch. */
+
+/* How much of the grounding shows. A foot at or through the ground gets all of it; one in the air gets
+ * less the higher it is, and none at all past the band - a stride's swinging foot must stay where the
+ * animation put it. */
+float lx_ik_ground_weight(float foot_above_target, float band) {
+    if (!(band > 0)) return foot_above_target <= 0 ? 1.0f : 0.0f;
+    if (!(foot_above_target > 0)) return 1.0f;            /* at or below the ground, NaN included */
+    if (foot_above_target >= band) return 0.0f;
+    return 1.0f - foot_above_target / band;
+}
+
+/* How far the hips must come down for a leg to reach. Only a leg that is short of its target asks for
+ * anything: a foot that is merely in the air is not the body's problem. */
+float lx_ik_hip_drop(float reach, float leg_length) {
+    float usable = leg_length * 0.99f;                    /* never ask for a perfectly straight leg */
+    if (!(reach > usable)) return 0;
+    return reach - usable;
+}
+
 /* ---------------- two-bone IK ---------------- */
 /* Angle in the triangle with sides a, b and c, opposite c. Clamped, so a target the limb cannot reach
  * straightens it rather than producing a NaN. */
