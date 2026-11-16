@@ -69,7 +69,11 @@ typedef struct LxAnimState {
     float rm_prev_yaw, rm_last_yaw_step;
     bool rm_have_prev;
     bool rm_wrapped;       /* the clip looped or the state changed: this frame's jump is not movement */
-    int rm_cycle;          /* which time round the single-clip path is */
+    float rm_prev_norm;    /* the single-clip path's place in its cycle last frame */
+    bool rm_started_clip;
+    LxVec3 rm_delta;       /* what the playing motions moved the root by this frame, mixed by weight */
+    float rm_delta_yaw;
+    bool rm_delta_ok;      /* nothing could be measured: there is no movement to give away */
     LxClipSettings rm_settings;   /* what was in force last frame, for the component to show */
     char rm_clip[LX_REF_MAX];
     int rm_root_node;
@@ -457,7 +461,8 @@ void lx_animator_play(LxScene *s, LxEntity e, const char *clip_ref, float fade) 
     st->started = true;
     st->loop = d->animator.loop;
     st->rm_wrapped = true;   /* a new clip: wherever its root starts is not a step from the old one */
-    st->rm_cycle = 0;
+    st->rm_prev_norm = 0;
+    st->rm_started_clip = false;
     /* the clip's own loop setting from its model's import settings */
     for (int i = 0; i < nb.src->clip_count && i < LX_MAX_CLIPS; i++)
         if (&nb.src->clips[i] == nb.clip && i < nb.src->imp.clip_count) st->loop = d->animator.loop && nb.src->imp.clips[i].loop;
@@ -969,6 +974,144 @@ static void sync_graph(LxScene *s, LxEntity e, LxAnimState *st) {
     bind_graph(st, g);
 }
 
+static int root_node_of(const LxModel *m);
+
+/* ----------------------------------------------------------------------
+ *  the root's movement, per clip
+ *
+ *  Root motion cannot be read off the blended pose. A blend tree moving from idle towards run slides
+ *  the blended root from where one clip holds it to where the other does, and a cross-fade does the
+ *  same: that slide is the blend, not the character travelling, and giving it to the object throws the
+ *  character forward the moment the joystick moves.
+ *
+ *  So each clip's own movement is measured inside its own cycle, where there is nothing to slide, and
+ *  those are mixed by the same weights as the pose. Mixing rates rather than positions is also what
+ *  makes a blend tree travel at a sensible speed between its clips.
+ * ---------------------------------------------------------------------- */
+
+/* The track a clip holds for one of the target's nodes, or -1. */
+static int clip_track_for(const Binding *b, int node) {
+    if (!b->track_of || node < 0) return -1;
+    return b->track_of[node];
+}
+
+/* Where a clip puts the root at a point in its cycle, in the model's space. */
+static bool clip_root_at(LxAnimState *st, const Binding *b, float norm, LxVec3 *pos, float *yaw) {
+    const LxModel *m = st->model;
+    if (!b || !b->clip) return false;
+    float len = clip_len_of(b);
+    float t = norm * len;
+    if (!b->humanoid) {
+        int r = root_node_of(m);
+        int track = clip_track_for(b, r);
+        if (track < 0) return false;
+        LxVec3 p, s;
+        LxQuat q;
+        sample(b->clip, track, t, true, &p, &q, &s);
+        /* the root's own movement is local to its parent, which nothing animates: the model's space is
+           that rotated by the parent's rest rotation */
+        int par = m->nodes[r].parent;
+        LxQuat pr = par >= 0 && m->rest_wrot ? m->rest_wrot[par] : lx_quat_identity();
+        *pos = lx_quat_rotate(pr, p);
+        *yaw = lx_quat_twist_y_angle(lx_quat_mul(pr, q));
+        return true;
+    }
+    /* Humanoid: the hips of the clip's own skeleton, put through the same retarget the pose uses, so
+       the travel is in the target's scale rather than the clip's. */
+    LxModel *src = b->src;
+    const LxModel *dst = m;
+    int sh = src ? src->avatar[LX_HB_HIPS] : -1;
+    if (sh < 0 || !src->humanoid_ok || !dst->humanoid_ok || src->hips_height <= 1e-6f) return false;
+    int chain[16];
+    int n = 0;
+    for (int i = sh; i >= 0 && n < 16; i = src->nodes[i].parent) chain[n++] = i;
+    LxVec3 wp = lx_v3(0, 0, 0);
+    LxQuat wr = lx_quat_identity();
+    for (int k = n - 1; k >= 0; k--) {
+        int i = chain[k];
+        LxVec3 lp = src->nodes[i].pos;
+        LxQuat lq = src->nodes[i].rot;
+        for (int tr = 0; tr < b->clip->tracks; tr++)
+            if (b->clip->node[tr] == i) {
+                LxVec3 sc;
+                sample(b->clip, tr, t, true, &lp, &lq, &sc);
+                break;
+            }
+        int par = src->nodes[i].parent;
+        wp = lx_add3(wp, lx_quat_rotate(wr, par >= 0 ? lx_mul3(lp, src->nodes[par].scale) : lp));
+        wr = lx_quat_norm(lx_quat_mul(wr, lq));
+    }
+    LxVec3 off = lx_quat_rotate(src->to_canon, lx_sub3(wp, src->hips_rest));
+    off = lx_scale3(off, dst->hips_height / src->hips_height);
+    *pos = lx_add3(dst->hips_rest, lx_quat_rotate(lx_quat_conj(dst->to_canon), off));
+    *yaw = lx_quat_twist_y_angle(lx_quat_mul(lx_quat_conj(dst->to_canon), lx_quat_mul(src->to_canon, wr)));
+    return true;
+}
+
+/* How far a clip's root moved between two points of its cycle, going forwards. A cycle that came round
+ * is two pieces - to the end, then on from the start - which is the movement, where the difference of
+ * the two samples would be the whole cycle backwards. */
+static void clip_root_delta(LxAnimState *st, const Binding *b, float prev, float now, LxVec3 *dpos, float *dyaw) {
+    *dpos = lx_v3(0, 0, 0);
+    *dyaw = 0;
+    LxVec3 p0, p1;
+    float y0, y1;
+    if (now >= prev) {
+        if (!clip_root_at(st, b, prev, &p0, &y0) || !clip_root_at(st, b, now, &p1, &y1)) return;
+        *dpos = lx_sub3(p1, p0);
+        *dyaw = lx_root_motion_turn(y0, y1, false, 0);
+        return;
+    }
+    LxVec3 pe, ps;
+    float ye, ys;
+    if (!clip_root_at(st, b, prev, &p0, &y0) || !clip_root_at(st, b, 1.0f, &pe, &ye) ||
+        !clip_root_at(st, b, 0.0f, &ps, &ys) || !clip_root_at(st, b, now, &p1, &y1))
+        return;
+    *dpos = lx_add3(lx_sub3(pe, p0), lx_sub3(p1, ps));
+    *dyaw = lx_root_motion_turn(y0, ye, false, 0) + lx_root_motion_turn(ys, y1, false, 0);
+}
+
+static void motion_root_delta(LxAnimState *st, const LxAnimNode *n, float prev, float now, LxVec3 *dpos,
+                              float *dyaw, int depth);
+
+static void tree_root_delta(LxAnimState *st, const LxAnimTree *t, float prev, float now, LxVec3 *dpos,
+                            float *dyaw, int depth) {
+    float w[LX_ANIM_MAX_CHILDREN];
+    ParamLookup pl = {st};
+    lx_anim_tree_weights_ex(t, param_lookup, &pl, w);
+    *dpos = lx_v3(0, 0, 0);
+    *dyaw = 0;
+    for (int i = 0; i < t->child_count; i++) {
+        if (!(w[i] > 0)) continue;
+        const LxAnimChild *c = &t->child[i];
+        LxVec3 d = lx_v3(0, 0, 0);
+        float dy = 0;
+        if (c->tree >= 0 && st->graph && c->tree < st->graph->tree_count && depth + 1 < LX_ANIM_MAX_DEPTH) {
+            tree_root_delta(st, &st->graph->trees[c->tree], prev, now, &d, &dy, depth + 1);
+        } else {
+            Binding *b = bind_cached(st, c->clip);
+            if (!b) continue;
+            clip_root_delta(st, b, prev, now, &d, &dy);
+        }
+        *dpos = lx_madd3(*dpos, d, w[i]);
+        *dyaw += dy * w[i];
+    }
+}
+
+static void motion_root_delta(LxAnimState *st, const LxAnimNode *n, float prev, float now, LxVec3 *dpos,
+                              float *dyaw, int depth) {
+    *dpos = lx_v3(0, 0, 0);
+    *dyaw = 0;
+    if (!n) return;
+    if (n->motion == LX_AM_TREE) {
+        if (!st->graph || n->tree < 0 || n->tree >= st->graph->tree_count) return;
+        tree_root_delta(st, &st->graph->trees[n->tree], prev, now, dpos, dyaw, depth);
+        return;
+    }
+    Binding *b = bind_cached(st, n->clip);
+    if (b) clip_root_delta(st, b, prev, now, dpos, dyaw);
+}
+
 /* ======================================================================
  *  root motion
  *
@@ -998,8 +1141,7 @@ static LxClipSettings root_clip_settings(LxAnimState *st) {
     st->rm_clip[0] = 0;
     LxClipSettings out;
     memset(&out, 0, sizeof out);
-    out.bake_position_y = true;
-    out.bake_rotation = true;
+    lx_clip_settings_defaults(&out);
     const char *ref = NULL;
     if (st->graph && st->layers && st->layer_count > 0 && st->graph->layer_count > 0) {
         const LxAnimLayer *l = &st->graph->layers[0];
@@ -1095,12 +1237,19 @@ static void root_motion(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *d
 
     LxVec3 step = lx_v3(0, 0, 0);
     float turn = 0;
-    if (st->rm_have_prev) {
+    if (st->rm_delta_ok) {
+        /* measured from the clips themselves, which is the only reading a blend can be trusted with */
+        step = st->rm_delta;
+        turn = st->rm_delta_yaw;
+    } else if (st->rm_have_prev) {
         step = lx_root_motion_step(st->rm_prev_pos, raw_p, st->rm_wrapped, st->rm_last_step);
         turn = lx_root_motion_turn(st->rm_prev_yaw, yaw, st->rm_wrapped, st->rm_last_yaw_step);
         /* A root that moves further than the character is tall in one frame has not walked there: the
            clip was changed, scrubbed, or came round again without anyone noticing. Whatever it was, it
            is not travel, and handing it to the object would fling the character across the level. */
+    }
+    {
+        /* A root that moves further than the character is tall in one frame has not walked there. */
         float limit = m->bounds.max.y - m->bounds.min.y;
         if (!(limit > 0.1f)) limit = 2.0f;
         if (lx_len3(step) > limit) { step = lx_v3(0, 0, 0); turn = 0; }
@@ -1115,11 +1264,11 @@ static void root_motion(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *d
     /* Take out of the pose everything that is not baked into it. A channel the object is not given
        either - because Root Motion is off - is simply pinned, which is what animating in place is. */
     LxVec3 want = raw_p;
-    if (!cs.bake_position_xz) { want.x = rest_p.x; want.z = rest_p.z; }
-    if (!cs.bake_position_y) want.y = rest_p.y;
+    if (cs.travel != LX_ROOT_IN_POSE) { want.x = rest_p.x; want.z = rest_p.z; }
+    if (cs.up_down != LX_ROOT_IN_POSE) want.y = rest_p.y;
     if (want.x != raw_p.x || want.y != raw_p.y || want.z != raw_p.z)
         st->out.pos[r] = local_for_model_pos(m, &st->out, r, want);
-    if (!cs.bake_rotation) {
+    if (cs.turn != LX_ROOT_IN_POSE) {
         /* the turn comes out in model space, and the local rotation is what is left of it there */
         LxQuat tw = lx_quat_twist_y(raw_r);
         LxQuat want_r = lx_quat_mul(lx_quat_twist_y(rest_r), lx_quat_mul(lx_quat_conj(tw), raw_r));
@@ -1135,8 +1284,10 @@ static void root_motion(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *d
 
     LxEntity mover = mover_of(s, e);
     if (!mover || !lx_entity_valid(s, mover)) return;
-    LxVec3 local = lx_v3(cs.bake_position_xz ? 0 : step.x, cs.bake_position_y ? 0 : step.y,
-                         cs.bake_position_xz ? 0 : step.z);
+    /* only a channel asked to move the object does; one that is pinned went nowhere */
+    LxVec3 local = lx_v3(cs.travel == LX_ROOT_TO_OBJECT ? step.x : 0,
+                         cs.up_down == LX_ROOT_TO_OBJECT ? step.y : 0,
+                         cs.travel == LX_ROOT_TO_OBJECT ? step.z : 0);
     float speed = d->animator.speed;
     LX_UNUSED(speed);   /* the step is already in the pose, which the speed has moved */
     if (lx_len3(local) > 1e-9f) {
@@ -1148,7 +1299,7 @@ static void root_motion(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *d
         if (lx_get_character(s, mover)) lx_character_move(s, mover, world);
         else lx_entity_set_position(s, mover, lx_add3(lx_entity_position(s, mover), world));
     }
-    if (!cs.bake_rotation && fabsf(turn) > 1e-7f) {
+    if (cs.turn == LX_ROOT_TO_OBJECT && fabsf(turn) > 1e-7f) {
         LxQuat spin = lx_quat_axis_angle(lx_v3(0, 1, 0), turn);
         lx_entity_set_rotation(s, mover, lx_quat_norm(lx_quat_mul(spin, lx_entity_rotation(s, mover))));
     }
@@ -1430,18 +1581,33 @@ static void graph_update(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *
         if (len > 0) lr->norm += dt * speed / len;
         if (!n->loop && lr->norm > 1) lr->norm = 1;
         if (lr->norm != lr->norm) lr->norm = prev;   /* a NaN here would stop the layer dead */
-        if (li == 0 && floorf(lr->norm) != floorf(prev)) st->rm_wrapped = true;   /* it came round again */
-        /* While two states are blending, the root slides from where one clip has it to where the other
-           does. That slide is the blend, not the character travelling: a walk whose clip starts its
-           root half a step forward would throw the character that far forward the moment it began.
-           The step it was already taking is carried until the blend is over. */
-        if (li == 0 && lr->from != -1) st->rm_wrapped = true;
+        float from_prev = lr->from_norm;
         if (lr->from >= 0 && lr->from < l->state_count) {
             const LxAnimNode *fn = &l->states[lr->from];
             float flen = state_length(st, fn);
             float fspeed = fn->speed * global_speed;
             if (fn->speed_param[0]) fspeed *= param_float(st, fn->speed_param);
             if (flen > 0) lr->from_norm += dt * fspeed / flen;
+        }
+        if (li == 0) {
+            /* What the motions themselves moved the root by, each measured inside its own cycle and
+               mixed by the weights the pose uses. The blended pose cannot say this: a blend tree
+               moving from idle towards run, or a cross-fade, slides the root from where one clip
+               holds it to where the other does, and that slide is not the character travelling. */
+            LxVec3 d;
+            float dy;
+            motion_root_delta(st, n, prev, lr->norm, &d, &dy, 0);
+            if (lr->from >= 0 && lr->from < l->state_count && lr->fade_len > 0) {
+                LxVec3 fd;
+                float fdy;
+                float w = lx_clampf(lr->fade / lr->fade_len, 0, 1);
+                motion_root_delta(st, &l->states[lr->from], from_prev, lr->from_norm, &fd, &fdy, 0);
+                d = lx_add3(lx_scale3(fd, 1.0f - w), lx_scale3(d, w));
+                dy = fdy * (1.0f - w) + dy * w;
+            }
+            st->rm_delta = d;
+            st->rm_delta_yaw = dy;
+            st->rm_delta_ok = true;
         }
         if (lr->from != -1) {
             lr->fade += dt;
@@ -1592,9 +1758,9 @@ bool lx_animator_root_motion_info(LxScene *s, LxEntity e, LxRootMotionInfo *out)
     if (out->has_root) lx_strcpy(out->root_bone, sizeof out->root_bone, st->model->nodes[r].name);
     lx_strcpy(out->clip, sizeof out->clip, st->rm_clip);
     /* a channel "moves the object" when it is not kept in the pose - and only then does the switch matter */
-    out->travel_moves_object = !st->rm_settings.bake_position_xz;
-    out->up_down_moves_object = !st->rm_settings.bake_position_y;
-    out->turn_moves_object = !st->rm_settings.bake_rotation;
+    out->travel_moves_object = st->rm_settings.travel == LX_ROOT_TO_OBJECT;
+    out->up_down_moves_object = st->rm_settings.up_down == LX_ROOT_TO_OBJECT;
+    out->turn_moves_object = st->rm_settings.turn == LX_ROOT_TO_OBJECT;
     out->last_step = st->rm_last_step;
     out->last_turn = st->rm_last_yaw_step;
     return true;
@@ -1639,6 +1805,9 @@ void lx_animator_update(LxScene *s, LxEntity e, float dt) {
     LxAnimState *st = state_for(s, e);
     if (!st) return;
     d = lx_entity_data(s, e);
+    /* each frame measures the root afresh: a reading left over from a clip that has stopped would
+       keep moving the object for ever */
+    st->rm_delta_ok = false;
     if (st->graph) { st->started = true; graph_update(s, e, st, d, dt); return; }
     if (!st->started && d->animator.play_on_start && d->animator.clip[0]) lx_animator_play(s, e, d->animator.clip, 0);
     st->started = true;
@@ -1667,13 +1836,20 @@ void lx_animator_update(LxScene *s, LxEntity e, float dt) {
     } else {
         lx_pose_copy(&st->out, &st->a);
     }
-    if (st->prev.clip) st->rm_wrapped = true;   /* cross-fading: the root is sliding between clips */
-    /* the clip comes round again: the root jumps back to the start, which is not a step */
-    if (st->cur.clip && st->loop) {
-        float len = st->cur.clip->length;
-        if (len > 0) {
-            int cycle = (int)floorf(st->time / len);
-            if (cycle != st->rm_cycle) { st->rm_wrapped = true; st->rm_cycle = cycle; }
+    /* the one clip it is playing, measured inside its own cycle like the graph's are */
+    if (st->cur.clip) {
+        float clen = clip_len_of(&st->cur);
+        if (clen > 0) {
+            float now_n = st->time / clen, prev_n = st->rm_prev_norm;
+            if (st->loop) { now_n -= floorf(now_n); prev_n -= floorf(prev_n); }
+            LxVec3 d;
+            float dy;
+            clip_root_delta(st, &st->cur, prev_n, now_n, &d, &dy);
+            st->rm_delta = d;
+            st->rm_delta_yaw = dy;
+            st->rm_delta_ok = st->rm_started_clip;
+            st->rm_prev_norm = st->loop ? now_n : st->time / clen;
+            st->rm_started_clip = true;
         }
     }
     root_motion(s, e, st, d, dt);

@@ -973,10 +973,17 @@ void lx_model_free(LxModel *m) {
  * fights the ground and the steering. */
 void lx_clip_settings_defaults(LxClipSettings *c) {
     c->loop = true;
-    c->bake_position_xz = false;
-    c->bake_position_y = true;
-    c->bake_rotation = true;
+    c->travel = LX_ROOT_TO_OBJECT;
+    c->up_down = LX_ROOT_IN_POSE;
+    c->turn = LX_ROOT_IN_POSE;
 }
+
+static const char *const ROOT_CHANNELS[] = {"object", "pose", "pinned"};
+static LxRootChannel root_channel_parse(const char *s) {
+    for (int i = 0; i < 3; i++) if (!strcmp(s, ROOT_CHANNELS[i])) return (LxRootChannel)i;
+    return LX_ROOT_TO_OBJECT;
+}
+const char *lx_root_channel_name(LxRootChannel c) { return ROOT_CHANNELS[c >= 0 && c <= 2 ? c : 0]; }
 
 LxModelImport lx_model_import_defaults(void) {
     LxModelImport i;
@@ -993,7 +1000,7 @@ LxModelImport lx_model_import_defaults(void) {
 /* The settings file's version. 2 added the root motion a clip gives away; a file older than that
  * never had an opinion about it, so whatever its clips say about baking is not an answer - it is the
  * absence of the question - and the defaults are used instead. */
-#define LX_IMPORT_VERSION 2
+#define LX_IMPORT_VERSION 3
 
 bool lx_model_import_load(const char *model_path, LxModelImport *out) {
     char path[LX_PATH_MAX + 16];
@@ -1028,12 +1035,16 @@ bool lx_model_import_load(const char *model_path, LxModelImport *out) {
             }
             if (!strcmp(f + 1, "name")) lx_strcpy(out->clips[idx].name, sizeof out->clips[idx].name, v);
             else if (!strcmp(f + 1, "loop")) out->clips[idx].loop = atoi(v) != 0;
-            else if (!strcmp(f + 1, "bake_xz")) out->clips[idx].bake_position_xz = atoi(v) != 0;
-            else if (!strcmp(f + 1, "bake_y")) out->clips[idx].bake_position_y = atoi(v) != 0;
-            else if (!strcmp(f + 1, "bake_rot")) out->clips[idx].bake_rotation = atoi(v) != 0;
+            /* version 2 said only whether a channel was baked into the pose; version 3 says where it goes */
+            else if (!strcmp(f + 1, "bake_xz")) out->clips[idx].travel = atoi(v) ? LX_ROOT_IN_POSE : LX_ROOT_TO_OBJECT;
+            else if (!strcmp(f + 1, "bake_y")) out->clips[idx].up_down = atoi(v) ? LX_ROOT_IN_POSE : LX_ROOT_TO_OBJECT;
+            else if (!strcmp(f + 1, "bake_rot")) out->clips[idx].turn = atoi(v) ? LX_ROOT_IN_POSE : LX_ROOT_TO_OBJECT;
+            else if (!strcmp(f + 1, "travel")) out->clips[idx].travel = root_channel_parse(v);
+            else if (!strcmp(f + 1, "up_down")) out->clips[idx].up_down = root_channel_parse(v);
+            else if (!strcmp(f + 1, "turn")) out->clips[idx].turn = root_channel_parse(v);
         }
     }
-    if (file_version < LX_IMPORT_VERSION) {
+    if (file_version < 2) {
         /* it was written before clips could say what their root gives away, or by the version that
            wrote the field without ever meaning it: either way, the defaults are the honest answer */
         for (int i = 0; i < out->clip_count && i < LX_MAX_CLIPS; i++) {
@@ -1059,9 +1070,9 @@ bool lx_model_import_save(const char *model_path, const LxModelImport *imp) {
     for (int b = 0; b < LX_HB_COUNT; b++)
         if (imp->avatar[b][0]) lx_sb_printf(&sb, "avatar.%s = %s\n", lx_human_bone_name((LxHumanBone)b), imp->avatar[b]);
     for (int i = 0; i < imp->clip_count && i < LX_MAX_CLIPS; i++)
-        lx_sb_printf(&sb, "clip.%d.name = %s\nclip.%d.loop = %d\nclip.%d.bake_xz = %d\nclip.%d.bake_y = %d\nclip.%d.bake_rot = %d\n",
-                     i, imp->clips[i].name, i, imp->clips[i].loop, i, imp->clips[i].bake_position_xz,
-                     i, imp->clips[i].bake_position_y, i, imp->clips[i].bake_rotation);
+        lx_sb_printf(&sb, "clip.%d.name = %s\nclip.%d.loop = %d\nclip.%d.travel = %s\nclip.%d.up_down = %s\nclip.%d.turn = %s\n",
+                     i, imp->clips[i].name, i, imp->clips[i].loop, i, lx_root_channel_name(imp->clips[i].travel),
+                     i, lx_root_channel_name(imp->clips[i].up_down), i, lx_root_channel_name(imp->clips[i].turn));
     bool ok = lx_file_write(path, sb.data, sb.len);
     lx_free(sb.data);
     return ok;

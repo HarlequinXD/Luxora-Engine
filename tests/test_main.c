@@ -2697,23 +2697,23 @@ static void test_root_motion(void) {
         CHECK(lx_model_import_load(imp_path_model(imp_path), &imp), "an old settings file loads");
         CHECK(imp.clip_count == 1 && !strcmp(imp.clips[0].name, "Bend") && imp.clips[0].loop,
               "its name and loop come through (%d clips)", imp.clip_count);
-        CHECK(imp.clips[0].bake_position_y && imp.clips[0].bake_rotation && !imp.clips[0].bake_position_xz,
+        CHECK(imp.clips[0].up_down == LX_ROOT_IN_POSE && imp.clips[0].turn == LX_ROOT_IN_POSE && imp.clips[0].travel == LX_ROOT_TO_OBJECT,
               "and the root motion it never mentioned keeps its defaults (xz %d, y %d, rot %d)",
-              imp.clips[0].bake_position_xz, imp.clips[0].bake_position_y, imp.clips[0].bake_rotation);
+              (int)imp.clips[0].travel, (int)imp.clips[0].up_down, (int)imp.clips[0].turn);
         /* and a clip that does say so is believed */
         /* a file of this version is taken at its word; one without a version is not, because the
            build that wrote those fields without ever meaning them left no other way to tell */
         const char *says =
             "version = 2\nclip.0.name = Bend\nclip.0.loop = 1\nclip.0.bake_xz = 1\nclip.0.bake_y = 0\nclip.0.bake_rot = 0\n";
         lx_file_write(imp_path, says, strlen(says));
-        CHECK(lx_model_import_load(imp_path_model(imp_path), &imp) && imp.clips[0].bake_position_xz &&
-              !imp.clips[0].bake_position_y && !imp.clips[0].bake_rotation,
+        CHECK(lx_model_import_load(imp_path_model(imp_path), &imp) && imp.clips[0].travel == LX_ROOT_IN_POSE &&
+              imp.clips[0].up_down == LX_ROOT_TO_OBJECT && imp.clips[0].turn == LX_ROOT_TO_OBJECT,
               "a file that does say what the root gives away is taken at its word");
         const char *unversioned =
             "clip.0.name = Bend\nclip.0.loop = 1\nclip.0.bake_xz = 1\nclip.0.bake_y = 0\nclip.0.bake_rot = 0\n";
         lx_file_write(imp_path, unversioned, strlen(unversioned));
-        CHECK(lx_model_import_load(imp_path_model(imp_path), &imp) && !imp.clips[0].bake_position_xz &&
-              imp.clips[0].bake_position_y && imp.clips[0].bake_rotation,
+        CHECK(lx_model_import_load(imp_path_model(imp_path), &imp) && imp.clips[0].travel == LX_ROOT_TO_OBJECT &&
+              imp.clips[0].up_down == LX_ROOT_IN_POSE && imp.clips[0].turn == LX_ROOT_IN_POSE,
               "the same settings without a version go back to the defaults");
         lx_path_remove(imp_path);
     }

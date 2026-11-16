@@ -823,16 +823,22 @@ bool lx_human_bone_required(LxHumanBone b);         /* the 15 an avatar must hav
  * doesn't; Generate always unwraps; Model's Own never does (meshes without one can't take baked lighting). */
 typedef enum LxLightmapUvMode { LX_LMUV_AUTO, LX_LMUV_GENERATE, LX_LMUV_OWN } LxLightmapUvMode;
 #define LX_MAX_CLIPS 64
-/* Root motion settings, per clip. A clip that travels can either move the object it is played on - so
- * the character actually goes somewhere, and its collider goes with it - or have that travel baked into
- * the pose, where it stays part of the animation and the object does not move. In place is the third
- * case, and that is the Animator's Root Motion switch: with it off nothing moves whatever is set here. */
+/* What a clip does with each part of its root's movement. Three things can be done with it, and all
+ * three are wanted: a walk's travel should move the object so the character goes somewhere and takes
+ * its collider with it; a run's bob should stay in the animation, because that is the run; and a clip
+ * whose root wanders when it should not wants that thrown away. */
+typedef enum LxRootChannel {
+    LX_ROOT_TO_OBJECT,   /* leaves the pose and moves the object - root motion */
+    LX_ROOT_IN_POSE,     /* stays in the animation, and the object does not move */
+    LX_ROOT_PINNED       /* leaves the pose and goes nowhere: neither the body nor the object moves */
+} LxRootChannel;
+
 typedef struct LxClipSettings {
     char name[64];
     bool loop;
-    bool bake_position_xz;   /* keep the clip's travel in the pose (default: it moves the object) */
-    bool bake_position_y;    /* keep its up and down in the pose (default: yes - hops stay animation) */
-    bool bake_rotation;      /* keep its turning in the pose (default: yes) */
+    LxRootChannel travel;    /* side to side and forward (default: it moves the object) */
+    LxRootChannel up_down;   /* default: in the pose, because a run is meant to rise and fall */
+    LxRootChannel turn;      /* default: in the pose, until a clip is meant to steer */
 } LxClipSettings;
 typedef struct LxModelImport {
     float scale;                     /* extra scale on top of the file's units (1 = as authored, in metres) */
@@ -845,7 +851,8 @@ typedef struct LxModelImport {
     LxClipSettings clips[LX_MAX_CLIPS];
 } LxModelImport;
 LxModelImport lx_model_import_defaults(void);
-void lx_clip_settings_defaults(LxClipSettings *c);   /* loop, and the root motion a clip gives away */
+void lx_clip_settings_defaults(LxClipSettings *c);   /* loop, and where each of the root's channels goes */
+const char *lx_root_channel_name(LxRootChannel c);
 bool lx_model_import_load(const char *model_path, LxModelImport *out);    /* reads <model>.lximport */
 bool lx_model_import_save(const char *model_path, const LxModelImport *imp);
 

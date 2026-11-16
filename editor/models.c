@@ -195,44 +195,42 @@ void ed_model_inspector(UiNode *body, const char *ref) {
         UiNode *lp = ui_checkbox(ui, cr, "Loop", &g_imp.clips[i].loop);
         lp->on_change = imp_changed;
         lp->w = 64;
-        /* What the clip's root does with each channel. Ticked means it stays in the animation; unticked
-           means it leaves the animation, and goes to the object or is pinned depending on Root Motion.
-           The labels say so outright: "bake into pose" is the usual name for this and tells nobody
-           which way round it is. */
+        /* Where each part of the clip's root movement goes. Three choices, because all three are
+           wanted and the usual "bake into pose" tickbox can only say two of them. */
         if (g_imp.rig != LX_RIG_NONE) {
-            UiNode *rr = ui_box(ui, sec, UI_ROW);
-            rr->h = 24;
-            rr->gap = 8;
-            rr->cross_align = UI_ALIGN_CENTER;
-            ui_pad(rr, 24, 0, 0, 0);
-            UiNode *lbl = ui_label(ui, rr, "Keep in pose:");
-            lbl->font = UI_FONT_SMALL;
-            lbl->fg = t->text_dim;
-            lbl->w = 92;
-            UiNode *bx = ui_checkbox(ui, rr, "Travel", &g_imp.clips[i].bake_position_xz);
-            bx->on_change = imp_changed;
-            bx->w = 78;
-            lx_strcpy(bx->tooltip, sizeof bx->tooltip,
-                      "On: the character drifts forward with the animation. Off: the travel leaves the pose - "
-                      "it moves the object when Root Motion is on, and is pinned when it is off");
-            UiNode *by = ui_checkbox(ui, rr, "Up/Down", &g_imp.clips[i].bake_position_y);
-            by->on_change = imp_changed;
-            by->w = 94;
-            lx_strcpy(by->tooltip, sizeof by->tooltip,
-                      "On: the body rises and falls with the animation, which is what a run is meant to do. "
-                      "Off: the root is held at its rest height and the bob is gone");
-            UiNode *br = ui_checkbox(ui, rr, "Turning", &g_imp.clips[i].bake_rotation);
-            br->on_change = imp_changed;
-            br->w = 90;
-            lx_strcpy(br->tooltip, sizeof br->tooltip,
-                      "On: the character turns within the animation. Off: the turn leaves the pose - it turns "
-                      "the object when Root Motion is on, and is pinned when it is off");
+            static const char *const WHERE[] = {"Moves the object", "Stays in the pose", "Pinned"};
+            struct { const char *label; LxRootChannel *v; const char *tip; } ch[3] = {
+                {"Travel", &g_imp.clips[i].travel,
+                 "Side to side and forward. Moves the object for a walk or a run, so the character goes "
+                 "somewhere and its collider goes with it. Left in the pose, the body walks away from the object."},
+                {"Up / Down", &g_imp.clips[i].up_down,
+                 "In the pose the body rises and falls, which is what a run does. Pinned, it is held level "
+                 "and nothing bobs. Moving the object with it makes the object itself rise and fall."},
+                {"Turning", &g_imp.clips[i].turn,
+                 "In the pose the character turns within the animation. Moves the object when the clip is "
+                 "meant to steer. Pinned, the turn is thrown away."},
+            };
+            for (int c = 0; c < 3; c++) {
+                UiNode *rr = ui_box(ui, sec, UI_ROW);
+                rr->h = 24;
+                rr->gap = 6;
+                rr->cross_align = UI_ALIGN_CENTER;
+                ui_pad(rr, 24, 0, 0, 0);
+                UiNode *lbl = ui_label(ui, rr, ch[c].label);
+                lbl->font = UI_FONT_SMALL;
+                lbl->fg = t->text_dim;
+                lbl->w = 88;
+                UiNode *dd = ui_dropdown(ui, rr, (int *)ch[c].v, WHERE, 3);
+                dd->grow = 1;
+                dd->h = 22;
+                dd->on_change = imp_changed;
+                lx_strcpy(dd->tooltip, sizeof dd->tooltip, ch[c].tip);
+            }
         }
     }
     if (lx_model_clip_count(m) && g_imp.rig != LX_RIG_NONE)
-        hint(sec, "Ticked, a channel stays part of the animation. Unticked, it leaves the pose: with Root Motion on the "
-                  "Animator it moves the object, so the character travels and its collider goes with it, and with Root "
-                  "Motion off it is simply held still. Untick Up/Down to stop the body bobbing.");
+        hint(sec, "Anything set to move the object needs Root Motion switched on for that object's Animator; with it "
+                  "off those channels are pinned instead and the character animates in place.");
     UiNode *btns = ui_box(ui, body, UI_ROW);
     ui_pad(btns, 12, 10, 12, 4);
     btns->h = 46;
