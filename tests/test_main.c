@@ -2229,6 +2229,14 @@ static void test_ik(void) {
         CHECK(NEAR(upper_len, 1, 1e-4f) && NEAR(lower_len, 1, 1e-4f), "without stretching either bone (%g %g)", upper_len, lower_len);
     }
 
+    /* the knee goes the way the pole says: a leg bending straight down must bend forwards, towards it */
+    for (int straight = 0; straight < 2; straight++) {
+        LxVec3 k0 = straight ? knee : lx_v3(0, 1, -0.05f);   /* straight, or already a little backwards */
+        CHECK(lx_ik_two_bone(hip, k0, ankle, lx_v3(0, 0.6f, 0), pole, lx_quat_identity(), lx_quat_identity(), 1, &r), "a bent leg answers");
+        LxVec3 nk = lx_add3(hip, lx_quat_rotate(r.root, lx_sub3(k0, hip)));
+        CHECK(nk.z > 0.3f, "the knee bends towards the pole, not away (knee z %.3f, %s)", nk.z, straight ? "from straight" : "from bent back");
+    }
+
     /* a target further than the limb is long: it straightens towards it rather than tearing */
     LxVec3 far_target = lx_v3(0, -6, 0);
     CHECK(lx_ik_two_bone(hip, knee, ankle, far_target, pole, lx_quat_identity(), lx_quat_identity(), 1, &r), "an unreachable target still answers");

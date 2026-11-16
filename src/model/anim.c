@@ -1493,12 +1493,20 @@ static void foot_ik(LxScene *s, LxEntity e, LxAnimState *st, IkFrame *f, float w
             pose_fk(st, &st->out, f->wp, f->wr);
         }
     }
-    /* knees bend the way the character faces */
+    /* knees bend the way the toes point. The object's forward is only a fallback: a model imported facing
+       the other way inside its object would have every straight-legged knee pushed backwards by it. */
     LxVec3 forward = lx_quat_rotate(f->root_rot, lx_v3(0, 0, 1));
     for (int side = 0; side < 2; side++) {
         if (!(side_weight[side] > 0)) continue;
         Limb lb = limb_of(m, side == 0 ? LX_IK_LEFT_FOOT : LX_IK_RIGHT_FOOT);
-        solve_limb(st, f, lb, targets[side], side_weight[side], &rots[side], side_weight[side], &forward);
+        LxVec3 knee_dir = forward;
+        int toes = m->avatar[side == 0 ? LX_HB_LEFT_TOES : LX_HB_RIGHT_TOES];
+        if (toes >= 0 && toes < st->out.count) {
+            LxVec3 tf = lx_sub3(to_world_p(f, f->wp[toes]), to_world_p(f, f->wp[lb.end]));
+            tf.y = 0;
+            if (lx_len3(tf) > 1e-4f) knee_dir = lx_norm3(tf);
+        }
+        solve_limb(st, f, lb, targets[side], side_weight[side], &rots[side], side_weight[side], &knee_dir);
     }
 }
 

@@ -91,9 +91,11 @@ bool lx_ik_two_bone(LxVec3 root, LxVec3 mid, LxVec3 end, LxVec3 target, LxVec3 p
     }
     axis = lx_norm3(axis);
 
-    /* where the joints go: the upper bone turned off the straight line by the triangle's angle */
+    /* where the joints go: the upper bone turned off the straight line by the triangle's angle, towards
+     * the pole (turning about dir x pole by a positive angle swings dir towards the pole; the negative
+     * angle this once had bent every knee backwards, a little at idle and inside out when crouching) */
     float at_root = law_of_cosines(upper, dist, lower);
-    LxVec3 upper_dir = lx_quat_rotate(lx_quat_axis_angle(axis, -at_root), dir);
+    LxVec3 upper_dir = lx_quat_rotate(lx_quat_axis_angle(axis, at_root), dir);
     LxVec3 want_mid = lx_add3(root, lx_scale3(upper_dir, upper));
     LxVec3 want_end = lx_add3(root, lx_scale3(dir, dist));
 
