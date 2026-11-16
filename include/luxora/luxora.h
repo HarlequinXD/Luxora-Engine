@@ -845,6 +845,7 @@ typedef struct LxModelImport {
     LxClipSettings clips[LX_MAX_CLIPS];
 } LxModelImport;
 LxModelImport lx_model_import_defaults(void);
+void lx_clip_settings_defaults(LxClipSettings *c);   /* loop, and the root motion a clip gives away */
 bool lx_model_import_load(const char *model_path, LxModelImport *out);    /* reads <model>.lximport */
 bool lx_model_import_save(const char *model_path, const LxModelImport *imp);
 

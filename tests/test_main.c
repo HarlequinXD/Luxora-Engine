@@ -2631,6 +2631,15 @@ static void test_anim_exit_time(void) {
     lx_model_reload("BarModel.fbx");
 }
 
+/* lx_model_import_load takes the model's path and adds the suffix itself */
+static const char *imp_path_model(char *lximport_path) {
+    static char model[LX_PATH_MAX];
+    lx_strcpy(model, sizeof model, lximport_path);
+    char *dot = strstr(model, ".lximport");
+    if (dot) *dot = 0;
+    return model;
+}
+
 /* Root motion: the clip's own travel, taken out of the pose and given to the object. */
 static void test_root_motion(void) {
     printf("root motion\n");
@@ -2672,6 +2681,42 @@ static void test_root_motion(void) {
     lx_assets_set_root(dir);
     lx_path_join(path, sizeof path, dir, "BarModel.fbx");
     lx_file_write(path, TEST_FBX, strlen(TEST_FBX));
+
+    /* ---- a settings file written before root motion had settings ----
+     * It says nothing about what the root gives away, and what it does not say must not read as
+     * "hand the bob and the turning to the object": that lifts a running character off the ground
+     * every stride, which is exactly what it did. */
+    {
+        char imp_path[LX_PATH_MAX];
+        lx_path_join(imp_path, sizeof imp_path, dir, "BarModel.fbx.lximport");
+        const char *old_format =
+            "scale = 1\nimport_animations = 1\nrig = generic\n"
+            "clip.0.name = Bend\nclip.0.loop = 1\n";
+        lx_file_write(imp_path, old_format, strlen(old_format));
+        LxModelImport imp;
+        CHECK(lx_model_import_load(imp_path_model(imp_path), &imp), "an old settings file loads");
+        CHECK(imp.clip_count == 1 && !strcmp(imp.clips[0].name, "Bend") && imp.clips[0].loop,
+              "its name and loop come through (%d clips)", imp.clip_count);
+        CHECK(imp.clips[0].bake_position_y && imp.clips[0].bake_rotation && !imp.clips[0].bake_position_xz,
+              "and the root motion it never mentioned keeps its defaults (xz %d, y %d, rot %d)",
+              imp.clips[0].bake_position_xz, imp.clips[0].bake_position_y, imp.clips[0].bake_rotation);
+        /* and a clip that does say so is believed */
+        /* a file of this version is taken at its word; one without a version is not, because the
+           build that wrote those fields without ever meaning them left no other way to tell */
+        const char *says =
+            "version = 2\nclip.0.name = Bend\nclip.0.loop = 1\nclip.0.bake_xz = 1\nclip.0.bake_y = 0\nclip.0.bake_rot = 0\n";
+        lx_file_write(imp_path, says, strlen(says));
+        CHECK(lx_model_import_load(imp_path_model(imp_path), &imp) && imp.clips[0].bake_position_xz &&
+              !imp.clips[0].bake_position_y && !imp.clips[0].bake_rotation,
+              "a file that does say what the root gives away is taken at its word");
+        const char *unversioned =
+            "clip.0.name = Bend\nclip.0.loop = 1\nclip.0.bake_xz = 1\nclip.0.bake_y = 0\nclip.0.bake_rot = 0\n";
+        lx_file_write(imp_path, unversioned, strlen(unversioned));
+        CHECK(lx_model_import_load(imp_path_model(imp_path), &imp) && !imp.clips[0].bake_position_xz &&
+              imp.clips[0].bake_position_y && imp.clips[0].bake_rotation,
+              "the same settings without a version go back to the defaults");
+        lx_path_remove(imp_path);
+    }
 
     LxScene *s = lx_scene_create("RootMotion");
     LxEntity root = lx_model_instantiate(s, "BarModel.fbx", lx_v3(0, 0, 0), 0);

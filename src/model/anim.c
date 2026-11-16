@@ -1039,16 +1039,51 @@ static LxEntity mover_of(LxScene *s, LxEntity e) {
     return top;
 }
 
+/* Where a node sits in the model's own space, by walking up to the root. The root is near the top of
+ * the hierarchy, so this is a couple of steps - and it is the space root motion belongs in. A bone's
+ * local axes are not the model's: an FBX rig often hangs its skeleton under a node turned -90 degrees
+ * about X, and pinning "local X and Z" there would pin the model's X and *Y* and let it drift forward. */
+static void node_in_model(const LxModel *m, const LxPose *p, int node, LxVec3 *out_pos, LxQuat *out_rot) {
+    int chain[32];
+    int n = 0;
+    for (int i = node; i >= 0 && n < 32; i = m->nodes[i].parent) chain[n++] = i;
+    LxVec3 pos = lx_v3(0, 0, 0);
+    LxQuat rot = lx_quat_identity();
+    for (int k = n - 1; k >= 0; k--) {
+        int i = chain[k];
+        int par = m->nodes[i].parent;
+        LxVec3 lp = p->pos[i];
+        pos = lx_add3(pos, lx_quat_rotate(rot, par >= 0 ? lx_mul3(lp, m->nodes[par].scale) : lp));
+        rot = lx_quat_norm(lx_quat_mul(rot, p->rot[i]));
+    }
+    if (out_pos) *out_pos = pos;
+    if (out_rot) *out_rot = rot;
+}
+
+/* the local position that puts a node at a given place in the model's space */
+static LxVec3 local_for_model_pos(const LxModel *m, const LxPose *p, int node, LxVec3 want) {
+    int par = m->nodes[node].parent;
+    if (par < 0) return want;
+    LxVec3 pp;
+    LxQuat pr;
+    node_in_model(m, p, par, &pp, &pr);
+    LxVec3 local = lx_quat_rotate(lx_quat_conj(pr), lx_sub3(want, pp));
+    LxVec3 ps = m->nodes[par].scale;
+    return lx_v3(local.x / (ps.x ? ps.x : 1), local.y / (ps.y ? ps.y : 1), local.z / (ps.z ? ps.z : 1));
+}
+
 static void root_motion(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *d, float dt) {
     LX_UNUSED(dt);
     const LxModel *m = st->model;
     int r = root_node_of(m);
     if (r < 0 || r >= st->out.count) return;
     LxClipSettings cs = root_clip_settings(st);
-    LxVec3 rest_p = m->nodes[r].pos;
-    LxQuat rest_r = m->nodes[r].rot;
-    LxVec3 raw_p = st->out.pos[r];
-    LxQuat raw_r = st->out.rot[r];
+    /* everything here is in the model's space, where "up" is up and "forward" is forward */
+    LxVec3 raw_p;
+    LxQuat raw_r;
+    node_in_model(m, &st->out, r, &raw_p, &raw_r);
+    LxVec3 rest_p = m->rest_wpos ? m->rest_wpos[r] : m->nodes[r].pos;
+    LxQuat rest_r = m->rest_wrot ? m->rest_wrot[r] : m->nodes[r].rot;
     float yaw = lx_quat_twist_y_angle(raw_r);
 
     LxVec3 step = lx_v3(0, 0, 0);
@@ -1056,6 +1091,12 @@ static void root_motion(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *d
     if (st->rm_have_prev) {
         step = lx_root_motion_step(st->rm_prev_pos, raw_p, st->rm_wrapped, st->rm_last_step);
         turn = lx_root_motion_turn(st->rm_prev_yaw, yaw, st->rm_wrapped, st->rm_last_yaw_step);
+        /* A root that moves further than the character is tall in one frame has not walked there: the
+           clip was changed, scrubbed, or came round again without anyone noticing. Whatever it was, it
+           is not travel, and handing it to the object would fling the character across the level. */
+        float limit = m->bounds.max.y - m->bounds.min.y;
+        if (!(limit > 0.1f)) limit = 2.0f;
+        if (lx_len3(step) > limit) { step = lx_v3(0, 0, 0); turn = 0; }
     }
     st->rm_prev_pos = raw_p;
     st->rm_prev_yaw = yaw;
@@ -1066,11 +1107,22 @@ static void root_motion(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *d
 
     /* Take out of the pose everything that is not baked into it. A channel the object is not given
        either - because Root Motion is off - is simply pinned, which is what animating in place is. */
-    if (!cs.bake_position_xz) { st->out.pos[r].x = rest_p.x; st->out.pos[r].z = rest_p.z; }
-    if (!cs.bake_position_y) st->out.pos[r].y = rest_p.y;
+    LxVec3 want = raw_p;
+    if (!cs.bake_position_xz) { want.x = rest_p.x; want.z = rest_p.z; }
+    if (!cs.bake_position_y) want.y = rest_p.y;
+    if (want.x != raw_p.x || want.y != raw_p.y || want.z != raw_p.z)
+        st->out.pos[r] = local_for_model_pos(m, &st->out, r, want);
     if (!cs.bake_rotation) {
+        /* the turn comes out in model space, and the local rotation is what is left of it there */
         LxQuat tw = lx_quat_twist_y(raw_r);
-        st->out.rot[r] = lx_quat_norm(lx_quat_mul(lx_quat_twist_y(rest_r), lx_quat_mul(lx_quat_conj(tw), raw_r)));
+        LxQuat want_r = lx_quat_mul(lx_quat_twist_y(rest_r), lx_quat_mul(lx_quat_conj(tw), raw_r));
+        int par = m->nodes[r].parent;
+        if (par < 0) st->out.rot[r] = lx_quat_norm(want_r);
+        else {
+            LxQuat pr;
+            node_in_model(m, &st->out, par, NULL, &pr);
+            st->out.rot[r] = lx_quat_norm(lx_quat_mul(lx_quat_conj(pr), want_r));
+        }
     }
     if (!d->animator.root_motion) return;
 
@@ -1196,12 +1248,21 @@ static void measure_ankles(LxAnimState *st) {
     LxQuat *wr = lx_alloc(sizeof(LxQuat) * (size_t)n);
     if (wp && wr) {
         pose_fk(st, &rest, wp, wr);
-        float sole = wp[0].y;
-        for (int i = 1; i < n; i++) if (wp[i].y < sole) sole = wp[i].y;
+        float sole = wp[0].y, top = wp[0].y;
+        for (int i = 1; i < n; i++) {
+            if (wp[i].y < sole) sole = wp[i].y;
+            if (wp[i].y > top) top = wp[i].y;
+        }
+        /* An ankle sits a little above the sole. If the lowest bone is not a foot at all - a prop
+           hanging below the rig, say - the measurement is nonsense, and a foot held a nonsense
+           distance above the ground is a character floating. Keep it to what an ankle can be. */
+        float limit = (top - sole) * 0.2f;
+        if (!(limit > 0.02f)) limit = 0.3f;
         for (int side = 0; side < 2; side++) {
             int a = m->avatar[side == 0 ? LX_HB_LEFT_FOOT : LX_HB_RIGHT_FOOT];
             if (a < 0 || a >= n) continue;
             float h = wp[a].y - sole;
+            if (h > limit) h = limit;
             if (h > 0.01f) st->ankle_rest[side] = h;
         }
     }

@@ -952,6 +952,10 @@ static void s_gi_compare(void) {
 
 /* ======================================================================
  *  the Animator tab: an animator graph built through the editor
+ *
+ *  These run before frame 340, where the template phase closes the project and rebuilds the UI, and
+ *  each one rebuilds the inspector itself rather than waiting a frame for the panel to do it - so
+ *  several can share a frame, and none of them depends on how fast the editor is drawing.
  * ====================================================================== */
 /* These steps write the asset to disk on the frame they run, which is not what the editor does on a
  * normal frame, so they are not held to the frame budget - the same reason a screenshot isn't. */
@@ -1135,6 +1139,13 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {290, s_model_stopped, "edit mode again after Stop"},
     {292, s_big_make, "make a folder of 4K textures"},
     {294, s_big_open, "open it in the Content Browser"},
+    {295, s_an_open, "the Animator tab opens an animator graph"},
+    {296, s_an_states, "states and a transition"},
+    {297, s_an_param, "a parameter"},
+    {297, s_an_condition, "a condition on the transition"},
+    {298, s_an_layer, "a second layer"},
+    {298, s_an_saved, "saved, and undo / redo work"},
+    {299, s_an_problems, "the graph reports what is wrong with it"},
     {300, s_sg_open, "open the State Graph editor"},
     {303, s_sg_browser, "open the Action Browser"},
     {305, s_sg_search, "search for an action"},
@@ -1153,13 +1164,6 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {333, s_sg_loaded, "the new scene plays"},
     {335, s_sg_stop, "stop"},
     {337, s_sg_stopped, "back in edit mode"},
-    {340, s_an_open, "the Animator tab opens an animator graph"},
-    {341, s_an_states, "states and a transition"},
-    {342, s_an_param, "a parameter"},
-    {343, s_an_condition, "a condition on the transition"},
-    {344, s_an_layer, "a second layer"},
-    {345, s_an_saved, "saved, and undo / redo work"},
-    {346, s_an_problems, "the graph reports what is wrong with it"},
 };
 
 /* the template steps start once everything above is finished (the 4K thumbnails can take a while) */

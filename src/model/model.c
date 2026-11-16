@@ -901,9 +901,7 @@ LxModel *lx_model_load_file(const char *path, const char *ref, char *err, size_t
     if (m->imp.clip_count < m->clip_count) {
         for (int i = m->imp.clip_count; i < m->clip_count && i < LX_MAX_CLIPS; i++) {
             lx_strcpy(m->imp.clips[i].name, sizeof m->imp.clips[i].name, m->clips[i].name);
-            m->imp.clips[i].loop = true;
-            m->imp.clips[i].bake_position_y = true;    /* hops belong to the animation */
-            m->imp.clips[i].bake_rotation = true;      /* so does turning, until a clip is meant to steer */
+            lx_clip_settings_defaults(&m->imp.clips[i]);
         }
         m->imp.clip_count = m->clip_count < LX_MAX_CLIPS ? m->clip_count : LX_MAX_CLIPS;
     }
@@ -970,9 +968,20 @@ void lx_model_free(LxModel *m) {
 /* ======================================================================
  *  import settings (<model>.lximport)
  * ====================================================================== */
+/* What a clip's settings are before anyone says otherwise. A clip travels - that is what root motion
+ * is for - but its bob and its turning stay in the animation, because handing those to the object
+ * fights the ground and the steering. */
+void lx_clip_settings_defaults(LxClipSettings *c) {
+    c->loop = true;
+    c->bake_position_xz = false;
+    c->bake_position_y = true;
+    c->bake_rotation = true;
+}
+
 LxModelImport lx_model_import_defaults(void) {
     LxModelImport i;
     memset(&i, 0, sizeof i);
+    for (int c = 0; c < LX_MAX_CLIPS; c++) lx_clip_settings_defaults(&i.clips[c]);
     i.scale = 1.0f;
     i.import_materials = true;
     i.import_animations = true;
@@ -981,10 +990,16 @@ LxModelImport lx_model_import_defaults(void) {
     return i;
 }
 
+/* The settings file's version. 2 added the root motion a clip gives away; a file older than that
+ * never had an opinion about it, so whatever its clips say about baking is not an answer - it is the
+ * absence of the question - and the defaults are used instead. */
+#define LX_IMPORT_VERSION 2
+
 bool lx_model_import_load(const char *model_path, LxModelImport *out) {
     char path[LX_PATH_MAX + 16];
     snprintf(path, sizeof path, "%s.lximport", model_path);
     *out = lx_model_import_defaults();
+    int file_version = 1;   /* no version key: written before there was one */
     char *text = lx_file_read(path, NULL);
     if (!text) return false;
     const char *cur = text;
@@ -992,7 +1007,8 @@ bool lx_model_import_load(const char *model_path, LxModelImport *out) {
     int r;
     while ((r = lx_kv_next(&cur, k, sizeof k, v, sizeof v))) {
         if (r != 1) continue;
-        if (!strcmp(k, "scale")) out->scale = (float)atof(v);
+        if (!strcmp(k, "version")) file_version = atoi(v);
+        else if (!strcmp(k, "scale")) out->scale = (float)atof(v);
         else if (!strcmp(k, "import_materials")) out->import_materials = atoi(v) != 0;
         else if (!strcmp(k, "import_animations")) out->import_animations = atoi(v) != 0;
         else if (!strcmp(k, "calculate_normals")) out->calculate_normals = atoi(v) != 0;
@@ -1006,12 +1022,24 @@ bool lx_model_import_load(const char *model_path, LxModelImport *out) {
             int idx = atoi(k + 5);
             const char *f = strchr(k + 5, '.');
             if (idx < 0 || idx >= LX_MAX_CLIPS || !f) continue;
-            if (idx >= out->clip_count) out->clip_count = idx + 1;
+            if (idx >= out->clip_count) {
+                for (int n = out->clip_count; n <= idx; n++) lx_clip_settings_defaults(&out->clips[n]);
+                out->clip_count = idx + 1;
+            }
             if (!strcmp(f + 1, "name")) lx_strcpy(out->clips[idx].name, sizeof out->clips[idx].name, v);
             else if (!strcmp(f + 1, "loop")) out->clips[idx].loop = atoi(v) != 0;
             else if (!strcmp(f + 1, "bake_xz")) out->clips[idx].bake_position_xz = atoi(v) != 0;
             else if (!strcmp(f + 1, "bake_y")) out->clips[idx].bake_position_y = atoi(v) != 0;
             else if (!strcmp(f + 1, "bake_rot")) out->clips[idx].bake_rotation = atoi(v) != 0;
+        }
+    }
+    if (file_version < LX_IMPORT_VERSION) {
+        /* it was written before clips could say what their root gives away, or by the version that
+           wrote the field without ever meaning it: either way, the defaults are the honest answer */
+        for (int i = 0; i < out->clip_count && i < LX_MAX_CLIPS; i++) {
+            bool loop = out->clips[i].loop;
+            lx_clip_settings_defaults(&out->clips[i]);
+            out->clips[i].loop = loop;
         }
     }
     lx_free(text);
@@ -1024,7 +1052,7 @@ bool lx_model_import_save(const char *model_path, const LxModelImport *imp) {
     LxStrBuf sb = {0};
     static const char *rigs[] = {"none", "generic", "humanoid"};
     static const char *lmuv[] = {"auto", "generate", "own"};
-    lx_sb_printf(&sb, "# Luxora model import settings\nscale = %g\nimport_materials = %d\nimport_animations = %d\ncalculate_normals = %d\n"
+    lx_sb_printf(&sb, "# Luxora model import settings\nversion = 2\nscale = %g\nimport_materials = %d\nimport_animations = %d\ncalculate_normals = %d\n"
                       "smoothing_angle = %g\nlightmap_uvs = %s\nrig = %s\n",
                  imp->scale, imp->import_materials, imp->import_animations, imp->calculate_normals, imp->smoothing_angle,
                  lmuv[imp->lightmap_uvs < 0 || imp->lightmap_uvs > 2 ? 0 : imp->lightmap_uvs], rigs[imp->rig < 0 || imp->rig > 2 ? 1 : imp->rig]);
