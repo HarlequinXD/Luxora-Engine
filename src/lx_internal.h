@@ -612,6 +612,7 @@ bool lx_parse_bool(const char *s);
 
 bool lx_take_scene_request(char *out, size_t cap);   /* editor Play mode: Load Scene / Quit from the game */
 bool lx_take_quit_request(void);
+#include "model/anim_graph.h"
 #include "fsm/fsm.h"
 
 /* ---------- engine state ---------- */

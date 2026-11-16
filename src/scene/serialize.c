@@ -25,7 +25,7 @@ static void write_entity(LxStrBuf *sb, const LxScene *s, LxEntity e, int id_of_p
     if (dm) {
         clean_value(dm->name); clean_value(dm->tag); clean_value(dm->prefab); clean_value(dm->mesh.mesh); clean_value(dm->mesh.material);
         clean_value(dm->audio.clip); clean_value(dm->behaviour.name); clean_value(dm->crowd.mesh); clean_value(dm->crowd.material);
-        clean_value(dm->animator.model); clean_value(dm->animator.clip);
+        clean_value(dm->animator.model); clean_value(dm->animator.clip); clean_value(dm->animator.graph);
     }
     const LxEntityData *d = dm;
     int id = (*next_id)++;
@@ -100,6 +100,9 @@ static void write_entity(LxStrBuf *sb, const LxScene *s, LxEntity e, int id_of_p
         lx_sb_printf(sb, "animator.model = %s\nanimator.clip = %s\nanimator.speed = %g\nanimator.loop = %d\nanimator.play_on_start = %d\n"
                          "animator.root_motion = %d\n",
                      a->model, a->clip, a->speed, a->loop, a->play_on_start, a->root_motion);
+        if (a->graph[0]) lx_sb_printf(sb, "animator.graph = %s\n", a->graph);
+        if (a->foot_ik || a->foot_ik_weight != 1)
+            lx_sb_printf(sb, "animator.foot_ik = %d\nanimator.foot_ik_weight = %g\n", a->foot_ik, a->foot_ik_weight);
     }
     if ((d->comps & LX_COMP_STATE_GRAPH) && d->sgraph) {
         for (int i = 0; i < d->sgraph->count; i++) {
@@ -340,6 +343,9 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
             else if (!strcmp(f, "loop")) a->loop = lx_parse_bool(v);
             else if (!strcmp(f, "play_on_start")) a->play_on_start = lx_parse_bool(v);
             else if (!strcmp(f, "root_motion")) a->root_motion = lx_parse_bool(v);
+            else if (!strcmp(f, "graph")) lx_strcpy(a->graph, sizeof a->graph, v);
+            else if (!strcmp(f, "foot_ik")) a->foot_ik = lx_parse_bool(v);
+            else if (!strcmp(f, "foot_ik_weight")) a->foot_ik_weight = (float)atof(v);
         } else if (!strncmp(k, "graph.", 6)) {
             int idx = atoi(k + 6);
             const char *rest = strchr(k + 6, '.');

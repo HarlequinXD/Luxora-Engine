@@ -9,6 +9,8 @@ A real-time 3D game engine written in **C11**, rendering with **Vulkan 1.3**, wi
 | **Global illumination** | *Virtual photons* traced from every light and the sky through a SAH BVH on all CPU cores, accumulated into an L1 spherical-harmonics irradiance volume (colour bleeding, sky occlusion, progressive convergence) |
 | **Sound** | Ray-traced acoustics: real speed of sound (delay lines, natural Doppler), occlusion and transmission through materials, early reflections, RT60-driven reverb. WinMM / ALSA / AAudio |
 | **Scale** | Automatic LOD chains, frustum culling, instanced batching (one draw per mesh/LOD/material), data-oriented multithreaded crowds |
+| **Animation** | Skinned meshes on imported skeletons, humanoid avatars that retarget any humanoid clip, and an **Animator graph** (.lxanim): a state machine over animation, with states that play clips or blend trees (1D, 2D directional, 2D cartesian, direct), transitions driven by typed parameters (float/int/bool/trigger) and cross-faded, layers with humanoid bone masks and additive blending, two-bone IK, foot grounding and look-at |
+| **Visual scripting** | **State Graph** (.lxgraph): states, events, variables and a library of over 500 built-in actions across 67 categories, edited in a graph view with an Action Browser, breakpoints, live debugging and undo |
 | **Input** | Input Manager: named actions/axes bound to keyboard, mouse, gamepads (XInput, Linux joystick, Android) and on-screen touch controls |
 | **Editor** | Project Manager, dockable panels, hierarchy, inspector, content browser, console, audio mixer, scene manager, gizmos, undo/redo, play mode, project/build settings, one-click builds |
 
@@ -92,6 +94,8 @@ src/audio/        mixer, acoustics, device backends
 src/input/        Input Manager + gamepads + touch controls
 src/crowd/        crowd simulation
 src/scene/        entities, serialization, behaviours
+src/model/        FBX import, skinning, animation, animator graphs, IK
+src/fsm/          State Graph assets, runtime and the built-in action library
 src/project/      projects and settings
 editor/           editor + Luxora UI toolkit
 player/           runtime that ships with games
@@ -102,7 +106,7 @@ tests/            headless test suite + GPU-less editor build
 
 ## Testing
 
-- `luxora_tests` runs 79 headless checks covering math, jobs, scenes and serialization, LODs, PNG decoding, the BVH (cross-checked against brute force), GI colour bleeding, acoustics (speed of sound, occlusion, reflections), crowds, projects, WAV and input.
+- `luxora_tests` runs the headless checks: math, jobs, scenes and serialization, LODs, PNG decoding, the BVH (cross-checked against brute force), GI colour bleeding, acoustics (speed of sound, occlusion, reflections), crowds, projects, WAV, input, the State Graph and its whole action library, and animation (pose blending, blend tree weights, two-bone IK, animator graph assets and their runtime).
 - `luxora_editor_nogpu --new <dir> <name> --smoke` runs a scripted tour of every editor window and tool without a GPU.
 - CI (`.github/workflows/build.yml`) builds on Linux, Windows and Android. It also runs the real Vulkan editor and a packaged game on Mesa's software renderer with validation layers enabled, and uploads screenshots.
 

@@ -78,6 +78,7 @@ UiIcon ed_icon_for_file(const char *name, bool dir) {
     if (ext_is(name, ".c") || ext_is(name, ".h")) return UI_ICON_SCRIPT;
     if (ext_is(name, ".lxprefab")) return UI_ICON_PREFAB;
     if (ext_is(name, ".lxgraph")) return UI_ICON_GRAPH;
+    if (ext_is(name, ".lxanim")) return UI_ICON_ANIMATOR;
     return UI_ICON_FILE;
 }
 
@@ -93,6 +94,7 @@ static const char *drag_type_for(UiIcon icon) {
     case UI_ICON_PREFAB: return "prefab";
     case UI_ICON_MODEL: return "model";
     case UI_ICON_GRAPH: return "graph";
+    case UI_ICON_ANIMATOR: return "animator";
     default: return "file";
     }
 }
@@ -1141,6 +1143,7 @@ static void build_asset_inspector(UiNode *body) {
     ui_pad(pl, 12, 0, 8, 0);
     if (icon == UI_ICON_MODEL) { ed_model_inspector(body, ref); return; }
     if (icon == UI_ICON_GRAPH) { ed_graph_asset_inspector(body, ref); return; }
+    if (icon == UI_ICON_ANIMATOR) { ed_animator_asset_inspector(body, ref); return; }
     if (icon == UI_ICON_PREFAB) {
         /* what's inside: every object (indented by depth) and its components */
         static bool g_open_prefab = true;

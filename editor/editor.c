@@ -901,6 +901,10 @@ void ed_create_menu_at(float x, float y) { create_items(ui_popup(ED.ui, x, y, 22
 static void window_menu(UiNode *a) {
     UiNode *p = menu_at(a);
     UiNode *it;
+    it = item(p, "Scene", NULL, UI_ICON_SCENE, m_show_tab); it->user = ED.view_tabs; it->tag = 0;
+    it = item(p, "State Graph", NULL, UI_ICON_GRAPH, m_show_tab); it->user = ED.view_tabs; it->tag = 1;
+    it = item(p, "Animator", NULL, UI_ICON_ANIMATOR, m_show_tab); it->user = ED.view_tabs; it->tag = 2;
+    ui_menu_separator(ED.ui, p);
     it = item(p, "Inspector", NULL, UI_ICON_INSPECTOR, m_show_tab); it->user = ED.inspector_tabs; it->tag = 0;
     it = item(p, "Lighting", NULL, UI_ICON_SUN, m_show_tab); it->user = ED.inspector_tabs; it->tag = 1;
     it = item(p, "Statistics", NULL, UI_ICON_STATS, m_show_tab); it->user = ED.inspector_tabs; it->tag = 2;
@@ -1083,6 +1087,7 @@ void ed_build_shell(void) {
     ED.view_tabs = views;
     ED.viewport = ed_viewport_panel(views);
     ED.graph_panel = ed_graph_panel(views);
+    ED.animator_panel = ed_animator_panel(views);
     UiNode *bottom = ui_tabs(ui, center);
     ED.bottom_tabs = bottom;
     ED.content_panel = ed_content_panel(bottom);
@@ -1123,7 +1128,7 @@ void ed_build_shell(void) {
  * ====================================================================== */
 void ed_shortcuts(void) {
     if (ui_wants_keyboard(ED.ui) || ui_has_modal(ED.ui)) return;
-    if (ed_graph_keys()) {   /* the State Graph view has focus: only the global Ctrl shortcuts stay */
+    if (ed_graph_keys() || ed_animator_keys()) {   /* a graph view has focus: only the global Ctrl shortcuts stay */
         if (!lx_key_down(LX_KEY_CTRL)) return;
         if (lx_key_pressed(LX_KEY_S)) { if (lx_key_down(LX_KEY_SHIFT)) ed_save_scene_as_dialog(); else ed_save_scene(); }
         if (lx_key_pressed(LX_KEY_P)) { if (lx_key_down(LX_KEY_ALT)) ed_step(); else if (lx_key_down(LX_KEY_SHIFT)) ed_pause(); else m_play(NULL); }

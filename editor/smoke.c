@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include "editor.h"
 #include "graph_editor.h"
+#include "anim_editor.h"
 
 typedef void (*SmokeFn)(void);
 int ed_smoke_failures;
@@ -930,6 +931,78 @@ static void s_gi_compare(void) {
     lx_free(cpu);
 }
 
+/* ======================================================================
+ *  the Animator tab: an animator graph built through the editor
+ * ====================================================================== */
+static void s_an_open(void) {
+    char path[LX_PATH_MAX];
+    lx_asset_path(path, sizeof path, "Animators/Smoke.lxanim");
+    LxAnimGraph *g = lx_anim_graph_new("Smoke");
+    SMOKE_CHECK(lx_anim_graph_save(g, path), "an animator graph asset is written");
+    lx_anim_graph_replace("Animators/Smoke.lxanim", g);
+    ed_animator_open_asset("Animators/Smoke.lxanim");
+    SMOKE_CHECK(ED.view_tabs && ED.view_tabs->tab_index == 2, "the Animator tab is shown");
+    SMOKE_CHECK(ae_graph() != NULL && ae_layer() != NULL, "it shows the graph and its base layer");
+}
+static void s_an_states(void) {
+    SMOKE_CHECK(ed_animator_add_state("Run"), "a state is added");
+    SMOKE_CHECK(ed_animator_add_state("Jump"), "and another");
+    LxAnimLayer *l = ae_layer();
+    SMOKE_CHECK(l && l->state_count == 3, "the layer has three states (%d)", l ? l->state_count : -1);
+    SMOKE_CHECK(ed_animator_add_transition("Run", "Jump"), "a transition joins two of them");
+    SMOKE_CHECK(ae_sel_transition() != NULL, "and it is selected, so the Transition tab has something to show");
+}
+static void s_an_param(void) {
+    UiNode *b = find_node(ui_root(ED.ui), NULL, "Add Parameter");
+    SMOKE_CHECK(b != NULL, "Add Parameter button in the Parameters tab");
+    if (b) ui_test_click(ED.ui, b, false);
+    LxAnimGraph *g = ae_graph();
+    SMOKE_CHECK(g && g->param_count == 1, "a parameter is added (%d)", g ? g->param_count : -1);
+}
+static void s_an_condition(void) {
+    if (AE.insp_tabs) AE.insp_tabs->tab_index = 2;
+    AE.insp_dirty = true;
+    ae_inspector_frame();
+    UiNode *b = find_node(ui_root(ED.ui), NULL, "Add Condition");
+    SMOKE_CHECK(b != NULL, "Add Condition button in the Transition tab");
+    if (b) ui_test_click(ED.ui, b, false);
+    LxAnimTransition *t = ae_sel_transition();
+    SMOKE_CHECK(t && t->cond_count == 1, "a condition is added to the transition (%d)", t ? t->cond_count : -1);
+    SMOKE_CHECK(t && t->cond[0].param[0], "and it is on the parameter that exists (%s)", t ? t->cond[0].param : "");
+}
+static void s_an_layer(void) {
+    if (AE.insp_tabs) AE.insp_tabs->tab_index = 3;
+    AE.insp_dirty = true;
+    ae_inspector_frame();
+    UiNode *b = find_node(ui_root(ED.ui), NULL, "Add Layer");
+    SMOKE_CHECK(b != NULL, "Add Layer button in the Layers tab");
+    if (b) ui_test_click(ED.ui, b, false);
+    LxAnimGraph *g = ae_graph();
+    SMOKE_CHECK(g && g->layer_count == 2, "a second layer is added (%d)", g ? g->layer_count : -1);
+    ae_frame_all();
+}
+static void s_an_saved(void) {
+    char path[LX_PATH_MAX];
+    lx_asset_path(path, sizeof path, "Animators/Smoke.lxanim");
+    char *t = lx_file_read(path, NULL);
+    SMOKE_CHECK(t && strstr(t, "name = Run") && strstr(t, "condition =") && strstr(t, "[layer]"),
+                "every edit was saved to the asset");
+    lx_free(t);
+    ae_undo();
+    LxAnimGraph *g = ae_graph();
+    SMOKE_CHECK(g && g->layer_count == 1, "undo takes the layer away again (%d)", g ? g->layer_count : -1);
+    ae_redo();
+    g = ae_graph();
+    SMOKE_CHECK(g && g->layer_count == 2, "redo puts it back (%d)", g ? g->layer_count : -1);
+}
+static void s_an_problems(void) {
+    LxAnimGraph *g = ae_graph();
+    int n = g ? lx_anim_graph_problems(g, NULL, 0) : -1;
+    /* three states with no clips, a layer with no states: all of it should be reported */
+    SMOKE_CHECK(n >= 3, "the graph's problems are reported (%d)", n);
+    if (ED.view_tabs) ED.view_tabs->tab_index = 0;
+}
+
 static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {2, s_mat_select, "select a material asset"},
     {3, s_mat_capture, "find material widgets"},
@@ -1038,6 +1111,13 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {333, s_sg_loaded, "the new scene plays"},
     {335, s_sg_stop, "stop"},
     {337, s_sg_stopped, "back in edit mode"},
+    {340, s_an_open, "the Animator tab opens an animator graph"},
+    {341, s_an_states, "states and a transition"},
+    {342, s_an_param, "a parameter"},
+    {343, s_an_condition, "a condition on the transition"},
+    {344, s_an_layer, "a second layer"},
+    {345, s_an_saved, "saved, and undo / redo work"},
+    {346, s_an_problems, "the graph reports what is wrong with it"},
 };
 
 /* the template steps start once everything above is finished (the 4K thumbnails can take a while) */

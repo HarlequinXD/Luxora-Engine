@@ -15,6 +15,25 @@ typedef struct Binding {
     int *track_of;         /* direct: target node -> clip track (-1 = none) */
 } Binding;
 
+/* one layer of an animator graph as it runs */
+typedef struct LayerRun {
+    int state;             /* index into the layer's states, -1 = nothing playing */
+    float norm;            /* how far through the state's motion, in cycles */
+    int from;              /* the state being left: -1 not transitioning, -2 fading from a blended pose */
+    float from_norm;
+    float fade, fade_len;  /* seconds */
+    int cur_interrupt;     /* what may interrupt the transition running now */
+    float weight;          /* how much of this layer shows */
+    LxPose pose, a, b;     /* its result, and the two states blended into it */
+    bool *writes;          /* per node: whether this layer writes it (from its mask) */
+    uint64_t mask_built;
+    bool mask_valid;
+} LayerRun;
+
+typedef struct ClipBind { char ref[LX_REF_MAX]; Binding b; bool ok; } ClipBind;
+typedef struct ParamVal { float f; int i; bool b; } ParamVal;
+typedef struct IkGoal { LxVec3 pos; LxQuat rot; float weight, rot_weight; bool active, rot_active; } IkGoal;
+
 typedef struct LxAnimState {
     LxModel *model;        /* the target skeleton */
     LxEntity root;
@@ -27,6 +46,22 @@ typedef struct LxAnimState {
     uint32_t generation;   /* models reloaded since -> rebuild (clip pointers would dangle) */
     /* out is the pose that gets applied to the bones; a and b are what gets blended into it */
     LxPose out, a, b;
+    /* an animator graph, when the component names one: states, parameters, transitions, blend trees */
+    LxAnimGraph *graph;
+    uint32_t graph_version;
+    ParamVal *pvals;       /* one per parameter of the graph */
+    int pval_count;
+    LayerRun *layers;
+    int layer_count;
+    ClipBind *binds;       /* clips bound once and kept (binding walks every bone by name) */
+    int bind_count, bind_cap;
+    LxPose scratch[LX_ANIM_MAX_DEPTH + 1];   /* blend trees, one per level of nesting */
+    /* inverse kinematics */
+    IkGoal ik[LX_IK_GOAL_COUNT];
+    LxVec3 look_at;
+    float look_weight;
+    bool look_active;
+    float hip_drop;        /* foot grounding: how far the hips are eased down */
 } LxAnimState;
 
 typedef struct LxSkinState {
@@ -312,6 +347,9 @@ static LxEntity find_descendant(LxScene *s, LxEntity root, const char *name) {
     return 0;
 }
 
+static void layers_free(LxAnimState *st);
+static void binds_free(LxAnimState *st);
+
 static void state_free(LxAnimState *st) {
     if (!st) return;
     binding_free(&st->cur);
@@ -320,6 +358,10 @@ static void state_free(LxAnimState *st) {
     lx_pose_free(&st->out);
     lx_pose_free(&st->a);
     lx_pose_free(&st->b);
+    for (int i = 0; i <= LX_ANIM_MAX_DEPTH; i++) lx_pose_free(&st->scratch[i]);
+    layers_free(st);
+    binds_free(st);
+    lx_free(st->pvals);
     lx_free(st);
 }
 
@@ -347,6 +389,8 @@ void lx_anim_release(LxEntityData *d) {
     d->skin = NULL;
 }
 
+static void sync_graph(LxScene *s, LxEntity e, LxAnimState *st);
+
 /* the state for an animator, (re)built when its model or bones change */
 static LxAnimState *state_for(LxScene *s, LxEntity e) {
     LxEntityData *d = lx_entity_data(s, e);
@@ -357,7 +401,7 @@ static LxAnimState *state_for(LxScene *s, LxEntity e) {
     if (st && !stale)
         for (int i = 0; i < st->ent_count; i++)
             if (st->ents[i] && !lx_entity_valid(s, st->ents[i])) { stale = true; break; }
-    if (!stale) return st;
+    if (!stale) { sync_graph(s, e, st); return st; }
     char clip[LX_REF_MAX] = "";
     float time = 0;
     bool playing = false, started = false;
@@ -385,6 +429,7 @@ static LxAnimState *state_for(LxScene *s, LxEntity e) {
         lx_strcpy(st->clip_ref, sizeof st->clip_ref, clip);
         if (bind_clip(&st->cur, m, clip)) { st->time = time; st->playing = playing; }
     }
+    sync_graph(s, e, st);
     return st;
 }
 
@@ -474,12 +519,838 @@ void lx_scene_animation_begin(LxScene *s) {
     }
 }
 
+/* ======================================================================
+ *  animator graphs: states, parameters, transitions, blend trees, layers
+ *
+ *  A graph's clock is the cycle, not the second: a state's progress runs 0..1 over its motion, whatever
+ *  that motion's length is. That is what lets a blend tree hold a walk and a run at different lengths
+ *  and still keep their feet together, and what makes an exit time of 0.75 mean the same thing wherever
+ *  it is used.
+ * ====================================================================== */
+
+/* clips are bound once and kept: binding walks every bone by name, which is not a per-frame cost */
+static Binding *bind_cached(LxAnimState *st, const char *ref) {
+    if (!ref || !ref[0]) return NULL;
+    for (int i = 0; i < st->bind_count; i++)
+        if (!strcmp(st->binds[i].ref, ref)) return st->binds[i].ok ? &st->binds[i].b : NULL;
+    ClipBind cb;
+    memset(&cb, 0, sizeof cb);
+    lx_strcpy(cb.ref, sizeof cb.ref, ref);
+    cb.ok = bind_clip(&cb.b, st->model, ref);
+    LX_VEC_PUSH(st->binds, st->bind_count, st->bind_cap, cb);
+    return cb.ok ? &st->binds[st->bind_count - 1].b : NULL;
+}
+
+static void binds_free(LxAnimState *st) {
+    for (int i = 0; i < st->bind_count; i++) if (st->binds[i].ok) binding_free(&st->binds[i].b);
+    lx_free(st->binds);
+    st->binds = NULL;
+    st->bind_count = st->bind_cap = 0;
+}
+
+/* ---------------- parameters ---------------- */
+static int param_index(const LxAnimGraph *g, const char *name) { return lx_anim_param_index(g, name); }
+
+static float param_float(LxAnimState *st, const char *name) {
+    if (!st->graph) return 0;
+    int i = param_index(st->graph, name);
+    if (i < 0 || i >= st->pval_count) return 0;
+    switch (st->graph->params[i].type) {
+    case LX_AP_FLOAT: return st->pvals[i].f;
+    case LX_AP_INT: return (float)st->pvals[i].i;
+    default: return st->pvals[i].b ? 1.0f : 0.0f;
+    }
+}
+
+typedef struct ParamLookup { LxAnimState *st; } ParamLookup;
+static float param_lookup(void *user, const char *name) {
+    ParamLookup *p = user;
+    return param_float(p->st, name);
+}
+
+/* ---------------- motion: length and pose ---------------- */
+static float clip_len_of(const Binding *b) {
+    if (!b || !b->clip) return 0;
+    return b->clip->length > 0 ? b->clip->length : 1.0f / 30.0f;
+}
+
+static float tree_length(LxAnimState *st, const LxAnimTree *t, int depth);
+
+static float child_length(LxAnimState *st, const LxAnimChild *c, int depth) {
+    float len;
+    if (c->tree >= 0 && st->graph && c->tree < st->graph->tree_count && depth < LX_ANIM_MAX_DEPTH)
+        len = tree_length(st, &st->graph->trees[c->tree], depth + 1);
+    else len = clip_len_of(bind_cached(st, c->clip));
+    float sp = c->speed > 0 ? c->speed : 1;
+    return len / sp;
+}
+
+/* a blend tree is as long as its children are, weighted by how much of each shows: speeding up means
+ * the whole tree's cycle shortens, which is what keeps the children in step */
+static float tree_length(LxAnimState *st, const LxAnimTree *t, int depth) {
+    float w[LX_ANIM_MAX_CHILDREN];
+    ParamLookup pl = {st};
+    lx_anim_tree_weights_ex(t, param_lookup, &pl, w);
+    float len = 0, total = 0;
+    for (int i = 0; i < t->child_count; i++) {
+        if (!(w[i] > 0)) continue;
+        len += child_length(st, &t->child[i], depth) * w[i];
+        total += w[i];
+    }
+    if (total > 0) return len / total;
+    /* nothing has any weight: fall back to the first child, so the state still has a clock */
+    return t->child_count ? child_length(st, &t->child[0], depth) : 0;
+}
+
+static float state_length(LxAnimState *st, const LxAnimNode *n) {
+    if (n->motion == LX_AM_TREE) {
+        if (!st->graph || n->tree < 0 || n->tree >= st->graph->tree_count) return 0;
+        return tree_length(st, &st->graph->trees[n->tree], 0);
+    }
+    return clip_len_of(bind_cached(st, n->clip));
+}
+
+/* Mirroring swaps the left and right of a pose. It needs a humanoid avatar to know which bone is which,
+ * so a generic rig is left as it is (there is nothing to pair its bones by). */
+static void mirror_pose(LxPose *p, const LxModel *m) {
+    static const int PAIRS[][2] = {
+        {LX_HB_LEFT_UPPER_LEG, LX_HB_RIGHT_UPPER_LEG}, {LX_HB_LEFT_LOWER_LEG, LX_HB_RIGHT_LOWER_LEG},
+        {LX_HB_LEFT_FOOT, LX_HB_RIGHT_FOOT}, {LX_HB_LEFT_TOES, LX_HB_RIGHT_TOES},
+        {LX_HB_LEFT_SHOULDER, LX_HB_RIGHT_SHOULDER}, {LX_HB_LEFT_UPPER_ARM, LX_HB_RIGHT_UPPER_ARM},
+        {LX_HB_LEFT_LOWER_ARM, LX_HB_RIGHT_LOWER_ARM}, {LX_HB_LEFT_HAND, LX_HB_RIGHT_HAND},
+        {LX_HB_LEFT_EYE, LX_HB_RIGHT_EYE},
+    };
+    if (!m || m->imp.rig != LX_RIG_HUMANOID) return;
+    for (int i = 0; i < LX_ARRAY_COUNT(PAIRS); i++) {
+        int a = m->avatar[PAIRS[i][0]], b = m->avatar[PAIRS[i][1]];
+        if (a < 0 || b < 0 || a >= p->count || b >= p->count) continue;
+        LxVec3 tp = p->pos[a];
+        LxQuat tr = p->rot[a];
+        LxVec3 ts = p->scl[a];
+        p->pos[a] = p->pos[b];
+        p->rot[a] = p->rot[b];
+        p->scl[a] = p->scl[b];
+        p->pos[b] = tp;
+        p->rot[b] = tr;
+        p->scl[b] = ts;
+    }
+    /* then reflect every bone across the body's own mid-plane (X, with the rig's +Z forward) */
+    for (int i = 0; i < p->count; i++) {
+        p->pos[i].x = -p->pos[i].x;
+        p->rot[i].y = -p->rot[i].y;
+        p->rot[i].z = -p->rot[i].z;
+    }
+}
+
+static void motion_eval(LxAnimState *st, const LxAnimNode *n, float norm, bool rm, LxPose *out, int depth);
+
+static void tree_eval(LxAnimState *st, const LxAnimTree *t, float norm, bool rm, LxPose *out, int depth) {
+    float w[LX_ANIM_MAX_CHILDREN];
+    ParamLookup pl = {st};
+    lx_anim_tree_weights_ex(t, param_lookup, &pl, w);
+    LxPose *scratch = &st->scratch[depth < LX_ANIM_MAX_DEPTH ? depth : LX_ANIM_MAX_DEPTH];
+    float total;
+    lx_pose_blend_begin(out, &total);
+    for (int i = 0; i < t->child_count; i++) {
+        if (!(w[i] > 0)) continue;
+        const LxAnimChild *c = &t->child[i];
+        if (c->tree >= 0 && st->graph && c->tree < st->graph->tree_count && depth + 1 < LX_ANIM_MAX_DEPTH) {
+            tree_eval(st, &st->graph->trees[c->tree], norm, rm, scratch, depth + 1);
+        } else {
+            Binding *b = bind_cached(st, c->clip);
+            if (!b) continue;
+            float len = clip_len_of(b);
+            evaluate(b, st->model, norm * len, true, rm, scratch->pos, scratch->rot, scratch->scl);
+            if (c->mirror) mirror_pose(scratch, st->model);
+        }
+        lx_pose_blend_add(out, scratch, w[i], &total);
+    }
+    lx_pose_blend_end(out, total, NULL);
+    if (!(total > 0)) lx_pose_rest(out, st->model);   /* nothing had any weight: the rest pose, not rubbish */
+}
+
+static void motion_eval(LxAnimState *st, const LxAnimNode *n, float norm, bool rm, LxPose *out, int depth) {
+    if (n->motion == LX_AM_TREE) {
+        if (!st->graph || n->tree < 0 || n->tree >= st->graph->tree_count) { lx_pose_rest(out, st->model); return; }
+        tree_eval(st, &st->graph->trees[n->tree], norm, rm, out, depth);
+    } else {
+        Binding *b = bind_cached(st, n->clip);
+        if (!b) { lx_pose_rest(out, st->model); return; }
+        float len = clip_len_of(b);
+        evaluate(b, st->model, norm * len, n->loop, rm, out->pos, out->rot, out->scl);
+    }
+    if (n->mirror) mirror_pose(out, st->model);
+}
+
+/* ---------------- transitions ---------------- */
+static bool cond_passes(LxAnimState *st, const LxAnimCond *c) {
+    const LxAnimGraph *g = st->graph;
+    int i = param_index(g, c->param);
+    if (i < 0 || i >= st->pval_count) return false;   /* a condition on a parameter that is gone never passes */
+    const LxAnimParam *p = &g->params[i];
+    const ParamVal *v = &st->pvals[i];
+    switch (c->mode) {
+    case LX_AC_GREATER: return (p->type == LX_AP_INT ? (float)v->i : v->f) > c->value;
+    case LX_AC_LESS: return (p->type == LX_AP_INT ? (float)v->i : v->f) < c->value;
+    case LX_AC_EQUALS: return p->type == LX_AP_INT ? v->i == (int)c->value : v->f == c->value;
+    case LX_AC_NOT_EQUAL: return p->type == LX_AP_INT ? v->i != (int)c->value : v->f != c->value;
+    case LX_AC_IF: return v->b;
+    case LX_AC_IF_NOT: return !v->b;
+    default: return false;
+    }
+}
+
+/* did progress reach the transition's exit time during this frame? */
+static bool exit_time_reached(const LxAnimTransition *t, const LxAnimNode *n, float prev, float now) {
+    if (!t->has_exit_time) return true;
+    float et = t->exit_time;
+    if (!n->loop) return now >= et;
+    if (et <= 0) return true;
+    if (now < et) return false;
+    if (prev < et) return true;
+    /* looping: the exit time comes round again every cycle, so look for the crossing, not the value */
+    return floorf(now - et) > floorf(prev - et);
+}
+
+static bool trans_ready(LxAnimState *st, const LxAnimTransition *t, const LxAnimNode *from, float prev, float now) {
+    if (t->mute || !t->to[0]) return false;
+    for (int c = 0; c < t->cond_count; c++) if (!cond_passes(st, &t->cond[c])) return false;
+    if (!t->cond_count && !t->has_exit_time) return true;      /* nothing to wait for: it fires at once */
+    return exit_time_reached(t, from, prev, now);
+}
+
+/* the triggers a taken transition tested are spent */
+static void consume_triggers(LxAnimState *st, const LxAnimTransition *t) {
+    for (int c = 0; c < t->cond_count; c++) {
+        int i = param_index(st->graph, t->cond[c].param);
+        if (i >= 0 && i < st->pval_count && st->graph->params[i].type == LX_AP_TRIGGER) st->pvals[i].b = false;
+    }
+}
+
+static void start_transition(LxAnimState *st, const LxAnimLayer *l, LayerRun *lr, int to, const LxAnimTransition *t) {
+    const LxAnimNode *leaving = lr->state >= 0 && lr->state < l->state_count ? &l->states[lr->state] : NULL;
+    float from_len = leaving ? state_length(st, leaving) : 0;
+    float fade = t->fixed_duration ? t->duration : t->duration * (from_len > 0 ? from_len : 1);
+    if (lr->from >= 0 && lr->fade_len > 0) {
+        /* interrupting a cross-fade: what is on screen now becomes what the new one fades from */
+        lx_pose_copy(&lr->b, &lr->pose);
+        lr->from = -2;   /* -2: fade from the pose already blended, not from a state */
+    } else lr->from = lr->state;
+    lr->from_norm = lr->norm;
+    lr->state = to;
+    lr->norm = t->offset + (to >= 0 && to < l->state_count ? l->states[to].cycle_offset : 0);
+    lr->fade = 0;
+    lr->fade_len = fade > 0 ? fade : 0;
+    lr->cur_interrupt = t->interrupt;
+    if (lr->fade_len <= 0) lr->from = -1;
+    consume_triggers(st, t);
+}
+
+/* while any transition out of a state is solo, only the solo ones are considered */
+static bool solo_blocks(const LxAnimTransition *list, int count, const LxAnimTransition *t) {
+    bool any_solo = false;
+    for (int i = 0; i < count; i++) if (list[i].solo && !list[i].mute) any_solo = true;
+    return any_solo && !t->solo;
+}
+
+static void layer_transitions(LxAnimState *st, const LxAnimLayer *l, LayerRun *lr, float prev) {
+    bool in_trans = lr->from != -1;
+    bool check_src = !in_trans || lr->cur_interrupt == LX_AI_CURRENT || lr->cur_interrupt == LX_AI_BOTH;
+    bool check_dst = !in_trans || lr->cur_interrupt == LX_AI_NEXT || lr->cur_interrupt == LX_AI_BOTH;
+    /* Any State first: it is what a graph uses for "whatever is playing, go and die now" */
+    if (!in_trans || lr->cur_interrupt != LX_AI_NONE) {
+        for (int a = 0; a < l->any_count; a++) {
+            const LxAnimTransition *t = &l->any[a];
+            if (solo_blocks(l->any, l->any_count, t)) continue;
+            int to = lx_anim_state_index(l, t->to);
+            if (to < 0) continue;
+            if (to == lr->state && !t->to_self) continue;
+            const LxAnimNode *cur = lr->state >= 0 && lr->state < l->state_count ? &l->states[lr->state] : NULL;
+            if (!cur || !trans_ready(st, t, cur, prev, lr->norm)) continue;
+            start_transition(st, l, lr, to, t);
+            return;
+        }
+    }
+    if (in_trans && !check_src && !check_dst) return;
+    /* the state being left may still want out of here, and the one being entered may already want out */
+    int sources[2];
+    int nsrc = 0;
+    if (!in_trans) sources[nsrc++] = lr->state;
+    else {
+        if (check_src && lr->from >= 0) sources[nsrc++] = lr->from;
+        if (check_dst) sources[nsrc++] = lr->state;
+    }
+    for (int k = 0; k < nsrc; k++) {
+        int si = sources[k];
+        if (si < 0 || si >= l->state_count) continue;
+        const LxAnimNode *n = &l->states[si];
+        float p = si == lr->state ? prev : lr->from_norm;
+        float now = si == lr->state ? lr->norm : lr->from_norm;
+        for (int t = 0; t < n->trans_count; t++) {
+            const LxAnimTransition *tr = &n->trans[t];
+            if (solo_blocks(n->trans, n->trans_count, tr)) continue;
+            int to = lx_anim_state_index(l, tr->to);
+            if (to < 0) continue;
+            if (to == si && !tr->to_self) continue;
+            if (!trans_ready(st, tr, n, p, now)) continue;
+            start_transition(st, l, lr, to, tr);
+            return;
+        }
+    }
+}
+
+/* ---------------- layers ---------------- */
+/* Which nodes a layer writes. A mask names humanoid bones; each one brings its descendants with it, so
+ * masking the chest gives the whole upper body without listing every finger. */
+static void build_mask(LxAnimState *st, const LxAnimLayer *l, LayerRun *lr) {
+    int n = st->model->node_count;
+    if (!lr->writes) lr->writes = lx_calloc((size_t)(n > 0 ? n : 1), sizeof(bool));
+    if (!l->mask) {
+        for (int i = 0; i < n; i++) lr->writes[i] = true;
+    } else {
+        for (int i = 0; i < n; i++) lr->writes[i] = false;
+        for (int h = 0; h < LX_HB_COUNT && h < 64; h++) {
+            if (!(l->mask & (1ull << h))) continue;
+            int node = st->model->avatar[h];
+            if (node >= 0 && node < n) lr->writes[node] = true;
+        }
+        /* nodes come parent-first, so one pass hands the flag down the hierarchy */
+        for (int i = 0; i < n; i++) {
+            int p = st->model->nodes[i].parent;
+            if (p >= 0 && p < i && lr->writes[p]) lr->writes[i] = true;
+        }
+    }
+    lr->mask_built = l->mask;
+    lr->mask_valid = true;
+}
+
+static void layer_pose(LxAnimState *st, const LxAnimLayer *l, LayerRun *lr, bool rm) {
+    if (lr->state < 0 || lr->state >= l->state_count) { lx_pose_rest(&lr->pose, st->model); return; }
+    motion_eval(st, &l->states[lr->state], lr->norm, rm, &lr->a, 0);
+    if (lr->from != -1 && lr->fade_len > 0) {
+        float w = lx_clampf(lr->fade / lr->fade_len, 0, 1);
+        if (lr->from >= 0 && lr->from < l->state_count)
+            motion_eval(st, &l->states[lr->from], lr->from_norm, rm, &lr->b, 0);
+        /* from == -2: lr->b already holds the pose this fade started from */
+        float total;
+        lx_pose_blend_begin(&lr->pose, &total);
+        lx_pose_blend_add(&lr->pose, &lr->b, 1.0f - w, &total);
+        lx_pose_blend_add(&lr->pose, &lr->a, w, &total);
+        lx_pose_blend_end(&lr->pose, total, &lr->a);
+    } else lx_pose_copy(&lr->pose, &lr->a);
+}
+
+/* layer 0 is the whole body; the rest show through by weight, over the bones their mask allows */
+static void combine_layers(LxAnimState *st, const LxAnimGraph *g) {
+    lx_pose_copy(&st->out, &st->layers[0].pose);
+    for (int li = 1; li < st->layer_count && li < g->layer_count; li++) {
+        const LxAnimLayer *l = &g->layers[li];
+        LayerRun *lr = &st->layers[li];
+        float w = lx_clampf(lr->weight, 0, 1);
+        if (!(w > 0)) continue;
+        if (!lr->mask_valid || lr->mask_built != l->mask) build_mask(st, l, lr);
+        for (int i = 0; i < st->out.count && i < lr->pose.count; i++) {
+            if (lr->writes && !lr->writes[i]) continue;
+            if (l->blend == LX_ABM_ADDITIVE) {
+                /* additive: the layer's departure from the rest pose, added on top of what is there */
+                LxVec3 rest_p = st->model->nodes[i].pos;
+                LxQuat rest_r = st->model->nodes[i].rot;
+                st->out.pos[i] = lx_madd3(st->out.pos[i], lx_sub3(lr->pose.pos[i], rest_p), w);
+                LxQuat delta = lx_quat_mul(lr->pose.rot[i], lx_quat_conj(rest_r));
+                st->out.rot[i] = lx_quat_norm(lx_quat_mul(lx_quat_slerp(lx_quat_identity(), delta, w), st->out.rot[i]));
+            } else {
+                st->out.pos[i] = lx_lerp3(st->out.pos[i], lr->pose.pos[i], w);
+                st->out.scl[i] = lx_lerp3(st->out.scl[i], lr->pose.scl[i], w);
+                st->out.rot[i] = lx_quat_slerp(st->out.rot[i], lr->pose.rot[i], w);
+            }
+        }
+    }
+}
+
+/* ---------------- binding a graph ---------------- */
+static void layers_free(LxAnimState *st) {
+    for (int i = 0; i < st->layer_count; i++) {
+        lx_pose_free(&st->layers[i].pose);
+        lx_pose_free(&st->layers[i].a);
+        lx_pose_free(&st->layers[i].b);
+        lx_free(st->layers[i].writes);
+    }
+    lx_free(st->layers);
+    st->layers = NULL;
+    st->layer_count = 0;
+}
+
+/* (Re)binds the animator to its graph. Parameter values and which state each layer is in survive an
+ * edit where they can: changing a transition's duration while the game runs should not restart the walk. */
+static void bind_graph(LxAnimState *st, LxAnimGraph *g) {
+    /* remember what is playing, by name */
+    char keep_state[LX_ANIM_MAX_LAYERS][LX_ANIM_NAME];
+    float keep_norm[LX_ANIM_MAX_LAYERS];
+    int keep = 0;
+    if (st->graph && st->layers) {
+        for (int i = 0; i < st->layer_count && i < LX_ANIM_MAX_LAYERS && i < st->graph->layer_count; i++) {
+            const LxAnimLayer *ol = &st->graph->layers[i];
+            keep_state[keep][0] = 0;
+            if (st->layers[i].state >= 0 && st->layers[i].state < ol->state_count)
+                lx_strcpy(keep_state[keep], LX_ANIM_NAME, ol->states[st->layers[i].state].name);
+            keep_norm[keep] = st->layers[i].norm;
+            keep++;
+        }
+    }
+    ParamVal *old = st->pvals;
+    int old_count = st->pval_count;
+    LxAnimGraph *old_graph = st->graph;
+
+    layers_free(st);
+    binds_free(st);
+    st->graph = g;
+    st->graph_version = g ? g->version : 0;
+    st->pvals = NULL;
+    st->pval_count = 0;
+    if (!g) { lx_free(old); return; }
+
+    st->pval_count = g->param_count;
+    st->pvals = lx_calloc((size_t)(g->param_count ? g->param_count : 1), sizeof(ParamVal));
+    for (int i = 0; i < g->param_count; i++) {
+        const LxAnimParam *p = &g->params[i];
+        st->pvals[i].f = p->f;
+        st->pvals[i].i = p->i;
+        st->pvals[i].b = p->type == LX_AP_TRIGGER ? false : p->b;   /* a trigger always starts unset */
+        /* a parameter that was already there keeps the value it had */
+        if (old && old_graph)
+            for (int o = 0; o < old_count && o < old_graph->param_count; o++)
+                if (!strcmp(old_graph->params[o].name, p->name) && old_graph->params[o].type == p->type) {
+                    st->pvals[i] = old[o];
+                    break;
+                }
+    }
+    lx_free(old);
+
+    int n = st->model->node_count ? st->model->node_count : 1;
+    st->layer_count = g->layer_count;
+    st->layers = lx_calloc((size_t)(g->layer_count ? g->layer_count : 1), sizeof(LayerRun));
+    for (int i = 0; i < g->layer_count; i++) {
+        LayerRun *lr = &st->layers[i];
+        lx_pose_alloc(&lr->pose, n);
+        lx_pose_alloc(&lr->a, n);
+        lx_pose_alloc(&lr->b, n);
+        lx_pose_rest(&lr->pose, st->model);
+        lr->weight = i == 0 ? 1.0f : g->layers[i].weight;
+        lr->from = -1;
+        lr->state = lx_anim_state_index(&g->layers[i], g->layers[i].start);
+        lr->norm = lr->state >= 0 ? g->layers[i].states[lr->state].cycle_offset : 0;
+        if (i < keep && keep_state[i][0]) {
+            int s = lx_anim_state_index(&g->layers[i], keep_state[i]);
+            if (s >= 0) { lr->state = s; lr->norm = keep_norm[i]; }
+        }
+    }
+    for (int i = 0; i <= LX_ANIM_MAX_DEPTH; i++)
+        if (st->scratch[i].count != n) { lx_pose_free(&st->scratch[i]); lx_pose_alloc(&st->scratch[i], n); }
+}
+
+/* The component names a graph (or stops naming one), or the graph was edited: re-bind. */
+static void sync_graph(LxScene *s, LxEntity e, LxAnimState *st) {
+    LxEntityData *d = lx_entity_data(s, e);
+    if (!d) return;
+    LxAnimGraph *g = d->animator.graph[0] ? lx_asset_anim_graph(d->animator.graph) : NULL;
+    if (g == st->graph && (!g || g->version == st->graph_version)) return;
+    bind_graph(st, g);
+}
+
+/* ---------------- inverse kinematics on the posed skeleton ---------------- */
+/* Model-space transforms of every node, from a pose. Nodes come parent-first, so one pass does it. */
+static void pose_fk(const LxAnimState *st, const LxPose *p, LxVec3 *wp, LxQuat *wr) {
+    const LxModel *m = st->model;
+    for (int i = 0; i < m->node_count; i++) {
+        int par = m->nodes[i].parent;
+        if (par < 0) { wp[i] = p->pos[i]; wr[i] = p->rot[i]; }
+        else {
+            wp[i] = lx_add3(wp[par], lx_quat_rotate(wr[par], lx_mul3(p->pos[i], m->nodes[par].scale)));
+            wr[i] = lx_quat_norm(lx_quat_mul(wr[par], p->rot[i]));
+        }
+    }
+}
+
+/* a bone's local rotation that puts it at a world rotation, given its parent's */
+static LxQuat local_from_world(LxQuat parent_world, LxQuat want_world) {
+    return lx_quat_norm(lx_quat_mul(lx_quat_conj(parent_world), want_world));
+}
+
+typedef struct Limb { int root, mid, end; } Limb;
+
+static Limb limb_of(const LxModel *m, LxIkGoal goal) {
+    Limb l = {-1, -1, -1};
+    switch (goal) {
+    case LX_IK_LEFT_FOOT: l.root = m->avatar[LX_HB_LEFT_UPPER_LEG]; l.mid = m->avatar[LX_HB_LEFT_LOWER_LEG]; l.end = m->avatar[LX_HB_LEFT_FOOT]; break;
+    case LX_IK_RIGHT_FOOT: l.root = m->avatar[LX_HB_RIGHT_UPPER_LEG]; l.mid = m->avatar[LX_HB_RIGHT_LOWER_LEG]; l.end = m->avatar[LX_HB_RIGHT_FOOT]; break;
+    case LX_IK_LEFT_HAND: l.root = m->avatar[LX_HB_LEFT_UPPER_ARM]; l.mid = m->avatar[LX_HB_LEFT_LOWER_ARM]; l.end = m->avatar[LX_HB_LEFT_HAND]; break;
+    default: l.root = m->avatar[LX_HB_RIGHT_UPPER_ARM]; l.mid = m->avatar[LX_HB_RIGHT_LOWER_ARM]; l.end = m->avatar[LX_HB_RIGHT_HAND]; break;
+    }
+    return l;
+}
+
+typedef struct IkFrame {
+    LxVec3 *wp;
+    LxQuat *wr;
+    LxMat4 to_world;
+    LxMat4 to_model;
+    LxQuat root_rot, root_rot_inv;
+} IkFrame;
+
+static LxVec3 to_world_p(const IkFrame *f, LxVec3 model) { return lx_mat4_point(f->to_world, model); }
+static LxVec3 to_model_p(const IkFrame *f, LxVec3 world) { return lx_mat4_point(f->to_model, world); }
+
+/* Solves one limb towards a world-space target and writes the result back into the pose. */
+static void solve_limb(LxAnimState *st, IkFrame *f, Limb lb, LxVec3 target_world, float weight,
+                       const LxQuat *end_rot_world, float end_rot_weight) {
+    if (lb.root < 0 || lb.mid < 0 || lb.end < 0 || !(weight > 0)) return;
+    const LxModel *m = st->model;
+    LxVec3 root_w = to_world_p(f, f->wp[lb.root]), mid_w = to_world_p(f, f->wp[lb.mid]), end_w = to_world_p(f, f->wp[lb.end]);
+    /* the knee points where it already does, pushed out from the limb's line: no pole to author */
+    LxVec3 pole = lx_add3(mid_w, lx_scale3(lx_sub3(mid_w, lx_scale3(lx_add3(root_w, end_w), 0.5f)), 2.0f));
+    LxQuat root_rot_w = lx_quat_mul(f->root_rot, f->wr[lb.root]);
+    LxQuat mid_rot_w = lx_quat_mul(f->root_rot, f->wr[lb.mid]);
+    LxIkResult r;
+    if (!lx_ik_two_bone(root_w, mid_w, end_w, target_world, pole, root_rot_w, mid_rot_w, weight, &r)) return;
+    /* back to local: the upper bone's parent did not move, the lower bone's did */
+    int rp = m->nodes[lb.root].parent;
+    LxQuat root_parent_w = rp >= 0 ? lx_quat_mul(f->root_rot, f->wr[rp]) : f->root_rot;
+    LxQuat new_root_local = local_from_world(root_parent_w, r.root);
+    LxQuat new_mid_local = local_from_world(r.root, r.mid);
+    st->out.rot[lb.root] = new_root_local;
+    st->out.rot[lb.mid] = new_mid_local;
+    if (end_rot_world && end_rot_weight > 0) {
+        LxQuat want = lx_quat_slerp(lx_quat_mul(r.mid, st->out.rot[lb.end]), *end_rot_world, lx_clampf(end_rot_weight, 0, 1));
+        st->out.rot[lb.end] = local_from_world(r.mid, want);
+    }
+    /* the rest of the limb moved: refresh the model-space transforms so later goals see the truth */
+    pose_fk(st, &st->out, f->wp, f->wr);
+}
+
+/* Foot grounding: each foot is dropped onto whatever is under it, and the hips come down far enough that
+ * neither leg has to stretch. Authored on the flat, walked up a slope, the feet still land on it. */
+static void foot_ik(LxScene *s, LxEntity e, LxAnimState *st, IkFrame *f, float weight, float dt) {
+    const LxModel *m = st->model;
+    if (m->imp.rig != LX_RIG_HUMANOID || !m->humanoid_ok) return;
+    const float probe_up = 0.5f, probe_down = 0.8f;
+    LxVec3 up = lx_v3(0, 1, 0);
+    LxVec3 targets[2];
+    LxQuat rots[2];
+    bool hit_any[2] = {false, false};
+    float drop = 0;
+    for (int side = 0; side < 2; side++) {
+        Limb lb = limb_of(m, side == 0 ? LX_IK_LEFT_FOOT : LX_IK_RIGHT_FOOT);
+        if (lb.end < 0) continue;
+        LxVec3 foot = to_world_p(f, f->wp[lb.end]);
+        /* how high the ankle sits above the sole, so the foot lands on the ground instead of in it */
+        float ankle_h = 0;
+        int toes = m->avatar[side == 0 ? LX_HB_LEFT_TOES : LX_HB_RIGHT_TOES];
+        if (toes >= 0) {
+            LxVec3 t = to_world_p(f, f->wp[toes]);
+            ankle_h = foot.y - t.y;
+        }
+        if (ankle_h < 0.02f) ankle_h = 0.08f;   /* no toe bone to measure: a plausible ankle height */
+        LxRaycastHit hit;
+        LxVec3 origin = lx_add3(foot, lx_scale3(up, probe_up));
+        if (!lx_physics_raycast_ignore(s, origin, lx_v3(0, -1, 0), probe_up + probe_down, LX_ALL_LAYERS, e, &hit)) continue;
+        hit_any[side] = true;
+        targets[side] = lx_add3(hit.point, lx_scale3(up, ankle_h));
+        /* the foot lies along the ground it stands on */
+        LxVec3 n = lx_len3(hit.normal) > 0.1f ? lx_norm3(hit.normal) : up;
+        LxQuat cur = lx_quat_mul(f->root_rot, f->wr[lb.end]);
+        LxQuat align = lx_quat_identity();
+        float d = lx_dot3(up, n);
+        if (d < 0.9999f) {
+            LxVec3 axis = lx_cross3(up, n);
+            if (lx_len3(axis) > 1e-6f) align = lx_quat_axis_angle(lx_norm3(axis), acosf(lx_clampf(d, -1, 1)));
+        }
+        rots[side] = lx_quat_norm(lx_quat_mul(align, cur));
+        float need = foot.y - targets[side].y;
+        if (need > drop) drop = need;   /* the deepest foot decides how far the hips come down */
+    }
+    /* ease the hips, so stepping onto a kerb is a movement rather than a jump */
+    float want_drop = drop > 0 ? drop : 0;
+    float k = dt > 0 ? 1.0f - expf(-dt * 12.0f) : 1.0f;
+    st->hip_drop += (want_drop - st->hip_drop) * k;
+    if (st->hip_drop > 0.001f) {
+        int hips = m->avatar[LX_HB_HIPS];
+        if (hips >= 0 && hips < st->out.count) {
+            LxQuat hp = m->nodes[hips].parent >= 0 ? f->wr[m->nodes[hips].parent] : lx_quat_identity();
+            LxVec3 down_model = lx_quat_rotate(lx_quat_conj(lx_quat_mul(f->root_rot, hp)), lx_v3(0, -st->hip_drop * weight, 0));
+            st->out.pos[hips] = lx_add3(st->out.pos[hips], down_model);
+            pose_fk(st, &st->out, f->wp, f->wr);
+        }
+    }
+    for (int side = 0; side < 2; side++) {
+        if (!hit_any[side]) continue;
+        Limb lb = limb_of(m, side == 0 ? LX_IK_LEFT_FOOT : LX_IK_RIGHT_FOOT);
+        solve_limb(st, f, lb, targets[side], weight, &rots[side], weight);
+    }
+}
+
+static void look_at_ik(LxAnimState *st, IkFrame *f) {
+    const LxModel *m = st->model;
+    if (!st->look_active || !(st->look_weight > 0)) return;
+    int head = m->avatar[LX_HB_HEAD];
+    if (head < 0 || head >= st->out.count) return;
+    LxVec3 head_w = to_world_p(f, f->wp[head]);
+    LxVec3 to = lx_sub3(st->look_at, head_w);
+    if (lx_len3(to) < 1e-4f) return;
+    LxQuat cur = lx_quat_mul(f->root_rot, f->wr[head]);
+    /* turn the head's own forward onto the target, no further than the weight allows */
+    LxVec3 fwd = lx_quat_rotate(cur, lx_v3(0, 0, 1));
+    LxVec3 want = lx_norm3(to);
+    float d = lx_clampf(lx_dot3(lx_norm3(fwd), want), -1, 1);
+    LxQuat turn = lx_quat_identity();
+    if (d < 0.9999f) {
+        LxVec3 axis = lx_cross3(fwd, want);
+        if (lx_len3(axis) > 1e-6f) turn = lx_quat_axis_angle(lx_norm3(axis), acosf(d));
+    }
+    LxQuat full = lx_quat_norm(lx_quat_mul(turn, cur));
+    LxQuat mixed = lx_quat_slerp(cur, full, lx_clampf(st->look_weight, 0, 1));
+    int hp = m->nodes[head].parent;
+    LxQuat parent_w = hp >= 0 ? lx_quat_mul(f->root_rot, f->wr[hp]) : f->root_rot;
+    st->out.rot[head] = local_from_world(parent_w, mixed);
+    pose_fk(st, &st->out, f->wp, f->wr);
+}
+
+/* every IK pass, over the pose the graph (or the clip) produced */
+static void run_ik(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *d, float dt, bool state_foot_ik) {
+    const LxModel *m = st->model;
+    bool want_feet = (d->animator.foot_ik || state_foot_ik) && d->animator.foot_ik_weight > 0;
+    bool want_goals = false;
+    for (int i = 0; i < LX_IK_GOAL_COUNT; i++) if (st->ik[i].active && st->ik[i].weight > 0) want_goals = true;
+    if (!want_feet && !want_goals && !st->look_active) return;
+    if (m->node_count <= 0) return;
+    IkFrame f;
+    memset(&f, 0, sizeof f);
+    f.wp = lx_alloc(sizeof(LxVec3) * (size_t)m->node_count);
+    f.wr = lx_alloc(sizeof(LxQuat) * (size_t)m->node_count);
+    if (!f.wp || !f.wr) { lx_free(f.wp); lx_free(f.wr); return; }
+    f.to_world = lx_entity_world_matrix(s, e);
+    f.to_model = lx_mat4_inverse(f.to_world);
+    f.root_rot = lx_entity_world_rotation(s, e);
+    f.root_rot_inv = lx_quat_conj(f.root_rot);
+    pose_fk(st, &st->out, f.wp, f.wr);
+    if (want_feet) foot_ik(s, e, st, &f, lx_clampf(d->animator.foot_ik_weight, 0, 1), dt);
+    for (int i = 0; i < LX_IK_GOAL_COUNT; i++) {
+        if (!st->ik[i].active || !(st->ik[i].weight > 0)) continue;
+        Limb lb = limb_of(m, (LxIkGoal)i);
+        solve_limb(st, &f, lb, st->ik[i].pos, lx_clampf(st->ik[i].weight, 0, 1),
+                   st->ik[i].rot_active ? &st->ik[i].rot : NULL, st->ik[i].rot_weight);
+    }
+    look_at_ik(st, &f);
+    lx_free(f.wp);
+    lx_free(f.wr);
+}
+
+/* ---------------- the graph's frame ---------------- */
+static void graph_update(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *d, float dt) {
+    LxAnimGraph *g = st->graph;
+    bool rm = d->animator.root_motion;
+    float global_speed = d->animator.speed;
+    bool state_foot_ik = false;
+    for (int li = 0; li < st->layer_count && li < g->layer_count; li++) {
+        const LxAnimLayer *l = &g->layers[li];
+        LayerRun *lr = &st->layers[li];
+        if (lr->state < 0 || lr->state >= l->state_count) {
+            lr->state = lx_anim_state_index(l, l->start);
+            lr->from = -1;
+            lr->norm = lr->state >= 0 ? l->states[lr->state].cycle_offset : 0;
+        }
+        if (lr->state < 0) { lx_pose_rest(&lr->pose, st->model); continue; }
+        const LxAnimNode *n = &l->states[lr->state];
+        if (n->foot_ik && li == 0) state_foot_ik = true;
+        float len = state_length(st, n);
+        float speed = n->speed * global_speed;
+        if (n->speed_param[0]) speed *= param_float(st, n->speed_param);
+        float prev = lr->norm;
+        if (len > 0) lr->norm += dt * speed / len;
+        if (!n->loop && lr->norm > 1) lr->norm = 1;
+        if (lr->norm != lr->norm) lr->norm = prev;   /* a NaN here would stop the layer dead */
+        if (lr->from >= 0 && lr->from < l->state_count) {
+            const LxAnimNode *fn = &l->states[lr->from];
+            float flen = state_length(st, fn);
+            float fspeed = fn->speed * global_speed;
+            if (fn->speed_param[0]) fspeed *= param_float(st, fn->speed_param);
+            if (flen > 0) lr->from_norm += dt * fspeed / flen;
+        }
+        if (lr->from != -1) {
+            lr->fade += dt;
+            if (lr->fade >= lr->fade_len) lr->from = -1;
+        }
+        layer_transitions(st, l, lr, prev);
+        layer_pose(st, l, lr, rm);
+    }
+    if (st->layer_count > 0) combine_layers(st, g);
+    else lx_pose_rest(&st->out, st->model);
+    apply_pose(s, st);
+    run_ik(s, e, st, d, dt, state_foot_ik);
+    apply_pose(s, st);
+}
+
+/* ---------------- the public animator graph API ---------------- */
+/* Every one of these finds the animator's runtime state the same way, and does nothing at all when the
+ * object has no animator or its animator has no graph - a game may set a parameter before a character
+ * is loaded, and that should be quiet, not a crash. */
+static LxAnimState *graph_state(LxScene *s, LxEntity e) {
+    LxAnimState *st = state_for(s, e);
+    return st && st->graph ? st : NULL;
+}
+
+static ParamVal *param_of(LxScene *s, LxEntity e, const char *name, LxAnimParamType *type) {
+    LxAnimState *st = graph_state(s, e);
+    if (!st) return NULL;
+    int i = param_index(st->graph, name);
+    if (i < 0 || i >= st->pval_count) return NULL;
+    if (type) *type = st->graph->params[i].type;
+    return &st->pvals[i];
+}
+
+float lx_animator_get_float(LxScene *s, LxEntity e, const char *param) {
+    LxAnimParamType t;
+    ParamVal *v = param_of(s, e, param, &t);
+    if (!v) return 0;
+    return t == LX_AP_INT ? (float)v->i : (t == LX_AP_FLOAT ? v->f : (v->b ? 1.0f : 0.0f));
+}
+void lx_animator_set_float(LxScene *s, LxEntity e, const char *param, float value) {
+    LxAnimParamType t;
+    ParamVal *v = param_of(s, e, param, &t);
+    if (!v) return;
+    if (value != value) return;   /* a NaN parameter would spread through every blend that reads it */
+    if (t == LX_AP_INT) v->i = (int)value;
+    else if (t == LX_AP_FLOAT) v->f = value;
+    else v->b = value != 0;
+}
+int lx_animator_get_int(LxScene *s, LxEntity e, const char *param) {
+    LxAnimParamType t;
+    ParamVal *v = param_of(s, e, param, &t);
+    if (!v) return 0;
+    return t == LX_AP_INT ? v->i : (t == LX_AP_FLOAT ? (int)v->f : (v->b ? 1 : 0));
+}
+void lx_animator_set_int(LxScene *s, LxEntity e, const char *param, int value) {
+    LxAnimParamType t;
+    ParamVal *v = param_of(s, e, param, &t);
+    if (!v) return;
+    if (t == LX_AP_FLOAT) v->f = (float)value;
+    else if (t == LX_AP_INT) v->i = value;
+    else v->b = value != 0;
+}
+bool lx_animator_get_bool(LxScene *s, LxEntity e, const char *param) {
+    LxAnimParamType t;
+    ParamVal *v = param_of(s, e, param, &t);
+    if (!v) return false;
+    return t == LX_AP_FLOAT ? v->f != 0 : (t == LX_AP_INT ? v->i != 0 : v->b);
+}
+void lx_animator_set_bool(LxScene *s, LxEntity e, const char *param, bool value) {
+    LxAnimParamType t;
+    ParamVal *v = param_of(s, e, param, &t);
+    if (!v) return;
+    if (t == LX_AP_FLOAT) v->f = value ? 1.0f : 0.0f;
+    else if (t == LX_AP_INT) v->i = value ? 1 : 0;
+    else v->b = value;
+}
+void lx_animator_set_trigger(LxScene *s, LxEntity e, const char *param) {
+    ParamVal *v = param_of(s, e, param, NULL);
+    if (v) v->b = true;
+}
+void lx_animator_reset_trigger(LxScene *s, LxEntity e, const char *param) {
+    ParamVal *v = param_of(s, e, param, NULL);
+    if (v) v->b = false;
+}
+bool lx_animator_has_param(LxScene *s, LxEntity e, const char *param) { return param_of(s, e, param, NULL) != NULL; }
+
+int lx_animator_layer_count(LxScene *s, LxEntity e) {
+    LxAnimState *st = graph_state(s, e);
+    return st ? st->layer_count : 0;
+}
+float lx_animator_layer_weight(LxScene *s, LxEntity e, int layer) {
+    LxAnimState *st = graph_state(s, e);
+    return st && layer >= 0 && layer < st->layer_count ? st->layers[layer].weight : 0;
+}
+void lx_animator_set_layer_weight(LxScene *s, LxEntity e, int layer, float weight) {
+    LxAnimState *st = graph_state(s, e);
+    if (st && layer > 0 && layer < st->layer_count) st->layers[layer].weight = lx_clampf(weight, 0, 1);
+}
+const char *lx_animator_state(LxScene *s, LxEntity e, int layer) {
+    LxAnimState *st = graph_state(s, e);
+    if (!st || layer < 0 || layer >= st->layer_count || layer >= st->graph->layer_count) return "";
+    const LxAnimLayer *l = &st->graph->layers[layer];
+    int i = st->layers[layer].state;
+    return i >= 0 && i < l->state_count ? l->states[i].name : "";
+}
+const char *lx_animator_state_tag(LxScene *s, LxEntity e, int layer) {
+    LxAnimState *st = graph_state(s, e);
+    if (!st || layer < 0 || layer >= st->layer_count || layer >= st->graph->layer_count) return "";
+    const LxAnimLayer *l = &st->graph->layers[layer];
+    int i = st->layers[layer].state;
+    return i >= 0 && i < l->state_count ? l->states[i].tag : "";
+}
+float lx_animator_normalized_time(LxScene *s, LxEntity e, int layer) {
+    LxAnimState *st = graph_state(s, e);
+    return st && layer >= 0 && layer < st->layer_count ? st->layers[layer].norm : 0;
+}
+bool lx_animator_in_transition(LxScene *s, LxEntity e, int layer) {
+    LxAnimState *st = graph_state(s, e);
+    return st && layer >= 0 && layer < st->layer_count && st->layers[layer].from != -1;
+}
+
+bool lx_animator_play_state(LxScene *s, LxEntity e, int layer, const char *state, float fade) {
+    LxAnimState *st = graph_state(s, e);
+    if (!st || layer < 0 || layer >= st->layer_count || layer >= st->graph->layer_count) return false;
+    const LxAnimLayer *l = &st->graph->layers[layer];
+    int to = lx_anim_state_index(l, state);
+    if (to < 0) return false;
+    LxAnimTransition t;
+    memset(&t, 0, sizeof t);
+    lx_strcpy(t.to, sizeof t.to, state);
+    t.duration = fade > 0 ? fade : 0;
+    t.fixed_duration = true;
+    t.to_self = true;
+    start_transition(st, l, &st->layers[layer], to, &t);
+    return true;
+}
+
+void lx_animator_set_ik_goal(LxScene *s, LxEntity e, LxIkGoal goal, LxVec3 position, float weight) {
+    LxAnimState *st = state_for(s, e);
+    if (!st || goal < 0 || goal >= LX_IK_GOAL_COUNT) return;
+    st->ik[goal].pos = position;
+    st->ik[goal].weight = lx_clampf(weight, 0, 1);
+    st->ik[goal].active = weight > 0;
+}
+void lx_animator_set_ik_rotation(LxScene *s, LxEntity e, LxIkGoal goal, LxQuat rotation, float weight) {
+    LxAnimState *st = state_for(s, e);
+    if (!st || goal < 0 || goal >= LX_IK_GOAL_COUNT) return;
+    st->ik[goal].rot = rotation;
+    st->ik[goal].rot_weight = lx_clampf(weight, 0, 1);
+    st->ik[goal].rot_active = weight > 0;
+}
+void lx_animator_clear_ik_goal(LxScene *s, LxEntity e, LxIkGoal goal) {
+    LxAnimState *st = state_for(s, e);
+    if (!st || goal < 0 || goal >= LX_IK_GOAL_COUNT) return;
+    memset(&st->ik[goal], 0, sizeof st->ik[goal]);
+}
+void lx_animator_set_look_at(LxScene *s, LxEntity e, LxVec3 position, float weight) {
+    LxAnimState *st = state_for(s, e);
+    if (!st) return;
+    st->look_at = position;
+    st->look_weight = lx_clampf(weight, 0, 1);
+    st->look_active = weight > 0;
+}
+void lx_animator_clear_look_at(LxScene *s, LxEntity e) {
+    LxAnimState *st = state_for(s, e);
+    if (st) { st->look_active = false; st->look_weight = 0; }
+}
+
+static void graph_update(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *d, float dt);
+
 void lx_animator_update(LxScene *s, LxEntity e, float dt) {
     LxEntityData *d = lx_entity_data(s, e);
     if (!d || !(d->comps & LX_COMP_ANIMATOR) || !d->active) return;
     LxAnimState *st = state_for(s, e);
     if (!st) return;
     d = lx_entity_data(s, e);
+    if (st->graph) { st->started = true; graph_update(s, e, st, d, dt); return; }
     if (!st->started && d->animator.play_on_start && d->animator.clip[0]) lx_animator_play(s, e, d->animator.clip, 0);
     st->started = true;
     if (!st->cur.clip) return;

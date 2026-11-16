@@ -38,6 +38,7 @@ set(LUXORA_SOURCES
   src/script/module.c src/script/script_api.c
   src/scene/scene.c src/scene/serialize.c src/scene/behaviours.c src/scene/gameplay.c src/scene/gamekit.c
   src/model/fbx.c src/model/model.c src/model/avatar.c src/model/anim.c
+  src/model/anim_graph.c src/model/anim_blend.c src/model/anim_ik.c
   src/fsm/graph.c src/fsm/fsm.c src/fsm/arrays.c
   # the built-in State Graph action library, one file per group of categories
   src/fsm/fsm_common.c src/fsm/fsm_math.c src/fsm/fsm_vector.c src/fsm/fsm_string.c src/fsm/fsm_color.c

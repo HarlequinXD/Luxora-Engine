@@ -870,10 +870,13 @@ LxEntity lx_model_instantiate(LxScene *s, const char *model_ref, LxVec3 position
  * Generic rigs play clips whose bone names match; humanoid rigs retarget any humanoid clip. */
 typedef struct LxAnimator {
     char model[LX_REF_MAX];          /* the model whose skeleton this object has */
-    char clip[LX_REF_MAX];           /* clip played on start */
+    char clip[LX_REF_MAX];           /* clip played on start (ignored when a graph drives the animator) */
+    char graph[LX_REF_MAX];          /* an animator graph (.lxanim) that drives it: states, parameters, blend trees */
     float speed;
     bool loop, play_on_start;
     bool root_motion;                /* keep the hips' horizontal movement (else it stays in place) */
+    bool foot_ik;                    /* plant the feet on the ground under them */
+    float foot_ik_weight;            /* how much of that shows (0..1) */
 } LxAnimator;
 void lx_animator_play(LxScene *s, LxEntity e, const char *clip_ref, float fade_seconds);
 void lx_animator_stop(LxScene *s, LxEntity e);
@@ -885,6 +888,48 @@ const char *lx_animator_current_clip(LxScene *s, LxEntity e);
 void lx_animator_reset_pose(LxScene *s, LxEntity e);           /* stop and return the bones to the model's rest pose */
 void lx_animator_update(LxScene *s, LxEntity e, float dt);   /* advance + pose now (the editor's preview uses it) */
 void lx_scene_update_animation(LxScene *s, float dt);        /* every animator (lx_scene_simulate calls it) */
+
+/* ---- animator graphs (.lxanim): a state machine over animation ----
+ * An animator graph's states play clips or blend trees, and its transitions are driven by parameters
+ * rather than by events: set a float as the character speeds up and the graph walks, then runs, blending
+ * as it goes. Setting a parameter is all a game ever does; the graph decides what plays. */
+float lx_animator_get_float(LxScene *s, LxEntity e, const char *param);
+void lx_animator_set_float(LxScene *s, LxEntity e, const char *param, float v);
+int lx_animator_get_int(LxScene *s, LxEntity e, const char *param);
+void lx_animator_set_int(LxScene *s, LxEntity e, const char *param, int v);
+bool lx_animator_get_bool(LxScene *s, LxEntity e, const char *param);
+void lx_animator_set_bool(LxScene *s, LxEntity e, const char *param, bool v);
+void lx_animator_set_trigger(LxScene *s, LxEntity e, const char *param);     /* fires one transition, then clears */
+void lx_animator_reset_trigger(LxScene *s, LxEntity e, const char *param);
+bool lx_animator_has_param(LxScene *s, LxEntity e, const char *param);
+/* layers: 0 is the base, the rest blend over it by weight (and through their bone mask) */
+int lx_animator_layer_count(LxScene *s, LxEntity e);
+float lx_animator_layer_weight(LxScene *s, LxEntity e, int layer);
+void lx_animator_set_layer_weight(LxScene *s, LxEntity e, int layer, float weight);
+/* what a layer is playing: its state's name, its tag, and how far through it is (in cycles) */
+const char *lx_animator_state(LxScene *s, LxEntity e, int layer);
+const char *lx_animator_state_tag(LxScene *s, LxEntity e, int layer);
+float lx_animator_normalized_time(LxScene *s, LxEntity e, int layer);
+bool lx_animator_in_transition(LxScene *s, LxEntity e, int layer);
+/* go to a state now, cross-fading over fade seconds (0 = at once), whatever the transitions say */
+bool lx_animator_play_state(LxScene *s, LxEntity e, int layer, const char *state, float fade);
+
+/* ---- inverse kinematics ----
+ * A goal moves the end of a limb to a point in the world, and the limb bends to follow. The weight
+ * decides how much of that shows, so a hand can be eased onto a ledge rather than snapped to it. */
+typedef enum LxIkGoal { LX_IK_LEFT_FOOT, LX_IK_RIGHT_FOOT, LX_IK_LEFT_HAND, LX_IK_RIGHT_HAND, LX_IK_GOAL_COUNT } LxIkGoal;
+void lx_animator_set_ik_goal(LxScene *s, LxEntity e, LxIkGoal goal, LxVec3 position, float weight);
+void lx_animator_set_ik_rotation(LxScene *s, LxEntity e, LxIkGoal goal, LxQuat rotation, float weight);
+void lx_animator_clear_ik_goal(LxScene *s, LxEntity e, LxIkGoal goal);
+void lx_animator_set_look_at(LxScene *s, LxEntity e, LxVec3 position, float weight);   /* turns the head */
+void lx_animator_clear_look_at(LxScene *s, LxEntity e);
+
+/* The two-bone solver itself: hip, knee and ankle (or shoulder, elbow and wrist) in world space, and
+ * where the ankle should end up. The pole decides which way the knee points. Hands back the world
+ * rotations the two bones need; false when the limb has no length to work with. */
+typedef struct LxIkResult { LxQuat root, mid; bool reached; } LxIkResult;
+bool lx_ik_two_bone(LxVec3 root, LxVec3 mid, LxVec3 end, LxVec3 target, LxVec3 pole,
+                    LxQuat root_world, LxQuat mid_world, float weight, LxIkResult *out);
 void lx_scene_update_skins(LxScene *s);                      /* deform skinned meshes (the renderer calls it) */
 
 /* ===================================================================

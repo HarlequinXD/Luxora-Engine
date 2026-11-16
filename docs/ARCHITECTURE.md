@@ -57,6 +57,48 @@ Here is how that goal maps onto the engine:
 
 No engine can rasterise billions of unique triangles per frame on a phone. Virtualised geometry works by drawing only what covers pixels, and that is where this roadmap leads.
 
+## Animation
+
+Animation is posed in one direction: something produces a pose, poses are mixed, and the result is written
+to the bones. An `LxPose` is one local transform per node of a skeleton, and everything that animates -
+a clip, a blend tree, a layer - produces one, so anything can be mixed with anything by the same call.
+Positions and scales are a weighted mean; rotations accumulate with their signs aligned and are
+normalised at the end, which is what keeps a blend continuous as its weights move and what makes a blend
+across the 180 degree wrap take the short way round.
+
+- **Clips** come from the model file. A generic rig plays clips whose bone names match; a humanoid rig
+  retargets any humanoid clip through its avatar (source pose -> canonical deltas from its T-pose ->
+  applied to the target's T-pose, with the hips scaled by leg length).
+- **Animator graphs** (`.lxanim`) are a state machine over animation rather than over game logic. Their
+  clock is the cycle, not the second: a state's progress runs 0..1 over its motion whatever that motion's
+  length is, which is what lets a blend tree hold a walk and a run of different lengths and still keep
+  their feet together, and what makes an exit time of 0.75 mean the same thing everywhere.
+- **Transitions** are conditions on typed parameters (float, int, bool, and triggers that one transition
+  consumes), optionally waiting for an exit time, and they cross-fade over a duration given in seconds or
+  in cycles. Any State transitions are taken from whichever state is playing; interruption rules say what
+  may cut a running transition short, and a transition that interrupts a cross-fade fades from what is
+  actually on screen rather than from a state.
+- **Blend trees** mix several motions by one parameter (1D thresholds), by two (2D cartesian, or
+  directional for a locomotion rose where direction matters more than speed), or by a parameter each
+  (direct). The 2D kinds use gradient bands: every other child carves away part of a child's influence,
+  so the weights are local to where the input is and move continuously. A tree's length is its children's
+  lengths weighted by how much of each shows, which is how the children stay in step.
+- **Layers** each run their own state machine and blend over the base by weight, through a humanoid bone
+  mask (a masked bone brings its descendants with it) and either overriding what is underneath or adding
+  the layer's departure from the rest pose to it.
+- **IK** is closed form: a limb is two bones and a triangle, so the law of cosines fixes both angles and
+  the pole vector decides which way the knee points - no iteration, nothing to tune. Foot grounding
+  raycasts under each foot, aligns it to the slope, and eases the hips down far enough that neither leg
+  has to stretch.
+
+A State Graph drives all of this by setting parameters (**Animator Graph** actions) and leaves the
+choosing and the blending to the animator. The editor's **Animator** tab edits the graph as a graph, and
+every edit is saved and picked up by running animators on the next frame, so a transition's duration can
+be tuned while the game plays.
+
+**Next:** root motion from the graph rather than from the clip, animation events on a state's timeline,
+and sub-state machines.
+
 ## Editor and UI toolkit
 
 The editor UI is Luxora's own retained-mode toolkit (`editor/ui.c`); no third-party UI library is used.

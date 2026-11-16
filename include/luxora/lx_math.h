@@ -95,6 +95,20 @@ LX_INLINE LxQuat lx_quat_euler_deg(LxVec3 e) {
 }
 
 LX_INLINE LxQuat lx_quat_conj(LxQuat q) { LxQuat r = {-q.x, -q.y, -q.z, q.w}; return r; }
+/* Turn from a to b, at an even rate: half way along is half the angle. Takes the short way round (q and
+ * -q are the same rotation, so the sign is aligned first) and falls back to a straight mix for rotations
+ * close enough together that the angle maths would lose its precision. */
+LX_INLINE LxQuat lx_quat_slerp(LxQuat a, LxQuat b, float t) {
+    float d = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+    if (d < 0) { b.x = -b.x; b.y = -b.y; b.z = -b.z; b.w = -b.w; d = -d; }
+    float wa = 1.0f - t, wb = t;
+    if (d < 0.9995f) {
+        float theta = acosf(d > 1 ? 1 : d), s = sinf(theta);
+        if (s > 1e-6f) { wa = sinf((1.0f - t) * theta) / s; wb = sinf(t * theta) / s; }
+    }
+    LxQuat r = {a.x * wa + b.x * wb, a.y * wa + b.y * wb, a.z * wa + b.z * wb, a.w * wa + b.w * wb};
+    return lx_quat_norm(r);
+}
 /* Inverse of lx_quat_euler_deg (Y, then X, then Z). */
 LX_INLINE LxVec3 lx_quat_to_euler_deg(LxQuat q) {
     float xx = q.x * q.x, yy = q.y * q.y, zz = q.z * q.z;

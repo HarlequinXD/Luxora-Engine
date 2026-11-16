@@ -633,6 +633,8 @@ LxAnimator *lx_add_animator(LxScene *s, LxEntity e, const char *model_ref) {
         d->animator.speed = 1.0f;
         d->animator.loop = true;
         d->animator.play_on_start = true;
+        d->animator.foot_ik_weight = 1.0f;
+        d->animator.foot_ik_weight = 1.0f;
     }
     if (model_ref) lx_strcpy(d->animator.model, sizeof d->animator.model, model_ref);
     d->comps |= LX_COMP_ANIMATOR;

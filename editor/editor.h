@@ -69,7 +69,7 @@ typedef struct Editor {
     UiNode *inspector_tabs, *inspector, *lighting_panel, *stats_panel;
     UiNode *bottom_tabs, *content_panel, *console_panel, *mixer_panel, *scenes_panel;
     UiNode *viewport;
-    UiNode *view_tabs, *graph_panel;  /* Scene | State Graph */
+    UiNode *view_tabs, *graph_panel, *animator_panel;  /* Scene | State Graph | Animator */
     uint64_t hierarchy_hash;
     char hierarchy_search[64];
     LxEntity inspector_entity;
@@ -187,16 +187,24 @@ uint32_t ed_color_for_icon(UiIcon icon);
 
 /* State Graph editor (graph_editor.c, graph_inspector.c) */
 UiNode *ed_graph_panel(UiNode *parent);
+UiNode *ed_animator_panel(UiNode *parent);
 bool ed_graph_has_focus(void);
 bool ed_graph_keys(void);                 /* true: the graph view took the keyboard */
 void ed_graph_forget(void);
 void ed_graph_edit(LxEntity e, int slot);
 void ed_graph_open_asset(const char *ref);
+void ed_animator_open_asset(const char *ref);
+bool ed_animator_keys(void);
+bool ed_animator_add_state(const char *name);
+bool ed_animator_select_state(const char *name);
+bool ed_animator_add_transition(const char *from, const char *to);
+bool ed_animator_has_focus(void);
 bool ed_graph_select_state(const char *name);
 const char *ed_graph_stress(uint32_t seed);       /* stress tester: one random graph edit */
 bool ed_graph_check(char *err, size_t cap);
 void ed_state_graph_section(UiNode *sec, LxEntity e);
 void ed_graph_asset_inspector(UiNode *body, const char *ref);
+void ed_animator_asset_inspector(UiNode *body, const char *ref);
 
 /* windows */
 void ed_project_settings(int category);  /* 0 general, 1 graphics, 2 sound, 3 input, 4 platforms */

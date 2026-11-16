@@ -84,7 +84,7 @@ static bool ext_in(const char *name, const char *const *exts) {
 static const char *const *kind_exts(const char *k) {
     static const char *tex[] = {".png", ".jpg", ".jpeg", ".tga", ".bmp", NULL}, *mat[] = {".lxmat", NULL}, *mesh[] = {".obj", NULL},
                       *model[] = {".fbx", NULL}, *prefab[] = {".lxprefab", NULL}, *sound[] = {".wav", NULL}, *scene[] = {".lxscene", NULL},
-                      *graph[] = {".lxgraph", NULL}, *any[] = {"*", NULL}, *none[] = {NULL};
+                      *graph[] = {".lxgraph", NULL}, *anim[] = {".lxanim", NULL}, *any[] = {"*", NULL}, *none[] = {NULL};
     if (!strcmp(k, "texture")) return tex;
     if (!strcmp(k, "material")) return mat;
     if (!strcmp(k, "mesh")) return mesh;
@@ -93,6 +93,7 @@ static const char *const *kind_exts(const char *k) {
     if (!strcmp(k, "sound")) return sound;
     if (!strcmp(k, "scene")) return scene;
     if (!strcmp(k, "graph")) return graph;
+    if (!strcmp(k, "animator")) return anim;
     if (!strcmp(k, "file")) return any;
     return none;
 }

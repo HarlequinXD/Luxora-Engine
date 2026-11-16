@@ -2093,6 +2093,517 @@ static void test_pose_blend(void) {
     lx_pose_free(&out);
 }
 
+/* Blend tree weights: pure maths on the children's positions, so it can be checked exactly. */
+static void test_blend_trees(void) {
+    printf("blend trees\n");
+    LxAnimTree t;
+    float w[LX_ANIM_MAX_CHILDREN];
+    float xy[2];
+
+    /* 1D: idle at 0, walk at 2, run at 6 */
+    memset(&t, 0, sizeof t);
+    t.type = LX_AT_1D;
+    t.child_count = 3;
+    t.child[0].threshold = 0;
+    t.child[1].threshold = 2;
+    t.child[2].threshold = 6;
+    xy[0] = 0;
+    xy[1] = 0;
+    lx_anim_tree_weights(&t, xy, w);
+    CHECK(NEAR(w[0], 1, 1e-5f) && NEAR(w[1], 0, 1e-5f), "1D on a threshold is all that motion (%g %g)", w[0], w[1]);
+    xy[0] = 1;
+    lx_anim_tree_weights(&t, xy, w);
+    CHECK(NEAR(w[0], 0.5f, 1e-5f) && NEAR(w[1], 0.5f, 1e-5f) && NEAR(w[2], 0, 1e-5f),
+          "1D halfway between two is half each, and nothing of the third (%g %g %g)", w[0], w[1], w[2]);
+    xy[0] = 4;
+    lx_anim_tree_weights(&t, xy, w);
+    CHECK(NEAR(w[1], 0.5f, 1e-5f) && NEAR(w[2], 0.5f, 1e-5f), "1D blends the pair it sits between (%g %g)", w[1], w[2]);
+    xy[0] = 99;
+    lx_anim_tree_weights(&t, xy, w);
+    CHECK(NEAR(w[2], 1, 1e-5f), "1D past the end holds the last motion (%g)", w[2]);
+    xy[0] = -5;
+    lx_anim_tree_weights(&t, xy, w);
+    CHECK(NEAR(w[0], 1, 1e-5f), "1D before the start holds the first (%g)", w[0]);
+    xy[0] = (float)NAN;
+    lx_anim_tree_weights(&t, xy, w);
+    CHECK(NEAR(w[0] + w[1] + w[2], 1, 1e-4f), "a NaN parameter still produces usable weights");
+
+    /* out of order thresholds are the same tree */
+    memset(&t, 0, sizeof t);
+    t.type = LX_AT_1D;
+    t.child_count = 3;
+    t.child[0].threshold = 6;
+    t.child[1].threshold = 0;
+    t.child[2].threshold = 2;
+    xy[0] = 1;
+    xy[1] = 0;
+    lx_anim_tree_weights(&t, xy, w);
+    CHECK(NEAR(w[1], 0.5f, 1e-5f) && NEAR(w[2], 0.5f, 1e-5f), "1D does not need its thresholds in order (%g %g)", w[1], w[2]);
+
+    /* 2D cartesian: four motions around the origin */
+    memset(&t, 0, sizeof t);
+    t.type = LX_AT_2D_CARTESIAN;
+    t.child_count = 4;
+    t.child[0].px = -1; t.child[0].py = 0;
+    t.child[1].px = 1;  t.child[1].py = 0;
+    t.child[2].px = 0;  t.child[2].py = -1;
+    t.child[3].px = 0;  t.child[3].py = 1;
+    xy[0] = 1;
+    xy[1] = 0;
+    lx_anim_tree_weights(&t, xy, w);
+    CHECK(NEAR(w[1], 1, 1e-4f), "2D on a motion's own position is all of it (%g)", w[1]);
+    xy[0] = 0;
+    xy[1] = 0;
+    lx_anim_tree_weights(&t, xy, w);
+    {
+        float sum = w[0] + w[1] + w[2] + w[3];
+        CHECK(NEAR(sum, 1, 1e-4f) && NEAR(w[0], w[1], 1e-4f) && NEAR(w[2], w[3], 1e-4f),
+              "2D in the middle of a symmetric set is even (%g %g %g %g)", w[0], w[1], w[2], w[3]);
+    }
+    /* the weights move continuously, which is what stops the pose jumping */
+    float prev[LX_ANIM_MAX_CHILDREN];
+    xy[0] = 0.40f;
+    lx_anim_tree_weights(&t, xy, prev);
+    xy[0] = 0.41f;
+    lx_anim_tree_weights(&t, xy, w);
+    {
+        float worst = 0;
+        for (int i = 0; i < 4; i++) worst = lx_maxf(worst, fabsf(w[i] - prev[i]));
+        CHECK(worst < 0.05f, "a small step in the parameter is a small step in the weights (%g)", worst);
+    }
+
+    /* 2D directional: direction matters more than speed */
+    memset(&t, 0, sizeof t);
+    t.type = LX_AT_2D_DIRECTIONAL;
+    t.child_count = 3;
+    t.child[0].px = 0;  t.child[0].py = 1;    /* forward */
+    t.child[1].px = 0;  t.child[1].py = -1;   /* back */
+    t.child[2].px = 1;  t.child[2].py = 0;    /* right */
+    xy[0] = 0;
+    xy[1] = 2;
+    lx_anim_tree_weights(&t, xy, w);
+    CHECK(w[0] > 0.8f && w[1] < 0.05f, "directional: faster forwards is still forwards (%g forward, %g back)", w[0], w[1]);
+    xy[0] = 0.7f;
+    xy[1] = 0.7f;
+    lx_anim_tree_weights(&t, xy, w);
+    CHECK(w[0] > 0.2f && w[2] > 0.2f && w[1] < 0.1f, "directional: forward-right blends those two (%g %g %g)", w[0], w[2], w[1]);
+
+    /* Direct: a parameter per child, so the simple form shares the weight evenly */
+    memset(&t, 0, sizeof t);
+    t.type = LX_AT_DIRECT;
+    t.child_count = 2;
+    lx_anim_tree_weights(&t, xy, w);
+    CHECK(NEAR(w[0], 0.5f, 1e-5f) && NEAR(w[1], 0.5f, 1e-5f), "a direct tree with no lookup shares evenly (%g %g)", w[0], w[1]);
+
+    /* an empty tree asks for nothing, and one child takes everything */
+    memset(&t, 0, sizeof t);
+    t.type = LX_AT_1D;
+    t.child_count = 0;
+    lx_anim_tree_weights(&t, xy, w);
+    t.child_count = 1;
+    lx_anim_tree_weights(&t, xy, w);
+    CHECK(NEAR(w[0], 1, 1e-5f), "one motion takes the whole blend (%g)", w[0]);
+}
+
+/* Two-bone IK: the closed-form answer for a limb reaching a point. */
+static void test_ik(void) {
+    printf("inverse kinematics\n");
+    /* a straight-down leg: hip at the top, knee in the middle, ankle at the bottom */
+    LxVec3 hip = lx_v3(0, 2, 0), knee = lx_v3(0, 1, 0), ankle = lx_v3(0, 0, 0);
+    LxVec3 pole = lx_v3(0, 1, 2);   /* the knee points forward */
+    LxIkResult r;
+
+    /* a target the limb can reach: the ankle ends up there */
+    LxVec3 target = lx_v3(0.6f, 0.4f, 0.3f);
+    CHECK(lx_ik_two_bone(hip, knee, ankle, target, pole, lx_quat_identity(), lx_quat_identity(), 1, &r),
+          "the solver answers for a reachable target");
+    {
+        /* follow the bones through the rotations it gave back */
+        LxVec3 upper = lx_quat_rotate(r.root, lx_v3(0, -1, 0));
+        LxVec3 new_knee = lx_add3(hip, upper);
+        LxVec3 lower = lx_quat_rotate(r.mid, lx_v3(0, -1, 0));
+        LxVec3 new_ankle = lx_add3(new_knee, lower);
+        float err = lx_len3(lx_sub3(new_ankle, target));
+        CHECK(err < 1e-3f, "and the ankle lands on it (off by %g)", err);
+        float upper_len = lx_len3(lx_sub3(new_knee, hip)), lower_len = lx_len3(lx_sub3(new_ankle, new_knee));
+        CHECK(NEAR(upper_len, 1, 1e-4f) && NEAR(lower_len, 1, 1e-4f), "without stretching either bone (%g %g)", upper_len, lower_len);
+    }
+
+    /* a target further than the limb is long: it straightens towards it rather than tearing */
+    LxVec3 far_target = lx_v3(0, -6, 0);
+    CHECK(lx_ik_two_bone(hip, knee, ankle, far_target, pole, lx_quat_identity(), lx_quat_identity(), 1, &r), "an unreachable target still answers");
+    {
+        LxVec3 new_knee = lx_add3(hip, lx_quat_rotate(r.root, lx_v3(0, -1, 0)));
+        LxVec3 new_ankle = lx_add3(new_knee, lx_quat_rotate(r.mid, lx_v3(0, -1, 0)));
+        float reach = lx_len3(lx_sub3(new_ankle, hip));
+        CHECK(reach > 1.9f && reach <= 2.0001f, "reaching as far as it can, no further (%g of 2)", reach);
+        CHECK(!r.reached, "and it says so");
+    }
+
+    /* weight 0 leaves the limb alone; a part weight lands between */
+    LxQuat was = lx_quat_euler_deg(lx_v3(0, 0, 0));
+    CHECK(!lx_ik_two_bone(hip, knee, ankle, target, pole, was, was, 0, &r), "weight 0 does nothing");
+    lx_ik_two_bone(hip, knee, ankle, target, pole, was, was, 1, &r);
+    LxQuat full = r.root;
+    lx_ik_two_bone(hip, knee, ankle, target, pole, was, was, 0.5f, &r);
+    {
+        float d_full = fabsf(r.root.x * full.x + r.root.y * full.y + r.root.z * full.z + r.root.w * full.w);
+        float d_was = fabsf(r.root.x * was.x + r.root.y * was.y + r.root.z * was.z + r.root.w * was.w);
+        CHECK(d_full < 0.9999f && d_was < 0.9999f, "half weight is part of the way (%g to the answer, %g to the pose)", d_full, d_was);
+    }
+
+    /* a limb with no length has nothing to solve */
+    CHECK(!lx_ik_two_bone(hip, hip, hip, target, pole, was, was, 1, &r), "a limb with no length is refused");
+    /* a target on top of the hip, and a pole in line with the limb: no NaN, no crash */
+    CHECK(lx_ik_two_bone(hip, knee, ankle, hip, pole, was, was, 1, &r) || true, "a target at the root does not crash");
+    lx_ik_two_bone(hip, knee, ankle, lx_v3(0, 1.2f, 0), lx_v3(0, 0, 0), was, was, 1, &r);
+    CHECK(r.root.w == r.root.w && r.mid.w == r.mid.w, "a pole in line with the limb gives no NaN");
+}
+
+/* The animator graph asset: its text format, and the editing helpers that keep it consistent. */
+static void test_anim_graph_asset(void) {
+    printf("animator graph assets\n");
+    LxAnimGraph *g = lx_anim_graph_new("Hero");
+    CHECK(g && g->layer_count == 1 && g->layers[0].state_count == 1, "a new graph has a base layer with one state");
+    CHECK(!strcmp(g->layers[0].start, g->layers[0].states[0].name), "and starts in it");
+
+    lx_anim_add_param(g, "Speed", LX_AP_FLOAT);
+    lx_anim_add_param(g, "Grounded", LX_AP_BOOL);
+    lx_anim_add_param(g, "Attack", LX_AP_TRIGGER);
+    g->params[0].f = 0.25f;
+    LxAnimLayer *base = &g->layers[0];
+    LxAnimNode *idle = &base->states[0];
+    lx_strcpy(idle->name, sizeof idle->name, "Idle");
+    lx_strcpy(idle->clip, sizeof idle->clip, "Models/Hero.fbx#Idle");
+    lx_strcpy(base->start, sizeof base->start, "Idle");
+    LxAnimNode *run = lx_anim_add_state(g, base, "Run", 400, 120);
+    lx_strcpy(run->clip, sizeof run->clip, "Models/Hero.fbx#Run");
+    run->foot_ik = true;
+    lx_strcpy(run->tag, sizeof run->tag, "Locomotion");
+    LxAnimTransition *t = lx_anim_add_transition(&base->states[0], "Run");
+    t->has_exit_time = false;
+    t->duration = 0.15f;
+    lx_anim_add_cond(t, "Speed", LX_AC_GREATER, 0.1f);
+    lx_anim_add_cond(t, "Grounded", LX_AC_IF, 0);
+    LxAnimTransition *any = lx_anim_add_any_transition(base, "Idle");
+    lx_anim_add_cond(any, "Attack", LX_AC_IF, 0);
+    /* a second layer with a mask and a blend tree state */
+    LxAnimLayer *upper = lx_anim_add_layer(g, "Upper Body");
+    upper->weight = 0.5f;
+    upper->blend = LX_ABM_ADDITIVE;
+    upper->mask = 1ull << LX_HB_CHEST;
+    LxAnimNode *aim = lx_anim_add_state(g, upper, "Aim", 200, 80);
+    aim->motion = LX_AM_TREE;
+    aim->tree = lx_anim_add_tree(g, LX_AT_2D_CARTESIAN);
+    lx_strcpy(g->trees[aim->tree].param_x, LX_ANIM_NAME, "Speed");
+    g->trees[aim->tree].child_count = 2;
+    lx_strcpy(g->trees[aim->tree].child[0].clip, LX_REF_MAX, "Models/Hero.fbx#AimLeft");
+    lx_strcpy(g->trees[aim->tree].child[1].clip, LX_REF_MAX, "Models/Hero.fbx#AimRight");
+    g->trees[aim->tree].child[1].px = 1;
+    lx_strcpy(upper->start, sizeof upper->start, "Aim");
+
+    /* round trip: everything comes back */
+    char *text = lx_anim_graph_to_text(g);
+    LxAnimGraph *b = lx_anim_graph_from_text(text);
+    CHECK(b != NULL, "the text parses back");
+    if (b) {
+        CHECK(!strcmp(b->name, "Hero") && b->param_count == 3 && b->layer_count == 2 && b->tree_count == 1,
+              "name, parameters, layers and trees survive (%d %d %d)", b->param_count, b->layer_count, b->tree_count);
+        CHECK(!strcmp(b->params[0].name, "Speed") && b->params[0].type == LX_AP_FLOAT && NEAR(b->params[0].f, 0.25f, 1e-5f) &&
+              b->params[2].type == LX_AP_TRIGGER, "a parameter's name, type and starting value survive");
+        const LxAnimLayer *l0 = &b->layers[0];
+        CHECK(l0->state_count == 2 && !strcmp(l0->start, "Idle"), "the base layer's states and starting state survive");
+        CHECK(!strcmp(l0->states[1].clip, "Models/Hero.fbx#Run") && l0->states[1].foot_ik &&
+              !strcmp(l0->states[1].tag, "Locomotion"), "a state's clip, foot IK and tag survive");
+        const LxAnimTransition *bt = l0->states[0].trans_count ? &l0->states[0].trans[0] : NULL;
+        CHECK(bt && !strcmp(bt->to, "Run") && !bt->has_exit_time && NEAR(bt->duration, 0.15f, 1e-5f) && bt->cond_count == 2,
+              "a transition's target, exit time, duration and conditions survive");
+        CHECK(bt && !strcmp(bt->cond[0].param, "Speed") && bt->cond[0].mode == LX_AC_GREATER && NEAR(bt->cond[0].value, 0.1f, 1e-5f) &&
+              bt->cond[1].mode == LX_AC_IF, "each condition's parameter, test and threshold survive");
+        CHECK(l0->any_count == 1 && !strcmp(l0->any[0].to, "Idle") && l0->any[0].cond_count == 1, "Any State transitions survive");
+        const LxAnimLayer *l1 = &b->layers[1];
+        CHECK(!strcmp(l1->name, "Upper Body") && NEAR(l1->weight, 0.5f, 1e-5f) && l1->blend == LX_ABM_ADDITIVE &&
+              l1->mask == (1ull << LX_HB_CHEST), "a layer's name, weight, blending and mask survive");
+        CHECK(l1->state_count == 1 && l1->states[0].motion == LX_AM_TREE && l1->states[0].tree == 0,
+              "a blend tree state keeps its tree");
+        CHECK(b->trees[0].type == LX_AT_2D_CARTESIAN && b->trees[0].child_count == 2 &&
+              !strcmp(b->trees[0].child[1].clip, "Models/Hero.fbx#AimRight") && NEAR(b->trees[0].child[1].px, 1, 1e-5f),
+              "the tree's type, motions and positions survive");
+        /* and writing it again gives the same text, so the format is stable */
+        char *again = lx_anim_graph_to_text(b);
+        CHECK(again && !strcmp(again, text), "writing it again gives identical text");
+        lx_free(again);
+        lx_anim_graph_free(b);
+    }
+    lx_free(text);
+
+    /* a condition on a parameter whose name holds spaces still comes back whole */
+    {
+        LxAnimGraph *sp = lx_anim_graph_new("Spaces");
+        lx_anim_add_param(sp, "Move Speed X", LX_AP_FLOAT);
+        LxAnimTransition *st = lx_anim_add_transition(&sp->layers[0].states[0], sp->layers[0].states[0].name);
+        st->to_self = true;
+        lx_anim_add_cond(st, "Move Speed X", LX_AC_LESS, -2.5f);
+        char *txt = lx_anim_graph_to_text(sp);
+        LxAnimGraph *rb = lx_anim_graph_from_text(txt);
+        CHECK(rb && rb->layers[0].states[0].trans_count == 1 &&
+              !strcmp(rb->layers[0].states[0].trans[0].cond[0].param, "Move Speed X") &&
+              NEAR(rb->layers[0].states[0].trans[0].cond[0].value, -2.5f, 1e-5f),
+              "a parameter name with spaces survives a condition (%s)",
+              rb && rb->layers[0].states[0].trans_count ? rb->layers[0].states[0].trans[0].cond[0].param : "gone");
+        lx_free(txt);
+        lx_anim_graph_free(rb);
+        lx_anim_graph_free(sp);
+    }
+
+    /* editing helpers keep references right */
+    base = &g->layers[0];
+    CHECK(lx_anim_rename_state(base, 1, "Sprint"), "a state renames");
+    CHECK(!strcmp(base->states[0].trans[0].to, "Sprint"), "and the transitions that pointed at it follow");
+    CHECK(!lx_anim_rename_state(base, 1, "Idle"), "a name already taken is refused");
+    CHECK(lx_anim_rename_param(g, 0, "Ground Speed"), "a parameter renames");
+    CHECK(!strcmp(base->states[0].trans[0].cond[0].param, "Ground Speed"), "and its conditions follow");
+    /* the condition on it and the blend tree that blends along it: both count */
+    CHECK(lx_anim_param_uses(g, "Ground Speed") == 2, "uses of a parameter are counted (%d)", lx_anim_param_uses(g, "Ground Speed"));
+    lx_anim_remove_state(base, 1);
+    CHECK(base->state_count == 1 && base->states[0].trans[0].to[0] == 0,
+          "deleting a state leaves the transitions that pointed at it unconnected");
+    {
+        char name[LX_ANIM_NAME];
+        lx_anim_unique_name(g, base, "Idle", name, sizeof name, 0);
+        CHECK(strcmp(name, "Idle") != 0, "a new state gets a name of its own (%s)", name);
+    }
+    /* problems are found */
+    {
+        char lines[8][160];
+        int n = lx_anim_graph_problems(g, lines, 8);
+        CHECK(n > 0, "the unconnected transition is reported (%d problems: %s)", n, n ? lines[0] : "");
+    }
+    CHECK(g->layer_count == 2, "two layers");
+    lx_anim_remove_layer(g, 1);
+    CHECK(g->layer_count == 1, "a layer is removed");
+    lx_anim_remove_layer(g, 0);
+    CHECK(g->layer_count == 1, "but the base layer stays: a graph always has one");
+    lx_anim_graph_free(g);
+
+    /* text that is not an animator graph at all */
+    CHECK(lx_anim_graph_from_text("") == NULL, "empty text is not a graph");
+    CHECK(lx_anim_graph_from_text("[nonsense]\nkey = value\n") == NULL, "text with no layers is not a graph");
+    {
+        /* a graph naming a tree that is not there, and a tree pointing at itself */
+        LxAnimGraph *bad = lx_anim_graph_from_text("[animator]\nname = Bad\n[layer]\nname = L\n[state]\nname = S\nmotion = tree\ntree = 7\n");
+        CHECK(bad && bad->layers[0].states[0].tree == -1, "a state naming a tree that is gone loses it rather than reading rubbish");
+        lx_anim_graph_free(bad);
+    }
+}
+
+/* The runtime: states play, parameters drive transitions, triggers are consumed, layers blend. */
+static void test_animator_runtime(void) {
+    printf("animator runtime\n");
+    char dir[LX_PATH_MAX], path[LX_PATH_MAX];
+    lx_path_join(dir, sizeof dir, tmpdir(), "luxora_test_animator");
+    lx_path_remove(dir);
+    lx_mkdir_p(dir);
+    lx_assets_set_root(dir);
+    lx_path_join(path, sizeof path, dir, "BarModel.fbx");
+    lx_file_write(path, TEST_FBX, strlen(TEST_FBX));
+
+    /* a graph: Idle, then Run when Speed > 1, back when it drops, and Hit from anywhere on a trigger */
+    LxAnimGraph *g = lx_anim_graph_new("Bar");
+    LxAnimLayer *base = &g->layers[0];
+    lx_strcpy(base->states[0].name, LX_ANIM_NAME, "Idle");
+    lx_strcpy(base->states[0].clip, LX_REF_MAX, "BarModel.fbx#Bend");
+    lx_strcpy(base->start, sizeof base->start, "Idle");
+    LxAnimNode *run = lx_anim_add_state(g, base, "Run", 300, 0);
+    lx_strcpy(run->clip, sizeof run->clip, "BarModel.fbx#Bend");
+    LxAnimNode *hit = lx_anim_add_state(g, base, "Hit", 300, 200);
+    lx_strcpy(hit->clip, sizeof hit->clip, "BarModel.fbx#Bend");
+    hit->loop = false;
+    lx_anim_add_param(g, "Speed", LX_AP_FLOAT);
+    lx_anim_add_param(g, "Hurt", LX_AP_TRIGGER);
+    LxAnimTransition *to_run = lx_anim_add_transition(&base->states[0], "Run");
+    to_run->has_exit_time = false;
+    to_run->duration = 0;
+    lx_anim_add_cond(to_run, "Speed", LX_AC_GREATER, 1.0f);
+    LxAnimTransition *to_idle = lx_anim_add_transition(&base->states[1], "Idle");
+    to_idle->has_exit_time = false;
+    to_idle->duration = 0;
+    lx_anim_add_cond(to_idle, "Speed", LX_AC_LESS, 1.0f);
+    LxAnimTransition *to_hit = lx_anim_add_any_transition(base, "Hit");
+    to_hit->duration = 0;
+    lx_anim_add_cond(to_hit, "Hurt", LX_AC_IF, 0);
+    lx_path_join(path, sizeof path, dir, "Bar.lxanim");
+    CHECK(lx_anim_graph_save(g, path), "the graph saves");
+    lx_anim_graph_free(g);
+
+    LxScene *s = lx_scene_create("Animator");
+    LxEntity root = lx_model_instantiate(s, "BarModel.fbx", lx_v3(0, 0, 0), 0);
+    LxAnimator *an = lx_get_animator(s, root);
+    CHECK(an != NULL, "the model has an Animator");
+    if (!an) { lx_scene_destroy(s); return; }
+    lx_strcpy(an->graph, sizeof an->graph, "Bar.lxanim");
+    an->play_on_start = false;
+
+    lx_animator_update(s, root, 0.016f);
+    CHECK(lx_animator_layer_count(s, root) == 1, "the animator binds its graph (%d layers)", lx_animator_layer_count(s, root));
+    CHECK(!strcmp(lx_animator_state(s, root, 0), "Idle"), "it starts in the layer's starting state (%s)", lx_animator_state(s, root, 0));
+    CHECK(lx_animator_has_param(s, root, "Speed") && !lx_animator_has_param(s, root, "Nothing"), "its parameters are there");
+
+    /* normalised time runs forward, in cycles of the clip (1 second long) */
+    for (int i = 0; i < 10; i++) lx_animator_update(s, root, 0.05f);
+    CHECK(NEAR(lx_animator_normalized_time(s, root, 0), 0.5f + 0.016f, 0.02f),
+          "progress is counted in cycles (%g)", lx_animator_normalized_time(s, root, 0));
+
+    /* a parameter the transition is waiting on: it goes */
+    lx_animator_set_float(s, root, "Speed", 4);
+    CHECK(NEAR(lx_animator_get_float(s, root, "Speed"), 4, 1e-5f), "a float parameter reads back");
+    lx_animator_update(s, root, 0.016f);
+    CHECK(!strcmp(lx_animator_state(s, root, 0), "Run"), "the condition fires the transition (%s)", lx_animator_state(s, root, 0));
+    lx_animator_set_float(s, root, "Speed", 0);
+    lx_animator_update(s, root, 0.016f);
+    CHECK(!strcmp(lx_animator_state(s, root, 0), "Idle"), "and back again when it no longer holds (%s)", lx_animator_state(s, root, 0));
+
+    /* a trigger fires one transition and clears itself */
+    lx_animator_set_trigger(s, root, "Hurt");
+    CHECK(lx_animator_get_bool(s, root, "Hurt"), "a trigger is set");
+    lx_animator_update(s, root, 0.016f);
+    CHECK(!strcmp(lx_animator_state(s, root, 0), "Hit"), "an Any State transition takes it (%s)", lx_animator_state(s, root, 0));
+    CHECK(!lx_animator_get_bool(s, root, "Hurt"), "and the trigger is spent");
+    for (int i = 0; i < 40; i++) lx_animator_update(s, root, 0.05f);
+    CHECK(!strcmp(lx_animator_state(s, root, 0), "Hit"), "with nothing to leave for, it stays (%s)", lx_animator_state(s, root, 0));
+    CHECK(lx_animator_normalized_time(s, root, 0) <= 1.0001f, "a state that does not loop stops at the end (%g)",
+          lx_animator_normalized_time(s, root, 0));
+
+    /* going somewhere directly, whatever the transitions say */
+    CHECK(lx_animator_play_state(s, root, 0, "Run", 0), "Play Animator State finds the state");
+    CHECK(!strcmp(lx_animator_state(s, root, 0), "Run"), "and goes there (%s)", lx_animator_state(s, root, 0));
+    CHECK(!lx_animator_play_state(s, root, 0, "Nowhere", 0), "a state that is not there is refused");
+
+    /* a cross-fade is reported while it runs */
+    lx_animator_play_state(s, root, 0, "Idle", 0.5f);
+    CHECK(lx_animator_in_transition(s, root, 0), "a fade is in progress");
+    lx_animator_update(s, root, 0.6f);
+    CHECK(!lx_animator_in_transition(s, root, 0), "and over when its time is up");
+
+    /* the bones actually move: the animated bone is where the clip says at half way */
+    LxEntity tip = lx_entity_find(s, "Tip");
+    lx_animator_play_state(s, root, 0, "Idle", 0);
+    for (int i = 0; i < 10; i++) lx_animator_update(s, root, 0.05f);
+    CHECK(tip && NEAR(lx_entity_euler(s, tip).z, 45, 2.0f), "the graph poses the skeleton (%g deg)", tip ? lx_entity_euler(s, tip).z : 0);
+
+    /* parameters a graph does not have are quietly ignored rather than fatal */
+    lx_animator_set_float(s, root, "Nothing", 5);
+    lx_animator_set_trigger(s, root, "Nothing");
+    CHECK(NEAR(lx_animator_get_float(s, root, "Nothing"), 0, 1e-5f), "an unknown parameter reads 0");
+    lx_animator_set_float(s, root, "Speed", (float)NAN);
+    CHECK(lx_animator_get_float(s, root, "Speed") == lx_animator_get_float(s, root, "Speed"), "a NaN is not let in");
+
+    /* layers */
+    CHECK(NEAR(lx_animator_layer_weight(s, root, 0), 1, 1e-5f), "the base layer is always whole");
+    lx_animator_set_layer_weight(s, root, 0, 0.2f);
+    CHECK(NEAR(lx_animator_layer_weight(s, root, 0), 1, 1e-5f), "and cannot be turned down");
+    lx_animator_set_layer_weight(s, root, 5, 0.5f);   /* a layer that is not there: nothing happens */
+
+    /* IK goals and look-at are accepted even on a generic rig (there is simply nothing to solve) */
+    lx_animator_set_ik_goal(s, root, LX_IK_LEFT_HAND, lx_v3(1, 1, 1), 1);
+    lx_animator_set_look_at(s, root, lx_v3(0, 2, 5), 1);
+    lx_animator_update(s, root, 0.016f);
+    lx_animator_clear_ik_goal(s, root, LX_IK_LEFT_HAND);
+    lx_animator_clear_look_at(s, root);
+    an = lx_get_animator(s, root);
+    an->foot_ik = true;
+    an->foot_ik_weight = 1;
+    lx_animator_update(s, root, 0.016f);
+    CHECK(true, "foot IK on a rig with no avatar is a no-op, not a crash");
+
+    /* editing the graph while it plays: the animator re-binds and keeps its state */
+    LxAnimGraph *live = lx_asset_anim_graph("Bar.lxanim");
+    CHECK(live != NULL, "the graph is the cached asset");
+    if (live) {
+        lx_animator_set_float(s, root, "Speed", 7);
+        lx_animator_update(s, root, 0.016f);
+        const char *before = lx_animator_state(s, root, 0);
+        char kept[LX_ANIM_NAME];
+        lx_strcpy(kept, sizeof kept, before);
+        live->layers[0].states[1].speed = 2.0f;
+        lx_anim_graph_touch(live);
+        lx_animator_update(s, root, 0.016f);
+        CHECK(!strcmp(lx_animator_state(s, root, 0), kept), "an edit mid-play keeps the state that was playing (%s)",
+              lx_animator_state(s, root, 0));
+        CHECK(NEAR(lx_animator_get_float(s, root, "Speed"), 7, 1e-5f), "and the parameter values");
+    }
+
+    /* no graph: the animator goes back to playing single clips */
+    an = lx_get_animator(s, root);
+    an->graph[0] = 0;
+    lx_animator_update(s, root, 0.016f);
+    CHECK(lx_animator_layer_count(s, root) == 0, "clearing the graph unbinds it");
+    lx_animator_play(s, root, "BarModel.fbx#Bend", 0);
+    lx_animator_update(s, root, 0.016f);
+    CHECK(lx_animator_playing(s, root), "and the clip animator still works");
+
+    /* a graph that is not there is a warning, not a crash */
+    an = lx_get_animator(s, root);
+    lx_strcpy(an->graph, sizeof an->graph, "Missing.lxanim");
+    lx_animator_update(s, root, 0.016f);
+    CHECK(lx_animator_layer_count(s, root) == 0, "a missing graph leaves the animator with nothing to play");
+
+    lx_scene_destroy(s);
+    lx_anim_graphs_clear();
+    /* the model cache is keyed by name alone, and the next test writes its own BarModel.fbx */
+    lx_model_reload("BarModel.fbx");
+}
+
+/* Exit time: a transition that waits for the clip to get where it should be before it goes. */
+static void test_anim_exit_time(void) {
+    printf("animator exit time\n");
+    char dir[LX_PATH_MAX], path[LX_PATH_MAX];
+    lx_path_join(dir, sizeof dir, tmpdir(), "luxora_test_exit");
+    lx_path_remove(dir);
+    lx_mkdir_p(dir);
+    lx_assets_set_root(dir);
+    lx_path_join(path, sizeof path, dir, "BarModel.fbx");
+    lx_file_write(path, TEST_FBX, strlen(TEST_FBX));
+
+    LxAnimGraph *g = lx_anim_graph_new("Exit");
+    LxAnimLayer *base = &g->layers[0];
+    lx_strcpy(base->states[0].name, LX_ANIM_NAME, "Swing");
+    lx_strcpy(base->states[0].clip, LX_REF_MAX, "BarModel.fbx#Bend");
+    base->states[0].loop = false;
+    lx_strcpy(base->start, sizeof base->start, "Swing");
+    LxAnimNode *rest = lx_anim_add_state(g, base, "Rest", 300, 0);
+    lx_strcpy(rest->clip, sizeof rest->clip, "BarModel.fbx#Bend");
+    /* no conditions at all: the exit time is the whole of it */
+    LxAnimTransition *t = lx_anim_add_transition(&base->states[0], "Rest");
+    t->has_exit_time = true;
+    t->exit_time = 0.75f;
+    t->duration = 0;
+    lx_path_join(path, sizeof path, dir, "Exit.lxanim");
+    lx_anim_graph_save(g, path);
+    lx_anim_graph_free(g);
+
+    LxScene *s = lx_scene_create("ExitTime");
+    LxEntity root = lx_model_instantiate(s, "BarModel.fbx", lx_v3(0, 0, 0), 0);
+    LxAnimator *an = lx_get_animator(s, root);
+    if (!an) { lx_scene_destroy(s); return; }
+    lx_strcpy(an->graph, sizeof an->graph, "Exit.lxanim");
+    an->play_on_start = false;
+
+    lx_animator_update(s, root, 0.0f);
+    CHECK(!strcmp(lx_animator_state(s, root, 0), "Swing"), "it starts in Swing (%s)", lx_animator_state(s, root, 0));
+    /* the clip is one second long: after half of it, the exit time has not come */
+    for (int i = 0; i < 10; i++) lx_animator_update(s, root, 0.05f);
+    CHECK(!strcmp(lx_animator_state(s, root, 0), "Swing"), "half way through it stays (%s at %g)",
+          lx_animator_state(s, root, 0), lx_animator_normalized_time(s, root, 0));
+    /* past three quarters, it goes */
+    for (int i = 0; i < 8; i++) lx_animator_update(s, root, 0.05f);
+    CHECK(!strcmp(lx_animator_state(s, root, 0), "Rest"), "past the exit time it goes (%s)", lx_animator_state(s, root, 0));
+
+    lx_scene_destroy(s);
+    lx_anim_graphs_clear();
+    lx_model_reload("BarModel.fbx");
+}
+
 static void test_models(void) {
     printf("models\n");
     char dir[LX_PATH_MAX], path[LX_PATH_MAX];
@@ -2376,7 +2887,7 @@ static void test_state_graph(void) {
     for (int i = 0; i < 8; i++) lx_scene_simulate(s, 0.05f);
     CHECK(!strcmp(lx_fsm_current_state(s, f, 0), "End"), "the Wait in R finishes and sends DONE (%s)", lx_fsm_current_state(s, f, 0));
     /* a name collision between two built-in actions would silently drop one, so the count would fall */
-    CHECK(lx_fsm_action_count() >= 480, "the whole built-in action library is registered (%d)", lx_fsm_action_count());
+    CHECK(lx_fsm_action_count() >= 500, "the whole built-in action library is registered (%d)", lx_fsm_action_count());
 
     /* a runaway loop is stopped, not hung */
     const char *loop = "[graph]\nstart = A\n[state]\nname = A\ntransition = FINISHED > B\n[state]\nname = B\ntransition = FINISHED > A\n";
@@ -2480,6 +2991,11 @@ int main(void) {
     test_gameplay();
     test_jpeg();
     test_pose_blend();
+    test_blend_trees();
+    test_ik();
+    test_anim_graph_asset();
+    test_animator_runtime();
+    test_anim_exit_time();
     test_models();
     test_state_graph();
     test_fsm_fuzz();
