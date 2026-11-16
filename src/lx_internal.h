@@ -366,6 +366,32 @@ void lx_gameplay_free(LxScene *s);
 void lx_anim_free_entity(LxEntityData *d);                 /* src/model/anim.c: after a component is removed */
 void lx_scene_animation_begin(LxScene *s);
 void lx_anim_release(LxEntityData *d);                     /* the object is destroyed */
+
+/* ---------------- poses (src/model/anim.c) ----------------
+ * A pose is one local transform per node of a model's skeleton. Everything that can produce a pose - a
+ * clip, a blend tree, an animator layer - produces one of these, so anything can be mixed with anything
+ * else by the same weighted blend.
+ *
+ * Blending: begin, add each contributor with its weight, then end. Positions and scales are a weighted
+ * mean; rotations are accumulated with their signs aligned and normalised at the end, which is the usual
+ * nlerp blend and is what makes a blend tree's output continuous as its weights move. Weights need not
+ * sum to 1 - the result is divided by the total - so a caller can hand out raw weights and not care. */
+typedef struct LxPose {
+    LxVec3 *pos;
+    LxQuat *rot;
+    LxVec3 *scl;
+    int count;      /* nodes; the arrays are this long */
+} LxPose;
+
+bool lx_pose_alloc(LxPose *p, int nodes);   /* false when it cannot allocate; a zeroed pose is safe to free */
+void lx_pose_free(LxPose *p);
+void lx_pose_rest(LxPose *p, const LxModel *m);          /* the model's own rest pose */
+void lx_pose_copy(LxPose *dst, const LxPose *src);
+void lx_pose_blend_begin(LxPose *acc, float *total);
+void lx_pose_blend_add(LxPose *acc, const LxPose *in, float weight, float *total);
+/* Divides through by the total weight. With no weight at all the pose is left as `fallback` (or
+ * untouched when that is NULL), so a blend tree with every weight at zero still poses the skeleton. */
+void lx_pose_blend_end(LxPose *acc, float total, const LxPose *fallback);
 LxMesh *lx_model_mesh_ref(const char *ref);                 /* "Models/x.fbx#mesh3" (src/model/model.c) */
 void lx_models_clear(void);
 LxMesh *lx_skin_mesh_for(LxScene *s, LxEntity e);           /* the deformed mesh to draw, or NULL */

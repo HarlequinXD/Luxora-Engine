@@ -25,9 +25,8 @@ typedef struct LxAnimState {
     float time, prev_time, fade, fade_len, speed;
     bool playing, loop, started;
     uint32_t generation;   /* models reloaded since -> rebuild (clip pointers would dangle) */
-    /* scratch poses */
-    LxVec3 *pos, *scl, *pos2, *scl2;
-    LxQuat *rot, *rot2;
+    /* out is the pose that gets applied to the bones; a and b are what gets blended into it */
+    LxPose out, a, b;
 } LxAnimState;
 
 typedef struct LxSkinState {
@@ -42,6 +41,92 @@ typedef struct LxSkinState {
 } LxSkinState;
 
 static void binding_free(Binding *b) { lx_free(b->track_of); memset(b, 0, sizeof *b); }
+
+/* ======================================================================
+ *  poses and weighted blending
+ * ====================================================================== */
+static LxQuat quat4(float x, float y, float z, float w) { LxQuat q = {x, y, z, w}; return q; }
+
+bool lx_pose_alloc(LxPose *p, int nodes) {
+    size_t n = (size_t)(nodes > 0 ? nodes : 1);
+    memset(p, 0, sizeof *p);
+    p->pos = lx_alloc(sizeof(LxVec3) * n);
+    p->rot = lx_alloc(sizeof(LxQuat) * n);
+    p->scl = lx_alloc(sizeof(LxVec3) * n);
+    if (!p->pos || !p->rot || !p->scl) { lx_pose_free(p); return false; }
+    p->count = nodes > 0 ? nodes : 0;
+    return true;
+}
+
+void lx_pose_free(LxPose *p) {
+    if (!p) return;
+    lx_free(p->pos);
+    lx_free(p->rot);
+    lx_free(p->scl);
+    memset(p, 0, sizeof *p);
+}
+
+void lx_pose_rest(LxPose *p, const LxModel *m) {
+    if (!p || !m) return;
+    int n = p->count < m->node_count ? p->count : m->node_count;
+    for (int i = 0; i < n; i++) {
+        p->pos[i] = m->nodes[i].pos;
+        p->rot[i] = m->nodes[i].rot;
+        p->scl[i] = m->nodes[i].scale;
+    }
+}
+
+void lx_pose_copy(LxPose *dst, const LxPose *src) {
+    if (!dst || !src) return;
+    int n = dst->count < src->count ? dst->count : src->count;
+    for (int i = 0; i < n; i++) {
+        dst->pos[i] = src->pos[i];
+        dst->rot[i] = src->rot[i];
+        dst->scl[i] = src->scl[i];
+    }
+}
+
+void lx_pose_blend_begin(LxPose *acc, float *total) {
+    LX_UNUSED(acc);
+    if (total) *total = 0;
+}
+
+void lx_pose_blend_add(LxPose *acc, const LxPose *in, float weight, float *total) {
+    if (!acc || !in || !total || !(weight > 0) || weight != weight) return;   /* ignore zero, negative and NaN */
+    int n = acc->count < in->count ? acc->count : in->count;
+    bool first = !(*total > 0);
+    for (int i = 0; i < n; i++) {
+        LxQuat q = in->rot[i];
+        if (first) {
+            acc->pos[i] = lx_scale3(in->pos[i], weight);
+            acc->scl[i] = lx_scale3(in->scl[i], weight);
+            acc->rot[i] = quat4(q.x * weight, q.y * weight, q.z * weight, q.w * weight);
+        } else {
+            acc->pos[i] = lx_madd3(acc->pos[i], in->pos[i], weight);
+            acc->scl[i] = lx_madd3(acc->scl[i], in->scl[i], weight);
+            /* align the incoming rotation with what has accumulated: q and -q are the same rotation,
+               and adding the wrong one blends the long way round */
+            LxQuat a = acc->rot[i];
+            if (a.x * q.x + a.y * q.y + a.z * q.z + a.w * q.w < 0) { q.x = -q.x; q.y = -q.y; q.z = -q.z; q.w = -q.w; }
+            acc->rot[i] = quat4(a.x + q.x * weight, a.y + q.y * weight, a.z + q.z * weight, a.w + q.w * weight);
+        }
+    }
+    *total += weight;
+}
+
+void lx_pose_blend_end(LxPose *acc, float total, const LxPose *fallback) {
+    if (!acc) return;
+    if (!(total > 0)) {
+        if (fallback) lx_pose_copy(acc, fallback);
+        return;
+    }
+    float inv = 1.0f / total;
+    for (int i = 0; i < acc->count; i++) {
+        acc->pos[i] = lx_scale3(acc->pos[i], inv);
+        acc->scl[i] = lx_scale3(acc->scl[i], inv);
+        acc->rot[i] = lx_quat_norm(acc->rot[i]);   /* normalising absorbs the weight sum */
+    }
+}
 
 static bool same_ci(const char *a, const char *b) {
     for (; *a && *b; a++, b++) if ((*a | 32) != (*b | 32)) return false;
@@ -232,12 +317,9 @@ static void state_free(LxAnimState *st) {
     binding_free(&st->cur);
     binding_free(&st->prev);
     lx_free(st->ents);
-    lx_free(st->pos);
-    lx_free(st->rot);
-    lx_free(st->scl);
-    lx_free(st->pos2);
-    lx_free(st->rot2);
-    lx_free(st->scl2);
+    lx_pose_free(&st->out);
+    lx_pose_free(&st->a);
+    lx_pose_free(&st->b);
     lx_free(st);
 }
 
@@ -291,12 +373,9 @@ static LxAnimState *state_for(LxScene *s, LxEntity e) {
     st->ent_count = m->node_count;
     size_t n = (size_t)(m->node_count ? m->node_count : 1);
     st->ents = lx_calloc(n, sizeof(LxEntity));
-    st->pos = lx_alloc(sizeof(LxVec3) * n);
-    st->scl = lx_alloc(sizeof(LxVec3) * n);
-    st->rot = lx_alloc(sizeof(LxQuat) * n);
-    st->pos2 = lx_alloc(sizeof(LxVec3) * n);
-    st->scl2 = lx_alloc(sizeof(LxVec3) * n);
-    st->rot2 = lx_alloc(sizeof(LxQuat) * n);
+    lx_pose_alloc(&st->out, (int)n);
+    lx_pose_alloc(&st->a, (int)n);
+    lx_pose_alloc(&st->b, (int)n);
     for (int i = 0; i < m->node_count; i++) st->ents[i] = find_descendant(s, e, m->nodes[i].name);
     st->speed = 1;
     st->started = started;
@@ -367,10 +446,10 @@ static void apply_pose(LxScene *s, LxAnimState *st) {
         LxEntity b = st->ents[i];
         LxEntityData *bd = b ? lx_entity_data(s, b) : NULL;
         if (!bd) continue;
-        bd->position = st->pos[i];
-        bd->rotation = st->rot[i];
-        bd->scale = st->scl[i];
-        bd->euler = lx_quat_to_euler_deg(st->rot[i]);
+        bd->position = st->out.pos[i];
+        bd->rotation = st->out.rot[i];
+        bd->scale = st->out.scl[i];
+        bd->euler = lx_quat_to_euler_deg(st->out.rot[i]);
     }
 }
 
@@ -381,11 +460,7 @@ void lx_animator_reset_pose(LxScene *s, LxEntity e) {
     st->playing = false;
     st->time = 0;
     binding_free(&st->prev);
-    for (int i = 0; i < st->ent_count && i < st->model->node_count; i++) {
-        st->pos[i] = st->model->nodes[i].pos;
-        st->rot[i] = st->model->nodes[i].rot;
-        st->scl[i] = st->model->nodes[i].scale;
-    }
+    lx_pose_rest(&st->out, st->model);
     apply_pose(s, st);
 }
 
@@ -420,18 +495,18 @@ void lx_animator_update(LxScene *s, LxEntity e, float dt) {
     }
     LxModel *m = st->model;
     bool rm = d->animator.root_motion;
-    evaluate(&st->cur, m, st->time, st->loop, rm, st->pos, st->rot, st->scl);
+    evaluate(&st->cur, m, st->time, st->loop, rm, st->a.pos, st->a.rot, st->a.scl);
     if (st->prev.clip && st->fade_len > 0) {
+        /* cross-fade: the clip being left and the one being entered, blended by how far through it is */
         float w = lx_clampf(st->fade / st->fade_len, 0, 1);
-        evaluate(&st->prev, m, st->prev_time, true, rm, st->pos2, st->rot2, st->scl2);
-        for (int i = 0; i < m->node_count; i++) {
-            st->pos[i] = lx_lerp3(st->pos2[i], st->pos[i], w);
-            st->scl[i] = lx_lerp3(st->scl2[i], st->scl[i], w);
-            LxQuat a = st->rot2[i], b = st->rot[i];
-            if (a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w < 0) { b.x = -b.x; b.y = -b.y; b.z = -b.z; b.w = -b.w; }
-            LxQuat q = {a.x + (b.x - a.x) * w, a.y + (b.y - a.y) * w, a.z + (b.z - a.z) * w, a.w + (b.w - a.w) * w};
-            st->rot[i] = lx_quat_norm(q);
-        }
+        evaluate(&st->prev, m, st->prev_time, true, rm, st->b.pos, st->b.rot, st->b.scl);
+        float total;
+        lx_pose_blend_begin(&st->out, &total);
+        lx_pose_blend_add(&st->out, &st->b, 1.0f - w, &total);
+        lx_pose_blend_add(&st->out, &st->a, w, &total);
+        lx_pose_blend_end(&st->out, total, &st->a);
+    } else {
+        lx_pose_copy(&st->out, &st->a);
     }
     apply_pose(s, st);
 }

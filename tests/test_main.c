@@ -2022,6 +2022,77 @@ static void test_jpeg(void) {
     lx_free(junk);
 }
 
+/* Weighted pose blending: the foundation the animator's cross-fades, layers and blend trees all sit on. */
+static void test_pose_blend(void) {
+    printf("pose blending\n");
+    LxPose a, b, out;
+    CHECK(lx_pose_alloc(&a, 2) && lx_pose_alloc(&b, 2) && lx_pose_alloc(&out, 2), "poses allocate");
+
+    a.pos[0] = lx_v3(0, 0, 0);
+    a.scl[0] = lx_v3(1, 1, 1);
+    a.rot[0] = lx_quat_euler_deg(lx_v3(0, 0, 0));
+    b.pos[0] = lx_v3(10, 0, 0);
+    b.scl[0] = lx_v3(3, 3, 3);
+    b.rot[0] = lx_quat_euler_deg(lx_v3(0, 90, 0));
+    for (int i = 1; i < 2; i++) { a.pos[i] = b.pos[i] = lx_v3(0, 0, 0); a.scl[i] = b.scl[i] = lx_v3(1, 1, 1);
+                                  a.rot[i] = b.rot[i] = lx_quat_identity(); }
+
+    /* half each: the midpoint */
+    float total;
+    lx_pose_blend_begin(&out, &total);
+    lx_pose_blend_add(&out, &a, 0.5f, &total);
+    lx_pose_blend_add(&out, &b, 0.5f, &total);
+    lx_pose_blend_end(&out, total, &a);
+    CHECK(NEAR(out.pos[0].x, 5, 1e-4f) && NEAR(out.scl[0].x, 2, 1e-4f), "an even blend is the midpoint (%g %g)",
+          out.pos[0].x, out.scl[0].x);
+    CHECK(NEAR(lx_quat_to_euler_deg(out.rot[0]).y, 45, 0.5f), "and halfway round the turn (%g deg)",
+          lx_quat_to_euler_deg(out.rot[0]).y);
+
+    /* weights need not sum to 1: 3 and 1 is three quarters of the way */
+    lx_pose_blend_begin(&out, &total);
+    lx_pose_blend_add(&out, &a, 3.0f, &total);
+    lx_pose_blend_add(&out, &b, 1.0f, &total);
+    lx_pose_blend_end(&out, total, &a);
+    CHECK(NEAR(out.pos[0].x, 2.5f, 1e-4f), "raw weights are normalised by their total (%g)", out.pos[0].x);
+
+    /* one contributor only: exactly that pose, whatever the weight */
+    lx_pose_blend_begin(&out, &total);
+    lx_pose_blend_add(&out, &b, 0.25f, &total);
+    lx_pose_blend_end(&out, total, &a);
+    CHECK(NEAR(out.pos[0].x, 10, 1e-4f) && NEAR(out.scl[0].x, 3, 1e-4f), "a single contributor comes through unchanged (%g)",
+          out.pos[0].x);
+
+    /* zero, negative and NaN weights are ignored, and no weight at all leaves the fallback */
+    lx_pose_blend_begin(&out, &total);
+    lx_pose_blend_add(&out, &b, 0.0f, &total);
+    lx_pose_blend_add(&out, &b, -2.0f, &total);
+    lx_pose_blend_add(&out, &b, (float)NAN, &total);
+    lx_pose_blend_end(&out, total, &a);
+    CHECK(NEAR(out.pos[0].x, 0, 1e-4f), "with nothing to blend the fallback pose is kept (%g)", out.pos[0].x);
+
+    /* q and -q are the same rotation: blending must take the short way round, not through the far side */
+    a.rot[0] = lx_quat_euler_deg(lx_v3(0, 170, 0));
+    b.rot[0] = lx_quat_euler_deg(lx_v3(0, -170, 0));   /* 20 degrees apart across the wrap */
+    a.pos[0] = b.pos[0] = lx_v3(0, 0, 0);
+    a.scl[0] = b.scl[0] = lx_v3(1, 1, 1);
+    lx_pose_blend_begin(&out, &total);
+    lx_pose_blend_add(&out, &a, 0.5f, &total);
+    lx_pose_blend_add(&out, &b, 0.5f, &total);
+    lx_pose_blend_end(&out, total, &a);
+    {
+        float y = lx_quat_to_euler_deg(out.rot[0]).y;
+        CHECK(fabsf(y) > 175.0f, "a blend across the 180 degree wrap goes the short way (%g deg, not ~0)", y);
+        LxQuat q = out.rot[0];
+        CHECK(NEAR(sqrtf(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w), 1, 1e-4f), "the blended rotation is normalised");
+    }
+
+    lx_pose_free(&a);
+    lx_pose_free(&b);
+    lx_pose_free(&out);
+    CHECK(out.pos == NULL && out.count == 0, "freeing a pose clears it, so freeing twice is safe");
+    lx_pose_free(&out);
+}
+
 static void test_models(void) {
     printf("models\n");
     char dir[LX_PATH_MAX], path[LX_PATH_MAX];
@@ -2408,6 +2479,7 @@ int main(void) {
     test_game_ui();
     test_gameplay();
     test_jpeg();
+    test_pose_blend();
     test_models();
     test_state_graph();
     test_fsm_fuzz();
