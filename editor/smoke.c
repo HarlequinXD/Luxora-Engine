@@ -967,6 +967,14 @@ static void s_an_open(void) {
     ed_animator_open_asset("Animators/Smoke.lxanim");
     SMOKE_CHECK(ED.view_tabs && ED.view_tabs->tab_index == 2, "the Animator tab is shown");
     SMOKE_CHECK(ae_graph() != NULL && ae_layer() != NULL, "it shows the graph and its base layer");
+    /* the panel itself, and the inspector inside it: everything below needs these and nothing above
+       would notice they were missing */
+    SMOKE_CHECK(ED.animator_panel && AE.panel && AE.canvas, "the Animator panel is built (ED %d, panel %d, canvas %d)",
+                ED.animator_panel != NULL, AE.panel != NULL, AE.canvas != NULL);
+    SMOKE_CHECK(AE.insp_tabs && AE.insp_params && AE.insp_state && AE.insp_trans && AE.insp_layers,
+                "its inspector is built (tabs %d, params %d, state %d, transition %d, layers %d)",
+                AE.insp_tabs != NULL, AE.insp_params != NULL, AE.insp_state != NULL, AE.insp_trans != NULL,
+                AE.insp_layers != NULL);
 }
 static void s_an_states(void) {
     an_step_begin();
@@ -979,8 +987,12 @@ static void s_an_states(void) {
 }
 static void s_an_param(void) {
     an_step_begin();
+    /* force the rebuild rather than waiting a frame for the panel's own, which only runs while it shows */
+    AE.insp_dirty = true;
+    ae_inspector_frame();
     UiNode *b = find_node(ui_root(ED.ui), NULL, "Add Parameter");
-    SMOKE_CHECK(b != NULL, "Add Parameter button in the Parameters tab");
+    SMOKE_CHECK(b != NULL, "Add Parameter button in the Parameters tab (tabs %d, params %d, graph %d, ref \"%s\")",
+                AE.insp_tabs != NULL, AE.insp_params != NULL, ae_graph() != NULL, AE.ref);
     if (b) ui_test_click(ED.ui, b, false);
     LxAnimGraph *g = ae_graph();
     SMOKE_CHECK(g && g->param_count == 1, "a parameter is added (%d)", g ? g->param_count : -1);

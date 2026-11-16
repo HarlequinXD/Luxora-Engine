@@ -79,8 +79,9 @@ void ed_set_mode(EdMode mode) {
     ui_clear(ED.ui, ui_root(ED.ui));
     ed_panels_forget();
     ed_graph_forget();
+    ed_animator_forget();
     ED.hierarchy = ED.inspector = ED.viewport = NULL;
-    ED.view_tabs = ED.graph_panel = NULL;
+    ED.view_tabs = ED.graph_panel = ED.animator_panel = NULL;
     ED.hierarchy_list = ED.content_grid = ED.content_tree = NULL;
     if (mode == ED_MODE_PROJECT_MANAGER) ed_project_manager_build();
     else ed_build_shell();

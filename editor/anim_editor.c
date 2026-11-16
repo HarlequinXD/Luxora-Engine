@@ -1032,6 +1032,19 @@ void ed_animator_show(LxEntity e) {
 
 void ed_animator_new_for(LxEntity e) { ae_new_graph_for(e); }
 
+void ed_animator_forget(void) {
+    AE.ref[0] = 0;
+    AE.obj = 0;
+    AE.layer = 0;
+    AE.sel = -1;
+    AE.sel_trans = -1;
+    AE.locked = false;
+    AE.focused = false;
+    AE.framed = false;
+    AE.drag = AE_DRAG_NONE;
+    clear_history();
+}
+
 bool ed_animator_has_focus(void) {
     return AE.focused && AE.panel && !AE.panel->hidden && ED.view_tabs && ED.view_tabs->tab_index == 2 && !ui_wants_keyboard(ED.ui);
 }

@@ -194,6 +194,7 @@ void ed_graph_forget(void);
 void ed_graph_edit(LxEntity e, int slot);
 void ed_graph_open_asset(const char *ref);
 void ed_animator_open_asset(const char *ref);
+void ed_animator_forget(void);          /* the UI is being rebuilt: drop what it was editing */
 void ed_animator_show(LxEntity e);      /* show this object's animator graph in the Animator tab */
 void ed_animator_new_for(LxEntity e);   /* make one for it, and show it */
 bool ed_animator_keys(void);
