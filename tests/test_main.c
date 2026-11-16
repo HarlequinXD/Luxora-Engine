@@ -2758,6 +2758,60 @@ static void test_root_motion(void) {
 
     lx_scene_destroy(s);
     lx_model_reload("BarModel.fbx");
+
+    /* ---- a clip that walks: 1 m forward each one-second cycle ----
+     * Every time it comes round, the object must keep going forwards. Sampling the cycle's end as its
+     * start once read each loop as a step of a whole cycle backwards: the character jolted back a metre,
+     * then carried on. Checked playing the clip directly and through a graph. */
+    {
+        const char *mark = "    AnimationCurve: 63,";
+        const char *at = strstr(TEST_FBX, mark);
+        LxStrBuf sb = {0};
+        lx_sb_printf(&sb, "%.*s", (int)(at - TEST_FBX), TEST_FBX);
+        lx_sb_printf(&sb, "    AnimationCurveNode: 64, \"AnimCurveNode::T\", \"\" {\n        Properties70:  {\n"
+                          "            P: \"d|X\", \"Number\", \"\", \"A\",0\n            P: \"d|Y\", \"Number\", \"\", \"A\",0\n"
+                          "            P: \"d|Z\", \"Number\", \"\", \"A\",0\n        }\n    }\n"
+                          "    AnimationCurve: 65, \"AnimCurve::\", \"\" {\n        KeyTime: *2 {\n            a: 0,46186158000\n        }\n"
+                          "        KeyValueFloat: *2 {\n            a: 0,1\n        }\n    }\n");
+        const char *conn = strstr(at, "    C: \"OP\",63,62");
+        lx_sb_printf(&sb, "%.*s", (int)(conn - at), at);
+        lx_sb_printf(&sb, "    C: \"OO\",64,61\n    C: \"OP\",64,30, \"Lcl Translation\"\n    C: \"OP\",65,64, \"d|Z\"\n%s", conn);
+        lx_path_join(path, sizeof path, dir, "Walker.fbx");
+        lx_file_write(path, sb.data, strlen(sb.data));
+        lx_free(sb.data);
+        LxAnimGraph *g = lx_anim_graph_new("Walk");
+        lx_strcpy(g->layers[0].states[0].name, LX_ANIM_NAME, "Walk");
+        lx_strcpy(g->layers[0].states[0].clip, LX_REF_MAX, "Walker.fbx#Bend");
+        g->layers[0].states[0].loop = true;
+        lx_strcpy(g->layers[0].start, sizeof g->layers[0].start, "Walk");
+        lx_path_join(path, sizeof path, dir, "Walk.lxanim");
+        lx_anim_graph_save(g, path);
+        lx_anim_graph_free(g);
+        for (int use_graph = 0; use_graph < 2; use_graph++) {
+            LxScene *ws = lx_scene_create("Walking");
+            LxEntity w = lx_model_instantiate(ws, "Walker.fbx", lx_v3(0, 0, 0), 0);
+            LxAnimator *wa = lx_get_animator(ws, w);
+            CHECK(wa != NULL, "the walker has an Animator");
+            if (!wa) { lx_scene_destroy(ws); continue; }
+            wa->play_on_start = false;
+            wa->root_motion = true;
+            if (use_graph) lx_strcpy(wa->graph, sizeof wa->graph, "Walk.lxanim");
+            else lx_animator_play(ws, w, "Walker.fbx#Bend", 0);
+            float back = 0, z0 = lx_entity_position(ws, w).z, last = z0;
+            for (int f = 0; f < 70; f++) {   /* 3.5 cycles */
+                lx_animator_update(ws, w, 0.05f);
+                float z = lx_entity_position(ws, w).z;
+                if (z - last < back) back = z - last;
+                last = z;
+            }
+            float went = last - z0;
+            CHECK(back > -1e-3f && went > 3.0f && went < 3.6f, "%s: a looping walk only goes forwards (worst step %.3f, %.2f m in 3.5 cycles)",
+                  use_graph ? "through a graph" : "playing the clip", back, went);
+            lx_scene_destroy(ws);
+        }
+        lx_anim_graphs_clear();
+        lx_model_reload("Walker.fbx");
+    }
 }
 
 static void test_models(void) {
@@ -2910,6 +2964,31 @@ static void test_models(void) {
             LxVec3 h1 = lx_entity_world_position(rs, hips);
             LxQuat q = lx_entity_world_rotation(rs, lx_entity_find(rs, "mixamorig:LeftForeArm"));
             CHECK(!isnan(h1.x) && !isnan(q.w) && lx_len3(lx_sub3(h1, h0)) > 0.01f, "retargeted dance moves the hips (%.3f)", lx_len3(lx_sub3(h1, h0)));
+            /* foot IK on flat ground must leave the body alone: the dance goes up on its toes, and that is
+               the animation, not a dip in the floor - lowering the hips for it bobbed the character */
+            {
+                LxScene *fs[2];
+                LxEntity fr[2], fh[2];
+                for (int k = 0; k < 2; k++) {
+                    fs[k] = lx_scene_create("FootIK");
+                    LxEntity fl = lx_spawn_primitive(fs[k], LX_PRIM_CUBE, "Floor", lx_v3(0, -0.5f, 0));
+                    lx_entity_set_scale(fs[k], fl, lx_v3(20, 1, 20));
+                    fr[k] = lx_model_instantiate(fs[k], "Samba Dancing.fbx", lx_v3(0, 0, 0), 0);
+                    LxAnimator *fa = lx_get_animator(fs[k], fr[k]);
+                    fa->play_on_start = false;
+                    fa->foot_ik = k == 1;
+                    fa->foot_ik_weight = 1;
+                    lx_animator_play(fs[k], fr[k], "Samba Dancing.fbx#0", 0);
+                    fh[k] = lx_entity_find(fs[k], "mixamorig:Hips");
+                }
+                float gap = 0;
+                for (int f = 0; f < 600; f++) {
+                    for (int k = 0; k < 2; k++) lx_animator_update(fs[k], fr[k], 1.0f / 60);
+                    gap = lx_maxf(gap, fabsf(lx_entity_world_position(fs[0], fh[0]).y - lx_entity_world_position(fs[1], fh[1]).y));
+                }
+                CHECK(gap < 0.005f, "foot IK on flat ground doesn't move the hips (%.3f m)", gap);
+                for (int k = 0; k < 2; k++) lx_scene_destroy(fs[k]);
+            }
             CHECK(h1.y > 0.6f && h1.y < 1.3f, "hips stay at a sensible height (%.2f)", h1.y);
             lx_scene_stop_simulation(rs);
             lx_scene_destroy(rs);

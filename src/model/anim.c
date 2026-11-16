@@ -1007,7 +1007,8 @@ static bool clip_root_at(LxAnimState *st, const Binding *b, float norm, LxVec3 *
         if (track < 0) return false;
         LxVec3 p, s;
         LxQuat q;
-        sample(b->clip, track, t, true, &p, &q, &s);
+        sample(b->clip, track, t, false, &p, &q, &s);   /* not looped: norm 1 is the end, where a
+                                                                       looped sample would wrap it back to the start */
         /* the root's own movement is local to its parent, which nothing animates: the model's space is
            that rotated by the parent's rest rotation */
         int par = m->nodes[r].parent;
@@ -1034,7 +1035,7 @@ static bool clip_root_at(LxAnimState *st, const Binding *b, float norm, LxVec3 *
         for (int tr = 0; tr < b->clip->tracks; tr++)
             if (b->clip->node[tr] == i) {
                 LxVec3 sc;
-                sample(b->clip, tr, t, true, &lp, &lq, &sc);
+                sample(b->clip, tr, t, false, &lp, &lq, &sc);
                 break;
             }
         int par = src->nodes[i].parent;
@@ -1051,24 +1052,42 @@ static bool clip_root_at(LxAnimState *st, const Binding *b, float norm, LxVec3 *
 /* How far a clip's root moved between two points of its cycle, going forwards. A cycle that came round
  * is two pieces - to the end, then on from the start - which is the movement, where the difference of
  * the two samples would be the whole cycle backwards. */
+/* the root's movement between two places inside one cycle (0 <= a <= b <= 1) */
+static bool clip_root_span(LxAnimState *st, const Binding *b, float a, float c, LxVec3 *dpos, float *dyaw) {
+    LxVec3 p0, p1;
+    float y0, y1;
+    if (!clip_root_at(st, b, a, &p0, &y0) || !clip_root_at(st, b, c, &p1, &y1)) return false;
+    *dpos = lx_add3(*dpos, lx_sub3(p1, p0));
+    *dyaw += lx_root_motion_turn(y0, y1, false, 0);
+    return true;
+}
+
+/* `prev` and `now` count cycles: 2.25 is a quarter of the way through the third time round. Each place is
+ * taken inside its own cycle and every cycle passed in between adds one whole cycle's travel. (Reading
+ * 1.02 as just "0.02" made every loop of a walk look like a step of almost a whole cycle backwards: the
+ * character jolted back a metre each time the clip came round, then carried on.) */
 static void clip_root_delta(LxAnimState *st, const Binding *b, float prev, float now, LxVec3 *dpos, float *dyaw) {
     *dpos = lx_v3(0, 0, 0);
     *dyaw = 0;
-    LxVec3 p0, p1;
-    float y0, y1;
-    if (now >= prev) {
-        if (!clip_root_at(st, b, prev, &p0, &y0) || !clip_root_at(st, b, now, &p1, &y1)) return;
-        *dpos = lx_sub3(p1, p0);
-        *dyaw = lx_root_motion_turn(y0, y1, false, 0);
-        return;
+    if (!(prev == prev) || !(now == now) || now == prev) return;
+    bool back = now < prev;   /* played backwards: the same span, the other way */
+    if (back) { float t = prev; prev = now; now = t; }
+    float fp = floorf(prev), fn = floorf(now);
+    float a = prev - fp, c = now - fn;
+    if (fn - fp > 64) return;   /* a jump, not playing: the object is not flung across the level */
+    if (fp == fn) clip_root_span(st, b, a, c, dpos, dyaw);
+    else {
+        clip_root_span(st, b, a, 1.0f, dpos, dyaw);
+        LxVec3 whole = lx_v3(0, 0, 0);
+        float whole_yaw = 0;
+        int cycles = (int)(fn - fp) - 1;
+        if (cycles > 0 && clip_root_span(st, b, 0.0f, 1.0f, &whole, &whole_yaw)) {
+            *dpos = lx_madd3(*dpos, whole, (float)cycles);
+            *dyaw += whole_yaw * (float)cycles;
+        }
+        if (c > 0) clip_root_span(st, b, 0.0f, c, dpos, dyaw);
     }
-    LxVec3 pe, ps;
-    float ye, ys;
-    if (!clip_root_at(st, b, prev, &p0, &y0) || !clip_root_at(st, b, 1.0f, &pe, &ye) ||
-        !clip_root_at(st, b, 0.0f, &ps, &ys) || !clip_root_at(st, b, now, &p1, &y1))
-        return;
-    *dpos = lx_add3(lx_sub3(pe, p0), lx_sub3(p1, ps));
-    *dyaw = lx_root_motion_turn(y0, ye, false, 0) + lx_root_motion_turn(ys, y1, false, 0);
+    if (back) { *dpos = lx_scale3(*dpos, -1.0f); *dyaw = -*dyaw; }
 }
 
 static void motion_root_delta(LxAnimState *st, const LxAnimNode *n, float prev, float now, LxVec3 *dpos,
@@ -1478,7 +1497,14 @@ static void foot_ik(LxScene *s, LxEntity e, LxAnimState *st, IkFrame *f, float w
         /* can this leg still reach? only a leg that is short of its target asks the hips to come down */
         LxVec3 hip = to_world_p(f, f->wp[lb.root]), knee = to_world_p(f, f->wp[lb.mid]);
         float leg = lx_len3(lx_sub3(knee, hip)) + lx_len3(lx_sub3(foot, knee));
-        float deficit = lx_ik_hip_drop(lx_len3(lx_sub3(target, hip)), leg);
+        /* weighted like the foot: a foot lifting off (a stride, a hop) is barely grounded, and its leg's full
+           shortfall would yank the hips down while it is near the floor, then let them spring back up as it
+           leaves the band - the body bobbing and snapping down that foot IK must never add */
+        float deficit = lx_ik_hip_drop(lx_len3(lx_sub3(target, hip)), leg) * w;
+        /* and never more than this foot's ground is below the ground the character stands on: a foot up on
+           its toes on flat ground is the animation, not a dip in the floor to lower the body into */
+        float lower_ground = f->to_world.m[13] - hit.point.y;
+        if (deficit > lower_ground) deficit = lower_ground > 0 ? lower_ground : 0;
         if (deficit > drop) drop = deficit;
     }
     /* ease the hips, so stepping onto a kerb is a movement rather than a jump */
@@ -1848,15 +1874,15 @@ void lx_animator_update(LxScene *s, LxEntity e, float dt) {
     if (st->cur.clip) {
         float clen = clip_len_of(&st->cur);
         if (clen > 0) {
+            /* in cycles, not wrapped: the delta counts the cycles passed itself */
             float now_n = st->time / clen, prev_n = st->rm_prev_norm;
-            if (st->loop) { now_n -= floorf(now_n); prev_n -= floorf(prev_n); }
             LxVec3 d;
             float dy;
             clip_root_delta(st, &st->cur, prev_n, now_n, &d, &dy);
             st->rm_delta = d;
             st->rm_delta_yaw = dy;
             st->rm_delta_ok = st->rm_started_clip;
-            st->rm_prev_norm = st->loop ? now_n : st->time / clen;
+            st->rm_prev_norm = now_n;
             st->rm_started_clip = true;
         }
     }
