@@ -9,7 +9,26 @@
 
 typedef void (*SmokeFn)(void);
 int ed_smoke_failures;
-#define SMOKE_CHECK(cond, ...) do { if (!(cond)) { ed_smoke_failures++; LX_ERROR("[smoke] FAILED: " __VA_ARGS__); } else LX_INFO("[smoke] ok: " __VA_ARGS__); } while (0)
+
+/* A failed check goes to the log, and - when this is running on CI - out as a workflow command as well.
+ * Reading a job's log needs admin rights on the repository; its annotations are public, so a failure
+ * that only happens on CI can still say what it was. */
+static void smoke_failed(const char *text) {
+    LX_ERROR("[smoke] FAILED: %s", text);
+    if (getenv("GITHUB_ACTIONS")) {
+        printf("::error title=Smoke check failed::%s\n", text);
+        fflush(stdout);
+    }
+}
+#define SMOKE_CHECK(cond, ...)                                  \
+    do {                                                        \
+        if (!(cond)) {                                          \
+            char smk_msg[400];                                  \
+            snprintf(smk_msg, sizeof smk_msg, __VA_ARGS__);     \
+            ed_smoke_failures++;                                \
+            smoke_failed(smk_msg);                              \
+        } else LX_INFO("[smoke] ok: " __VA_ARGS__);             \
+    } while (0)
 
 static UiNode *find_node(UiNode *n, const void *bound_float, const char *text) {
     if (!n) return NULL;
@@ -934,7 +953,12 @@ static void s_gi_compare(void) {
 /* ======================================================================
  *  the Animator tab: an animator graph built through the editor
  * ====================================================================== */
+/* These steps write the asset to disk on the frame they run, which is not what the editor does on a
+ * normal frame, so they are not held to the frame budget - the same reason a screenshot isn't. */
+static void an_step_begin(void) { g_big_skip = true; }
+
 static void s_an_open(void) {
+    an_step_begin();
     char path[LX_PATH_MAX];
     lx_asset_path(path, sizeof path, "Animators/Smoke.lxanim");
     LxAnimGraph *g = lx_anim_graph_new("Smoke");
@@ -945,6 +969,7 @@ static void s_an_open(void) {
     SMOKE_CHECK(ae_graph() != NULL && ae_layer() != NULL, "it shows the graph and its base layer");
 }
 static void s_an_states(void) {
+    an_step_begin();
     SMOKE_CHECK(ed_animator_add_state("Run"), "a state is added");
     SMOKE_CHECK(ed_animator_add_state("Jump"), "and another");
     LxAnimLayer *l = ae_layer();
@@ -953,6 +978,7 @@ static void s_an_states(void) {
     SMOKE_CHECK(ae_sel_transition() != NULL, "and it is selected, so the Transition tab has something to show");
 }
 static void s_an_param(void) {
+    an_step_begin();
     UiNode *b = find_node(ui_root(ED.ui), NULL, "Add Parameter");
     SMOKE_CHECK(b != NULL, "Add Parameter button in the Parameters tab");
     if (b) ui_test_click(ED.ui, b, false);
@@ -960,6 +986,7 @@ static void s_an_param(void) {
     SMOKE_CHECK(g && g->param_count == 1, "a parameter is added (%d)", g ? g->param_count : -1);
 }
 static void s_an_condition(void) {
+    an_step_begin();
     if (AE.insp_tabs) AE.insp_tabs->tab_index = 2;
     AE.insp_dirty = true;
     ae_inspector_frame();
@@ -971,6 +998,7 @@ static void s_an_condition(void) {
     SMOKE_CHECK(t && t->cond[0].param[0], "and it is on the parameter that exists (%s)", t ? t->cond[0].param : "");
 }
 static void s_an_layer(void) {
+    an_step_begin();
     if (AE.insp_tabs) AE.insp_tabs->tab_index = 3;
     AE.insp_dirty = true;
     ae_inspector_frame();
@@ -982,6 +1010,7 @@ static void s_an_layer(void) {
     ae_frame_all();
 }
 static void s_an_saved(void) {
+    an_step_begin();
     char path[LX_PATH_MAX];
     lx_asset_path(path, sizeof path, "Animators/Smoke.lxanim");
     char *t = lx_file_read(path, NULL);
@@ -996,6 +1025,7 @@ static void s_an_saved(void) {
     SMOKE_CHECK(g && g->layer_count == 2, "redo puts it back (%d)", g ? g->layer_count : -1);
 }
 static void s_an_problems(void) {
+    an_step_begin();
     LxAnimGraph *g = ae_graph();
     int n = g ? lx_anim_graph_problems(g, NULL, 0) : -1;
     /* three states with no clips, a layer with no states: all of it should be reported */

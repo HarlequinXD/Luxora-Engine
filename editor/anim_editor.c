@@ -760,6 +760,7 @@ static UiNode *tbtn(UiNode *row, const char *text, UiIcon icon, const char *tip,
 static void pick_object(UiNode *n) {
     LxEntity e = (LxEntity)n->tag;
     if (!ED.scene || !lx_entity_valid(ED.scene, e)) return;
+    AE.locked = false;   /* following an object again */
     LxEntity a = lx_find_animator(ED.scene, e);
     LxAnimator *an = a ? lx_get_animator(ED.scene, a) : NULL;
     set_target(an && an->graph[0] ? an->graph : "", e);
@@ -960,6 +961,8 @@ UiNode *ed_animator_panel(UiNode *parent) {
  * ====================================================================== */
 void ed_animator_open_asset(const char *ref) {
     set_target(ref, 0);
+    /* asked for by name: hold on to it, or the next object selected in the scene would take the view away */
+    AE.locked = true;
     if (ED.view_tabs) ED.view_tabs->tab_index = 2;
 }
 
