@@ -70,6 +70,9 @@ typedef struct LxAnimState {
     bool rm_have_prev;
     bool rm_wrapped;       /* the clip looped or the state changed: this frame's jump is not movement */
     int rm_cycle;          /* which time round the single-clip path is */
+    LxClipSettings rm_settings;   /* what was in force last frame, for the component to show */
+    char rm_clip[LX_REF_MAX];
+    int rm_root_node;
 } LxAnimState;
 
 typedef struct LxSkinState {
@@ -992,6 +995,7 @@ static int root_node_of(const LxModel *m) {
 /* The settings of the clip that is driving the root. With a graph that is the base layer's current
  * state; otherwise the one clip the animator is playing. A clip with no settings of its own travels. */
 static LxClipSettings root_clip_settings(LxAnimState *st) {
+    st->rm_clip[0] = 0;
     LxClipSettings out;
     memset(&out, 0, sizeof out);
     out.bake_position_y = true;
@@ -1003,6 +1007,7 @@ static LxClipSettings root_clip_settings(LxAnimState *st) {
         if (si >= 0 && si < l->state_count && l->states[si].motion == LX_AM_CLIP) ref = l->states[si].clip;
     } else if (st->clip_ref[0]) ref = st->clip_ref;
     if (!ref || !ref[0]) return out;
+    lx_strcpy(st->rm_clip, sizeof st->rm_clip, ref);
     Binding *b = st->graph ? bind_cached(st, ref) : &st->cur;
     if (!b || !b->clip || !b->src) return out;
     for (int i = 0; i < b->src->clip_count && i < LX_MAX_CLIPS; i++)
@@ -1078,6 +1083,8 @@ static void root_motion(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *d
     int r = root_node_of(m);
     if (r < 0 || r >= st->out.count) return;
     LxClipSettings cs = root_clip_settings(st);
+    st->rm_settings = cs;
+    st->rm_root_node = r;
     /* everything here is in the model's space, where "up" is up and "forward" is forward */
     LxVec3 raw_p;
     LxQuat raw_r;
@@ -1424,6 +1431,11 @@ static void graph_update(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *
         if (!n->loop && lr->norm > 1) lr->norm = 1;
         if (lr->norm != lr->norm) lr->norm = prev;   /* a NaN here would stop the layer dead */
         if (li == 0 && floorf(lr->norm) != floorf(prev)) st->rm_wrapped = true;   /* it came round again */
+        /* While two states are blending, the root slides from where one clip has it to where the other
+           does. That slide is the blend, not the character travelling: a walk whose clip starts its
+           root half a step forward would throw the character that far forward the moment it began.
+           The step it was already taking is carried until the blend is over. */
+        if (li == 0 && lr->from != -1) st->rm_wrapped = true;
         if (lr->from >= 0 && lr->from < l->state_count) {
             const LxAnimNode *fn = &l->states[lr->from];
             float flen = state_length(st, fn);
@@ -1568,6 +1580,26 @@ bool lx_animator_play_state(LxScene *s, LxEntity e, int layer, const char *state
     return true;
 }
 
+bool lx_animator_root_motion_info(LxScene *s, LxEntity e, LxRootMotionInfo *out) {
+    if (!out) return false;
+    memset(out, 0, sizeof *out);
+    LxAnimState *st = state_for(s, e);
+    LxEntityData *d = lx_entity_data(s, e);
+    if (!st || !d || !st->model) return false;
+    out->enabled = d->animator.root_motion;
+    int r = st->rm_root_node;
+    out->has_root = r >= 0 && r < st->model->node_count;
+    if (out->has_root) lx_strcpy(out->root_bone, sizeof out->root_bone, st->model->nodes[r].name);
+    lx_strcpy(out->clip, sizeof out->clip, st->rm_clip);
+    /* a channel "moves the object" when it is not kept in the pose - and only then does the switch matter */
+    out->travel_moves_object = !st->rm_settings.bake_position_xz;
+    out->up_down_moves_object = !st->rm_settings.bake_position_y;
+    out->turn_moves_object = !st->rm_settings.bake_rotation;
+    out->last_step = st->rm_last_step;
+    out->last_turn = st->rm_last_yaw_step;
+    return true;
+}
+
 void lx_animator_set_ik_goal(LxScene *s, LxEntity e, LxIkGoal goal, LxVec3 position, float weight) {
     LxAnimState *st = state_for(s, e);
     if (!st || goal < 0 || goal >= LX_IK_GOAL_COUNT) return;
@@ -1635,6 +1667,7 @@ void lx_animator_update(LxScene *s, LxEntity e, float dt) {
     } else {
         lx_pose_copy(&st->out, &st->a);
     }
+    if (st->prev.clip) st->rm_wrapped = true;   /* cross-fading: the root is sliding between clips */
     /* the clip comes round again: the root jumps back to the start, which is not a step */
     if (st->cur.clip && st->loop) {
         float len = st->cur.clip->length;

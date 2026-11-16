@@ -925,6 +925,22 @@ bool lx_animator_in_transition(LxScene *s, LxEntity e, int layer);
 /* go to a state now, cross-fading over fade seconds (0 = at once), whatever the transitions say */
 bool lx_animator_play_state(LxScene *s, LxEntity e, int layer, const char *state, float fade);
 
+/* What root motion is doing on an object right now: which bone drives it, whose clip settings are in
+ * force, where each channel is going, and what it moved the object by on the last frame. Everything
+ * about root motion is decided per clip and can look like a bug from the outside, so it can be read. */
+typedef struct LxRootMotionInfo {
+    bool has_root;                  /* the animator has a skeleton with a root to move */
+    bool enabled;                   /* the Animator's own Root Motion switch */
+    char root_bone[64];             /* the bone the movement is taken from */
+    char clip[LX_REF_MAX];          /* the clip whose settings are in force ("" = none playing) */
+    bool travel_moves_object;       /* false: it stays in the pose, and the body travels away from the object */
+    bool up_down_moves_object;
+    bool turn_moves_object;
+    LxVec3 last_step;               /* what the object was moved by, last frame */
+    float last_turn;                /* and turned by, in radians */
+} LxRootMotionInfo;
+bool lx_animator_root_motion_info(LxScene *s, LxEntity e, LxRootMotionInfo *out);
+
 /* ---- inverse kinematics ----
  * A goal moves the end of a limb to a point in the world, and the limb bends to follow. The weight
  * decides how much of that shows, so a hand can be eased onto a ledge rather than snapped to it. */

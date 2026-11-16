@@ -195,36 +195,44 @@ void ed_model_inspector(UiNode *body, const char *ref) {
         UiNode *lp = ui_checkbox(ui, cr, "Loop", &g_imp.clips[i].loop);
         lp->on_change = imp_changed;
         lp->w = 64;
-        /* What the clip's root does: travel the object, or stay in the pose. Only worth showing for a
-           rig that has a root to move. */
+        /* What the clip's root does with each channel. Ticked means it stays in the animation; unticked
+           means it leaves the animation, and goes to the object or is pinned depending on Root Motion.
+           The labels say so outright: "bake into pose" is the usual name for this and tells nobody
+           which way round it is. */
         if (g_imp.rig != LX_RIG_NONE) {
             UiNode *rr = ui_box(ui, sec, UI_ROW);
             rr->h = 24;
             rr->gap = 8;
             rr->cross_align = UI_ALIGN_CENTER;
             ui_pad(rr, 24, 0, 0, 0);
-            UiNode *lbl = ui_label(ui, rr, "Root motion:");
+            UiNode *lbl = ui_label(ui, rr, "Keep in pose:");
             lbl->font = UI_FONT_SMALL;
             lbl->fg = t->text_dim;
-            lbl->w = 86;
-            UiNode *bx = ui_checkbox(ui, rr, "Bake Travel", &g_imp.clips[i].bake_position_xz);
+            lbl->w = 92;
+            UiNode *bx = ui_checkbox(ui, rr, "Travel", &g_imp.clips[i].bake_position_xz);
             bx->on_change = imp_changed;
-            bx->w = 110;
+            bx->w = 78;
             lx_strcpy(bx->tooltip, sizeof bx->tooltip,
-                      "Keep the clip's forward travel in the pose instead of moving the object with it");
-            UiNode *by = ui_checkbox(ui, rr, "Bake Up/Down", &g_imp.clips[i].bake_position_y);
+                      "On: the character drifts forward with the animation. Off: the travel leaves the pose - "
+                      "it moves the object when Root Motion is on, and is pinned when it is off");
+            UiNode *by = ui_checkbox(ui, rr, "Up/Down", &g_imp.clips[i].bake_position_y);
             by->on_change = imp_changed;
-            by->w = 124;
-            lx_strcpy(by->tooltip, sizeof by->tooltip, "Keep hops and crouches in the pose");
-            UiNode *br = ui_checkbox(ui, rr, "Bake Turn", &g_imp.clips[i].bake_rotation);
+            by->w = 94;
+            lx_strcpy(by->tooltip, sizeof by->tooltip,
+                      "On: the body rises and falls with the animation, which is what a run is meant to do. "
+                      "Off: the root is held at its rest height and the bob is gone");
+            UiNode *br = ui_checkbox(ui, rr, "Turning", &g_imp.clips[i].bake_rotation);
             br->on_change = imp_changed;
-            br->w = 100;
-            lx_strcpy(br->tooltip, sizeof br->tooltip, "Keep the clip's turning in the pose instead of turning the object");
+            br->w = 90;
+            lx_strcpy(br->tooltip, sizeof br->tooltip,
+                      "On: the character turns within the animation. Off: the turn leaves the pose - it turns "
+                      "the object when Root Motion is on, and is pinned when it is off");
         }
     }
     if (lx_model_clip_count(m) && g_imp.rig != LX_RIG_NONE)
-        hint(sec, "Unbaked root movement drives the object itself, so the character travels and its collider goes with it - "
-                  "switch it on with Root Motion on the Animator.");
+        hint(sec, "Ticked, a channel stays part of the animation. Unticked, it leaves the pose: with Root Motion on the "
+                  "Animator it moves the object, so the character travels and its collider goes with it, and with Root "
+                  "Motion off it is simply held still. Untick Up/Down to stop the body bobbing.");
     UiNode *btns = ui_box(ui, body, UI_ROW);
     ui_pad(btns, 12, 10, 12, 4);
     btns->h = 46;
@@ -390,6 +398,30 @@ static void layer_frame(UiNode *n) {
     n->fg = UI_HEX(0xffb03a);
 }
 
+/* Root motion is decided per clip, in the model's import settings, and from the outside a channel
+ * going the wrong way looks like a bug in the animation. This says which way each one is going. */
+static void root_motion_frame(UiNode *n) {
+    LxRootMotionInfo rm;
+    if (!ED.scene || !lx_animator_root_motion_info(ED.scene, (LxEntity)n->tag, &rm) || !rm.has_root) {
+        ui_set_text(n, "%s", "No skeleton to take root motion from.");
+        return;
+    }
+    if (!rm.enabled) {
+        ui_set_text(n, "Off: %s is held in place%s.", rm.root_bone[0] ? rm.root_bone : "the root",
+                    rm.up_down_moves_object ? " (up and down too)" : ", and its up and down stays in the pose");
+        return;
+    }
+    char where[160];
+    snprintf(where, sizeof where, "%s%s%s", rm.travel_moves_object ? "travel" : "",
+             rm.turn_moves_object ? (rm.travel_moves_object ? " and turning" : "turning") : "",
+             rm.up_down_moves_object ? ((rm.travel_moves_object || rm.turn_moves_object) ? " and up/down" : "up/down") : "");
+    if (!where[0]) lx_strcpy(where, sizeof where, "nothing");
+    float speed = lx_len3(rm.last_step);
+    ui_set_text(n, "%s moves the object with %s - %.2f m/frame now%s", rm.root_bone[0] ? rm.root_bone : "The root",
+                where, (double)speed, rm.clip[0] ? "" : " (nothing playing)");
+    n->fg = speed > 0 ? UI_HEX(0xffb03a) : ui_theme(ED.ui)->text_dim;
+}
+
 static void open_animator_clicked(UiNode *n) { ed_animator_show((LxEntity)n->tag); }
 static void new_graph_clicked(UiNode *n) { ed_animator_new_for((LxEntity)n->tag); }
 
@@ -439,6 +471,11 @@ void ed_animator_section(UiNode *sec, LxEntity e) {
     row_float(sec, "Speed", &a->speed, 0.05f, -10, 10, anim_changed);
     UiNode *rm = row_bool(sec, "Root Motion", &a->root_motion, anim_changed);
     lx_strcpy(rm->tooltip, sizeof rm->tooltip, "Let the clip move the character across the ground (otherwise it animates in place)");
+    UiNode *rmi = hint(sec, "");
+    rmi->tag = (intptr_t)e;
+    rmi->on_frame = root_motion_frame;
+    lx_strcpy(rmi->tooltip, sizeof rmi->tooltip,
+              "Which of the root's movement goes to the object. Change it per clip in the model's import settings.");
     UiNode *fk = row_bool(sec, "Foot IK", &a->foot_ik, anim_changed);
     lx_strcpy(fk->tooltip, sizeof fk->tooltip, "Put the feet on the ground under them - needs a humanoid rig and something to stand on");
     if (a->foot_ik) row_float(sec, "Foot IK Weight", &a->foot_ik_weight, 0.05f, 0, 1, anim_changed);
