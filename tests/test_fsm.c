@@ -1107,6 +1107,25 @@ static void test_fsm_action_library(void) {
     g_lx_input.keys[LX_KEY_D] = false;
     in_frame();
 
+    /* Mouse Look keeps the pitch itself - it is an angle the player has arrived at, not one the input
+       reports - so the first thing it must do is take whatever the head is already at, make sense of it,
+       and bring it inside the limits. A head left at 200 degrees is really 160 the other way. */
+    in_frame();
+    sem_begin(ONE("[action]\ntype = Mouse Look\np0 = Owner\np1 = name:Child\np2 = Input Axes\np6 = -40\np7 = 40\np8 = \np9 = \np10 = false\np11 = $f\np12 = $f2\n"));
+    {
+        LxEntity head = lx_entity_find(g_ss, "Child");
+        LxVec3 before = lx_entity_euler(g_ss, g_so);
+        lx_entity_set_euler(g_ss, head, lx_v3(200, 0, 0));
+        in_step();
+        in_step();
+        CHECK(NEAR(sv("f"), -40, 0.5f), "Mouse Look brings the pitch inside its limits (%g)", (double)sv("f"));
+        CHECK(NEAR(lx_entity_euler(g_ss, head).x, -40, 0.5f), "and puts the head there (%g)",
+              (double)lx_entity_euler(g_ss, head).x);
+        CHECK(NEAR(lx_entity_euler(g_ss, g_so).y, before.y, 0.5f), "with nothing to look with, the body does not turn (%g)",
+              (double)lx_entity_euler(g_ss, g_so).y);
+    }
+    sem_end();
+
     in_frame();
     g_lx_input.mouse[LX_MOUSE_LEFT] = true;
     sem_begin(ONE("[action]\ntype = Get Mouse Button\np0 = Left\np1 = Held\np2 = $b\np3 = YES\np4 = NO\n"));

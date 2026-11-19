@@ -316,13 +316,96 @@ static const LxFsmActionDesc A_IN_SWIPE = {"Detect Swipe", "Touch", "Watches for
     sizeof(FsmSwipe), 0, LX_FSM_EVERY_FRAME, in_swipe, in_swipe, NULL};
 
 /* ==========================================================================================
+ *  looking around
+ * ========================================================================================== */
+/* Mouse look is two rotations on two objects, and the only part worth any thought is that the pitch
+ * has to be remembered: it is an angle the player has arrived at, not something read from the input,
+ * and reading it back off the head each frame would let it drift and lose its limits. */
+typedef struct { float pitch; bool started; } FsmLook;
+
+static float look_wrap_deg(float a) {
+    a = fmodf(a, 360.0f);
+    if (a > 180.0f) a -= 360.0f;
+    if (a < -180.0f) a += 360.0f;
+    return a;
+}
+
+static void in_look(LxFsmCtx *c) {
+    FsmLook *st = c->state;
+    LxEntity body = fsm_obj(c, 0);
+    LxEntity head = fsm_obj(c, 1);
+    if (head == body) head = 0;   /* one object cannot be both pivots: the pitch would fight the yaw */
+    if (!body && !head) return;
+    int source = lx_fsm_int(c, 2);
+    float sens = lx_fsm_float(c, 3);
+    float vsens = lx_fsm_float(c, 4);
+    if (!(vsens > 0)) vsens = sens;
+    float down = lx_fsm_float(c, 6), up = lx_fsm_float(c, 7);
+    if (down > up) { float t = down; down = up; up = t; }
+
+    /* The mouse reports how far it moved, a stick reports how far it is pushed. One is already a
+       movement and the other is a rate, so a stick is turned into degrees by the clock. */
+    LxVec2 d = lx_v2(0, 0);
+    if (source == 1) {
+        d = lx_v2(lx_gamepad_axis(0, LX_PAD_RIGHT_X), lx_gamepad_axis(0, LX_PAD_RIGHT_Y));
+        d = lx_v2(d.x * 60.0f * c->dt, -d.y * 60.0f * c->dt);   /* a stick's +Y is up, the mouse's is down */
+    } else if (source == 2) {
+        const char *xa = lx_fsm_string(c, 8), *ya = lx_fsm_string(c, 9);
+        d = lx_v2(xa && xa[0] ? lx_axis(xa) : 0.0f, ya && ya[0] ? lx_axis(ya) : 0.0f);
+        d = lx_v2(d.x * 60.0f * c->dt, -d.y * 60.0f * c->dt);
+    } else {
+        if (lx_fsm_bool(c, 10)) lx_mouse_lock(true);
+        d = lx_mouse_delta();
+        if (!lx_mouse_locked() && lx_fsm_bool(c, 10)) d = lx_v2(0, 0);   /* not held yet: no jump as it catches */
+    }
+
+    if (body) {
+        /* left and right, about the body's own up: the same turn whether it stands on a slope or not */
+        float yaw = d.x * sens;
+        if (yaw != 0 && yaw == yaw) {
+            LxQuat r = lx_entity_rotation(c->scene, body);
+            lx_entity_set_rotation(c->scene, body, lx_quat_norm(lx_quat_mul(r, lx_quat_axis_angle(lx_v3(0, 1, 0), yaw * LX_DEG2RAD))));
+        }
+        lx_fsm_set_float(c, 12, look_wrap_deg(lx_entity_euler(c->scene, body).y));
+    }
+    if (head) {
+        if (!st->started) {
+            st->started = true;
+            st->pitch = lx_clampf(look_wrap_deg(lx_entity_euler(c->scene, head).x), down, up);
+        }
+        float pitch = d.y * vsens * (lx_fsm_bool(c, 5) ? 1.0f : -1.0f);
+        if (pitch == pitch) st->pitch = lx_clampf(st->pitch + pitch, down, up);
+        lx_entity_set_euler(c->scene, head, lx_v3(st->pitch, 0, 0));
+        lx_fsm_set_float(c, 11, st->pitch);
+    }
+}
+static const LxFsmActionDesc A_IN_LOOK = {"Mouse Look", "Mouse",
+    "Turns a character with the mouse, a stick or a pair of axes: the body left and right, a head or camera pivot up and down, "
+    "with the pitch kept inside its limits. This is the looking half of a first or third person controller.",
+    "{0} looks around",
+    {POBJT("Body Object", "turned left and right - usually the character itself"),
+     POBJNT("Head Object", "tilted up and down - usually the camera's pivot under the body; None leaves the pitch alone"),
+     PENUMT("Source", "Mouse|Gamepad Right Stick|Input Axes", "0", "where the looking comes from"),
+     PT("Sensitivity", LX_FSM_FLOAT, "0.2", "degrees per pixel of mouse movement; for a stick, degrees per second at 60"),
+     PT("Vertical Sensitivity", LX_FSM_FLOAT, "0", "0 uses Sensitivity for both"),
+     PT("Invert Y", LX_FSM_BOOL, "false", "push up to look down"),
+     PT("Down Limit", LX_FSM_FLOAT, "-80", "how far down it can look, in degrees"),
+     PT("Up Limit", LX_FSM_FLOAT, "80", "how far up it can look, in degrees"),
+     PT("X Axis", LX_FSM_STRING, "LookX", "Input Axes: the axis that turns left and right"),
+     PT("Y Axis", LX_FSM_STRING, "LookY", "Input Axes: the axis that looks up and down"),
+     PT("Hold The Pointer", LX_FSM_BOOL, "true", "Mouse: hide it and keep it in the window, so looking never runs out of screen"),
+     POPTT("Store Pitch", LX_FSM_FLOAT, "how far up or down it is looking, in degrees"),
+     POPTT("Store Yaw", LX_FSM_FLOAT, "which way the body faces, in degrees")},
+    sizeof(FsmLook), 0, LX_FSM_EVERY_FRAME, NULL, in_look, NULL};
+
+/* ==========================================================================================
  *  registration
  * ========================================================================================== */
 void fsm_register_input(void) {
     static const LxFsmActionDesc *all[] = {
         &A_IN_ACTION, &A_IN_AXIS, &A_IN_MOVE_DIR,
         &A_IN_KEY, &A_IN_ANY_KEY, &A_IN_TEXT,
-        &A_IN_MOUSE_BUTTON, &A_IN_MOUSE,
+        &A_IN_MOUSE_BUTTON, &A_IN_MOUSE, &A_IN_LOOK,
         &A_IN_PAD_BUTTON, &A_IN_PAD_AXIS, &A_IN_PAD_RUMBLE, &A_IN_DEVICE,
         &A_IN_TOUCH, &A_IN_SWIPE,
     };
