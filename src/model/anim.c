@@ -31,7 +31,11 @@ typedef struct LayerRun {
 } LayerRun;
 
 typedef struct ClipBind { char ref[LX_REF_MAX]; Binding b; bool ok; } ClipBind;
-typedef struct ParamVal { float f; int i; bool b; } ParamVal;
+/* `blend` is what blend trees read: the value eased towards over about a tenth of a second. A tree that
+ * jumped with its parameter - Speed going 0 -> 0.5 the moment a key is pressed - switched from idle to walk
+ * in one frame, and the hips, which the two hold at different heights, jumped up or down by several cm.
+ * Transitions still read the value itself, so they fire the moment it changes. */
+typedef struct ParamVal { float f; int i; bool b; float blend; bool blend_set; } ParamVal;
 typedef struct IkGoal { LxVec3 pos; LxQuat rot; float weight, rot_weight; bool active, rot_active; } IkGoal;
 
 typedef struct LxAnimState {
@@ -581,7 +585,24 @@ static float param_float(LxAnimState *st, const char *name) {
 typedef struct ParamLookup { LxAnimState *st; } ParamLookup;
 static float param_lookup(void *user, const char *name) {
     ParamLookup *p = user;
-    return param_float(p->st, name);
+    LxAnimState *st = p->st;
+    if (st->graph) {
+        int i = param_index(st->graph, name);
+        if (i >= 0 && i < st->pval_count && st->pvals[i].blend_set) return st->pvals[i].blend;
+    }
+    return param_float(st, name);
+}
+
+#define LX_TREE_PARAM_EASE 0.1f   /* seconds: how quickly a blend tree follows its parameters */
+static void ease_tree_params(LxAnimState *st, float dt) {
+    if (!st->graph) return;
+    float k = dt > 0 ? 1.0f - expf(-dt / LX_TREE_PARAM_EASE) : 0;
+    for (int i = 0; i < st->pval_count && i < st->graph->param_count; i++) {
+        ParamVal *v = &st->pvals[i];
+        float now = param_float(st, st->graph->params[i].name);
+        if (!v->blend_set || !(v->blend == v->blend)) { v->blend = now; v->blend_set = true; }
+        else v->blend += (now - v->blend) * k;
+    }
 }
 
 /* ---------------- motion: length and pose ---------------- */
@@ -1596,6 +1617,7 @@ static void run_ik(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *d, flo
 static void graph_update(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *d, float dt) {
     LxAnimGraph *g = st->graph;
     float global_speed = d->animator.speed;
+    ease_tree_params(st, dt * (global_speed > 0 ? global_speed : 0));
     bool state_foot_ik = false;
     for (int li = 0; li < st->layer_count && li < g->layer_count; li++) {
         const LxAnimLayer *l = &g->layers[li];

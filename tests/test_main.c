@@ -2811,6 +2811,57 @@ static void test_root_motion(void) {
         }
         lx_anim_graphs_clear();
         lx_model_reload("Walker.fbx");
+
+        /* ---- a blend tree must not jump when its parameter does ----
+         * Lifted.fbx's clip holds the root 0.5 m higher. A 1D tree between the two, with Speed going
+         * 0 -> 1 in one frame (a key pressed), once moved the root the whole 0.5 m in that frame: the hips
+         * popping up and down whenever the player started or stopped. */
+        {
+            LxStrBuf lb = {0};
+            const char *lat = strstr(TEST_FBX, mark);
+            lx_sb_printf(&lb, "%.*s", (int)(lat - TEST_FBX), TEST_FBX);
+            lx_sb_printf(&lb, "    AnimationCurveNode: 64, \"AnimCurveNode::T\", \"\" {\n        Properties70:  {\n"
+                              "            P: \"d|X\", \"Number\", \"\", \"A\",0\n            P: \"d|Y\", \"Number\", \"\", \"A\",0.5\n"
+                              "            P: \"d|Z\", \"Number\", \"\", \"A\",0\n        }\n    }\n"
+                              "    AnimationCurve: 65, \"AnimCurve::\", \"\" {\n        KeyTime: *2 {\n            a: 0,46186158000\n        }\n"
+                              "        KeyValueFloat: *2 {\n            a: 0.5,0.5\n        }\n    }\n");
+            const char *lconn = strstr(lat, "    C: \"OP\",63,62");
+            lx_sb_printf(&lb, "%.*s", (int)(lconn - lat), lat);
+            lx_sb_printf(&lb, "    C: \"OO\",64,61\n    C: \"OP\",64,30, \"Lcl Translation\"\n    C: \"OP\",65,64, \"d|Y\"\n%s", lconn);
+            lx_path_join(path, sizeof path, dir, "Lifted.fbx");
+            lx_file_write(path, lb.data, strlen(lb.data));
+            lx_free(lb.data);
+            const char *gt = "[animator]\nname = Ease\n[parameter]\nname = Speed\ntype = float\nvalue = 0 0 0\n"
+                             "[tree]\nindex = 0\ntype = 1d\nparam_x = Speed\n"
+                             "[child]\nclip = BarModel.fbx#Bend\ntree = -1\nthreshold = 0\nspeed = 1\n"
+                             "[child]\nclip = Lifted.fbx#Bend\ntree = -1\nthreshold = 1\nspeed = 1\n"
+                             "[layer]\nname = Base\nstart = Move\nweight = 1\nblend = override\nmask = 0\n"
+                             "[state]\nname = Move\nmotion = tree\ntree = 0\nspeed = 1\nloop = 1\n";
+            lx_path_join(path, sizeof path, dir, "Ease.lxanim");
+            lx_file_write(path, gt, strlen(gt));
+            LxScene *es = lx_scene_create("Ease");
+            LxEntity em = lx_model_instantiate(es, "BarModel.fbx", lx_v3(0, 0, 0), 0);
+            LxAnimator *ea = lx_get_animator(es, em);
+            CHECK(ea != NULL, "the bar has an Animator");
+            if (ea) {
+                ea->play_on_start = false;
+                lx_strcpy(ea->graph, sizeof ea->graph, "Ease.lxanim");
+                LxEntity rootb = lx_entity_find(es, "Root");
+                float prev = 0, biggest = 0, last = 0;
+                for (int f = 0; f < 60; f++) {
+                    lx_animator_set_float(es, em, "Speed", f < 20 ? 0.0f : 1.0f);
+                    lx_animator_update(es, em, 1.0f / 60);
+                    float y = lx_entity_world_position(es, rootb).y;
+                    if (f > 0) biggest = lx_maxf(biggest, fabsf(y - prev));
+                    prev = last = y;
+                }
+                CHECK(biggest < 0.1f && last > 0.45f, "a blend tree eases to a new Speed instead of jumping (biggest frame %.3f m, ends at %.3f)", biggest, last);
+            }
+            lx_scene_destroy(es);
+            lx_anim_graphs_clear();
+            lx_model_reload("BarModel.fbx");
+            lx_model_reload("Lifted.fbx");
+        }
     }
 }
 
