@@ -322,8 +322,8 @@ static void q_sphere_cast(LxFsmCtx *c) {
     origin = lx_add3(origin, lx_fsm_vec3(c, 1));
     LxVec3 dir = lx_norm3(lx_fsm_vec3(c, 2));
     LxRaycastHit hit = {0};
-    bool got = lx_physics_sphere_cast(c->scene, origin, lx_maxf(0.001f, lx_fsm_float(c, 3)), dir,
-                                      lx_fsm_float(c, 4), lx_layer_mask(lx_fsm_string(c, 11)), &hit);
+    bool got = lx_physics_sphere_cast_ignore(c->scene, origin, lx_maxf(0.001f, lx_fsm_float(c, 3)), dir, lx_fsm_float(c, 4),
+                                             lx_layer_mask(lx_fsm_string(c, 11)), fsm_obj(c, 12), &hit);
     lx_fsm_set_bool(c, 5, got);
     lx_fsm_set_object(c, 6, got ? hit.entity : 0);
     lx_fsm_set_vec3(c, 7, got ? hit.point : lx_v3(0, 0, 0));
@@ -336,7 +336,8 @@ static const LxFsmActionDesc A_Q_SPHERE_CAST = {"Sphere Cast", "Physics Queries"
      P("Radius", LX_FSM_FLOAT, "0.5"), P("Distance", LX_FSM_FLOAT, "10"),
      POPT("Store Did Hit", LX_FSM_BOOL), POPT("Store Hit Object", LX_FSM_OBJECT), POPT("Store Hit Point", LX_FSM_VEC3),
      POPT("Store Distance", LX_FSM_FLOAT), PEV("Hit Event"), PEV("Miss Event"),
-     PT("Layers", LX_FSM_STRING, "", "which layers to look at, by name: \"Ground, Props\". Empty looks at every layer")},
+     PT("Layers", LX_FSM_STRING, "", "which layers to look at, by name: \"Ground, Props\". Empty looks at every layer"),
+     POBJNT("Ignore Object", "skipped with everything under it: set it to the player for a camera's wall check")},
     0, 0, LX_FSM_EVERY_FRAME, q_sphere_cast, q_sphere_cast, NULL};
 
 static void q_overlap_sphere(LxFsmCtx *c) {

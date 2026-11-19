@@ -1095,6 +1095,9 @@ bool lx_physics_raycast(LxScene *s, LxVec3 origin, LxVec3 dir, float max_dist, u
 bool lx_physics_raycast_ignore(LxScene *s, LxVec3 origin, LxVec3 dir, float max_dist, uint32_t layer_mask, LxEntity ignore, LxRaycastHit *hit);
 bool lx_physics_sphere_cast(LxScene *s, LxVec3 origin, float radius, LxVec3 dir, float max_dist, uint32_t layer_mask,
                             LxRaycastHit *hit);
+/* the same, skipping `ignore` and everything under it: a camera's occlusion check from inside its own player */
+bool lx_physics_sphere_cast_ignore(LxScene *s, LxVec3 origin, float radius, LxVec3 dir, float max_dist, uint32_t layer_mask,
+                                   LxEntity ignore, LxRaycastHit *hit);
 int lx_physics_overlap_sphere(LxScene *s, LxVec3 center, float radius, uint32_t layer_mask, LxEntity *out, int max_out);
 int lx_physics_overlap_box(LxScene *s, LxVec3 center, LxVec3 half_extents, LxQuat rot, uint32_t layer_mask, LxEntity *out,
                            int max_out);

@@ -426,6 +426,22 @@ static void test_physics(void) {
     CHECK(n == 2, "overlap sphere finds the ball and the ground (%d)", n);
     CHECK(lx_physics_sphere_cast(s, lx_v3(-5, 0.5f, 0), 0.4f, lx_v3(1, 0, 0), 20, LX_ALL_LAYERS, &hit) && hit.entity == faller &&
               NEAR(hit.distance, 4.1f, 0.15f), "sphere cast hits the ball (d=%g)", hit.distance);
+    /* a camera's wall check starts inside its own player: told to ignore the player, it must skip the player and
+       the model under it (whatever layer that model is on) and find the wall behind */
+    {
+        LxEntity pl = lx_entity_create(s, "Player");
+        lx_entity_set_position(s, pl, lx_v3(10, 0, 10));
+        lx_add_character(s, pl);
+        LxEntity model = lx_spawn_primitive(s, LX_PRIM_CAPSULE, "Model", lx_v3(10, 0.9f, 10));
+        lx_entity_set_parent(s, model, pl);
+        LxEntity wall = lx_spawn_primitive(s, LX_PRIM_CUBE, "Wall", lx_v3(10, 1.5f, 7.5f));
+        lx_entity_set_scale(s, wall, lx_v3(6, 3, 0.4f));
+        LxVec3 pivot = lx_v3(10, 1.5f, 10);
+        CHECK(lx_physics_sphere_cast(s, pivot, 0.25f, lx_v3(0, 0, -1), 4, LX_ALL_LAYERS, &hit) && hit.distance < 0.1f,
+              "without ignoring it, the cast hits its own player (d=%g)", hit.distance);
+        CHECK(lx_physics_sphere_cast_ignore(s, pivot, 0.25f, lx_v3(0, 0, -1), 4, LX_ALL_LAYERS, pl, &hit) && hit.entity == wall &&
+                  NEAR(hit.distance, 2.05f, 0.05f), "ignoring the player, it finds the wall behind (d=%g)", hit.distance);
+    }
     lx_scene_destroy(s);
 
     /* character controller: ground, walls, steps, mesh colliders */

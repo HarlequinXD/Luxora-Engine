@@ -1202,6 +1202,7 @@ static bool ray_mesh(const MeshCache *m, LxVec3 o, LxVec3 d, float max_t, float 
     return hit;
 }
 
+
 static bool under(LxScene *s, LxEntity e, LxEntity root) {
     for (int depth = 0; e && depth < 64; depth++, e = lx_entity_parent(s, e))
         if (e == root) return true;
@@ -1272,12 +1273,15 @@ static bool aabb_overlap(LxAabb a, LxAabb b) {
            b.min.z <= a.max.z;
 }
 
-static int overlap_body(LxPhysicsWorld *w, const Body *probe, uint32_t mask, LxEntity *out, int max_out, LxEntity skip) {
+
+/* `skip`: that object and everything under it (a probe starting inside its own character) */
+static int overlap_body(LxScene *s, LxPhysicsWorld *w, const Body *probe, uint32_t mask, LxEntity *out, int max_out, LxEntity skip) {
     int n = 0;
     Manifold m;
     for (int i = 0; i < w->nb; i++) {
         const Body *b = &w->bodies[i];
-        if (b->trigger || b->e == skip || !((mask >> (b->layer & 31)) & 1u) || !aabb_overlap(probe->box, b->box)) continue;
+        if (b->trigger || !((mask >> (b->layer & 31)) & 1u) || !aabb_overlap(probe->box, b->box)) continue;
+        if (skip && under(s, b->e, skip)) continue;
         collide(w, probe, b, &m);
         bool hit = false;
         for (int k = 0; k < m.count; k++) hit |= m.sep[k] < 0;
@@ -1293,7 +1297,7 @@ int lx_physics_overlap_sphere(LxScene *s, LxVec3 center, float radius, uint32_t 
     if (!s) return 0;
     LxPhysicsWorld *w = query_world(s);
     Body p = probe_sphere(center, radius);
-    return overlap_body(w, &p, mask, out, max_out, 0);
+    return overlap_body(s, w, &p, mask, out, max_out, 0);
 }
 
 int lx_physics_overlap_box(LxScene *s, LxVec3 center, LxVec3 half, LxQuat rot, uint32_t mask, LxEntity *out, int max_out) {
@@ -1308,10 +1312,15 @@ int lx_physics_overlap_box(LxScene *s, LxVec3 center, LxVec3 half, LxQuat rot, u
     p.mesh = -1;
     set_axes(&p);
     body_aabb(w, &p);
-    return overlap_body(w, &p, mask, out, max_out, 0);
+    return overlap_body(s, w, &p, mask, out, max_out, 0);
 }
 
 bool lx_physics_sphere_cast(LxScene *s, LxVec3 origin, float radius, LxVec3 dir, float max_dist, uint32_t mask, LxRaycastHit *hit) {
+    return lx_physics_sphere_cast_ignore(s, origin, radius, dir, max_dist, mask, 0, hit);
+}
+
+bool lx_physics_sphere_cast_ignore(LxScene *s, LxVec3 origin, float radius, LxVec3 dir, float max_dist, uint32_t mask, LxEntity ignore,
+                                   LxRaycastHit *hit) {
     if (!s) return false;
     LxPhysicsWorld *w = query_world(s);
     float len = lx_len3(dir);
@@ -1335,12 +1344,12 @@ bool lx_physics_sphere_cast(LxScene *s, LxVec3 origin, float radius, LxVec3 dir,
         if (t > max_dist) t = max_dist;
         Body p = probe_sphere(lx_madd3(origin, d, t), radius);
         LxEntity e;
-        if (overlap_body(w, &p, mask, &e, 1, 0)) {
+        if (overlap_body(s, w, &p, mask, &e, 1, ignore)) {
             float lo = prev, hi = t;
             for (int i = 0; i < 10; i++) {
                 float mid = (lo + hi) * 0.5f;
                 Body q = probe_sphere(lx_madd3(origin, d, mid), radius);
-                if (overlap_body(w, &q, mask, NULL, 0, 0)) hi = mid; else lo = mid;
+                if (overlap_body(s, w, &q, mask, NULL, 0, ignore)) hi = mid; else lo = mid;
             }
             if (hit) {
                 Body q = probe_sphere(lx_madd3(origin, d, hi), radius);
@@ -1349,6 +1358,7 @@ bool lx_physics_sphere_cast(LxScene *s, LxVec3 origin, float radius, LxVec3 dir,
                 for (int i = 0; i < w->nb; i++) {
                     const Body *b = &w->bodies[i];
                     if (b->trigger || !((mask >> (b->layer & 31)) & 1u) || !aabb_overlap(q.box, b->box)) continue;
+                    if (ignore && under(s, b->e, ignore)) continue;
                     collide(w, &q, b, &m);
                     for (int k = 0; k < m.count; k++)
                         if (m.sep[k] < 0) {
