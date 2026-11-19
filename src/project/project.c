@@ -85,6 +85,8 @@ static void defaults(LxProject *p) {
     p->graphics = lx_graphics_defaults(2);
     p->audio = lx_audio_defaults();
     p->physics = lx_physics_defaults();
+    memset(&p->layers, 0, sizeof p->layers);
+    lx_strcpy(p->layers.name[0], LX_LAYER_NAME_MAX, "Default");
     p->build.target = lx_platform_current();
     if (p->build.target == LX_PLATFORM_ANDROID) p->build.target = LX_PLATFORM_LINUX;
     p->build.window_width = 1280;
@@ -117,6 +119,12 @@ bool lx_project_save(const LxProject *p) {
     const LxPhysicsSettings *ph = &p->physics;
     lx_sb_printf(&sb, "\n[physics]\ngravity = %g %g %g\nfixed_timestep = %g\nsolver_iterations = %d\n", ph->gravity.x, ph->gravity.y,
                  ph->gravity.z, ph->fixed_timestep, ph->solver_iterations);
+    /* the layer names, and which layers touch each other - neither was kept before, so a collision
+       matrix set in the editor was forgotten the next time the project opened */
+    for (int i = 0; i < LX_LAYER_COUNT; i++)
+        if (p->layers.name[i][0]) lx_sb_printf(&sb, "layer.%d = %s\n", i, p->layers.name[i]);
+    for (int i = 0; i < LX_LAYER_COUNT; i++)
+        if (ph->layer_mask[i] != LX_ALL_LAYERS) lx_sb_printf(&sb, "collide.%d = %u\n", i, ph->layer_mask[i]);
     lx_sb_printf(&sb, "\n[audio]\nmaster = %g\nbus_sfx = %g\nbus_music = %g\nbus_voice = %g\nbus_ambient = %g\n", a->master_volume,
                  a->bus_volume[0], a->bus_volume[1], a->bus_volume[2], a->bus_volume[3]);
     lx_sb_printf(&sb, "sample_rate = %d\nspeed_of_sound = %g\npropagation = %d\nrays = %d\nbounces = %d\nair_absorption = %g\ndoppler = %d\n",
@@ -187,6 +195,13 @@ bool lx_project_load(LxProject *p, const char *root) {
             if (!strcmp(k, "gravity")) ph->gravity = lx_parse_vec3(v);
             else if (!strcmp(k, "fixed_timestep")) ph->fixed_timestep = f > 0.0005f ? f : 1.0f / 60.0f;
             else if (!strcmp(k, "solver_iterations")) ph->solver_iterations = n > 0 ? n : 10;
+            else if (!strncmp(k, "layer.", 6)) {
+                int i = atoi(k + 6);
+                if (i >= 0 && i < LX_LAYER_COUNT) lx_strcpy(p->layers.name[i], LX_LAYER_NAME_MAX, v);
+            } else if (!strncmp(k, "collide.", 8)) {
+                int i = atoi(k + 8);
+                if (i >= 0 && i < LX_LAYER_COUNT) ph->layer_mask[i] = (uint32_t)strtoul(v, NULL, 10);
+            }
         } else if (!strcmp(section, "audio")) {
             if (!strcmp(k, "master")) a->master_volume = f;
             else if (!strcmp(k, "bus_sfx")) a->bus_volume[LX_BUS_SFX] = f;

@@ -67,6 +67,133 @@ float lx_game_time(const LxScene *s) { return s->gameplay ? s->gameplay->game_ti
 float lx_delta_unscaled(const LxScene *s) { return s->gameplay ? s->gameplay->unscaled_dt : 0.0f; }
 
 /* ======================================================================
+ *  Layers
+ *
+ *  A layer is a number with a name on it. The number is what physics works in - a bit in a mask, a row
+ *  of the collision matrix - and the name is what everything else uses, because "Ground" survives
+ *  someone inserting a layer above it and "6" does not.
+ *
+ *  The names belong to the project, so they are here rather than in the scene: two scenes of the same
+ *  game agree about what layer 6 is, and a scene carried into another project does not bring its own
+ *  idea of it.
+ * ====================================================================== */
+static LxLayers g_layers;
+static bool g_layers_ready;
+
+static void layers_default(LxLayers *l) {
+    memset(l, 0, sizeof *l);
+    lx_strcpy(l->name[0], LX_LAYER_NAME_MAX, "Default");
+}
+
+LxLayers *lx_layers(void) {
+    if (!g_layers_ready) {
+        layers_default(&g_layers);
+        g_layers_ready = true;
+    }
+    return &g_layers;
+}
+
+bool lx_layer_named(int layer) {
+    return layer >= 0 && layer < LX_LAYER_COUNT && lx_layers()->name[layer][0] != 0;
+}
+
+const char *lx_layer_name(int layer) {
+    static char fallback[24];
+    if (layer < 0 || layer >= LX_LAYER_COUNT) return "";
+    if (lx_layer_named(layer)) return lx_layers()->name[layer];
+    snprintf(fallback, sizeof fallback, "Layer %d", layer);
+    return fallback;
+}
+
+int lx_layer_find(const char *name) {
+    if (!name || !name[0]) return -1;
+    while (*name == ' ') name++;
+    size_t n = strlen(name);
+    while (n && (name[n - 1] == ' ' || name[n - 1] == '\t')) n--;
+    if (!n) return -1;
+    LxLayers *l = lx_layers();
+    for (int i = 0; i < LX_LAYER_COUNT; i++) {
+        const char *have = l->name[i];
+        if (!have[0] || strlen(have) != n) continue;
+        size_t k = 0;
+        while (k < n && (have[k] | 32) == (name[k] | 32)) k++;
+        if (k == n) return i;
+    }
+    /* "Layer 9" names the ninth layer even when nobody has named it */
+    if ((name[0] | 32) == 'l' && n > 6) {
+        char num[8];
+        size_t k = 0;
+        const char *p = name + 6;
+        while (*p == ' ') p++;
+        while (k + 1 < sizeof num && *p >= '0' && *p <= '9') num[k++] = *p++;
+        num[k] = 0;
+        if (k) {
+            int v = atoi(num);
+            if (v >= 0 && v < LX_LAYER_COUNT) return v;
+        }
+    }
+    return -1;
+}
+
+uint32_t lx_layer_mask(const char *names) {
+    if (!names || !names[0]) return LX_ALL_LAYERS;
+    uint32_t mask = 0;
+    char one[LX_LAYER_NAME_MAX];
+    size_t n = 0;
+    bool any = false;
+    for (const char *p = names;; p++) {
+        if (*p && *p != ',' && *p != ';') {
+            if (n + 1 < sizeof one) one[n++] = *p;
+            continue;
+        }
+        one[n] = 0;
+        n = 0;
+        int layer = lx_layer_find(one);
+        if (layer >= 0) {
+            mask |= 1u << layer;
+            any = true;
+        }
+        if (!*p) break;
+    }
+    /* every name was a typo: looking everywhere is friendlier than looking nowhere */
+    return any ? mask : LX_ALL_LAYERS;
+}
+
+void lx_layer_mask_names(uint32_t mask, char *out, size_t cap) {
+    if (!out || !cap) return;
+    out[0] = 0;
+    if (mask == LX_ALL_LAYERS) {
+        lx_strcpy(out, cap, "every layer");
+        return;
+    }
+    size_t used = 0;
+    for (int i = 0; i < LX_LAYER_COUNT; i++) {
+        if (!((mask >> i) & 1u)) continue;
+        const char *nm = lx_layer_name(i);
+        size_t need = strlen(nm) + (used ? 2 : 0);
+        if (used + need + 1 >= cap) break;
+        if (used) {
+            out[used++] = ',';
+            out[used++] = ' ';
+        }
+        memcpy(out + used, nm, strlen(nm));
+        used += strlen(nm);
+        out[used] = 0;
+    }
+    if (!used) lx_strcpy(out, cap, "no layers");
+}
+
+/* ---------------- an object's layer ---------------- */
+void lx_entity_set_layer(LxScene *s, LxEntity e, int layer) {
+    LxEntityData *d = lx_entity_data(s, e);
+    if (d && layer >= 0 && layer < LX_LAYER_COUNT) d->layer = (int8_t)layer;
+}
+int lx_entity_layer(const LxScene *s, LxEntity e) {
+    const LxEntityData *d = lx_entity_data((LxScene *)s, e);
+    return d ? d->layer : 0;
+}
+
+/* ======================================================================
  *  tags
  * ====================================================================== */
 void lx_entity_set_tag(LxScene *s, LxEntity e, const char *tag) {

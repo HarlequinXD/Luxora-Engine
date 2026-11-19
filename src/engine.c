@@ -64,6 +64,7 @@ void lx_engine_set_project(const LxProject *p) {
     *lx_graphics_settings() = p->graphics;
     *lx_audio_settings() = p->audio;
     *lx_physics_settings() = p->physics;
+    *lx_layers() = p->layers;   /* the names go with them: the game reads layers by name */
     char input[LX_PATH_MAX];
     lx_path_join(input, sizeof input, p->root, "input.lxinput");
     if (!lx_input_map_load(lx_input_map(), input)) lx_input_map_defaults(lx_input_map());

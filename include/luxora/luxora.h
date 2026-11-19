@@ -399,11 +399,14 @@ typedef struct LxBakeVolume {
  * Collider + Rigidbody      = simulated body (or kinematic: moved by your code, pushes others)
  * Character Controller      = capsule moved with lx_character_move(), slides along walls, climbs steps
  * Sizes are local and scaled by the entity's scale. */
+#define LX_LAYER_COUNT 32
+#define LX_LAYER_NAME_MAX 32
+
 typedef struct LxPhysicsSettings {
     LxVec3 gravity;             /* m/s^2, default (0, -9.81, 0) */
     float fixed_timestep;       /* seconds, default 1/60 */
     int solver_iterations;      /* default 10 */
-    uint32_t layer_mask[32];    /* bit j of layer_mask[i]: layer i collides with layer j */
+    uint32_t layer_mask[LX_LAYER_COUNT];   /* bit j of layer_mask[i]: layer i collides with layer j */
 } LxPhysicsSettings;
 
 typedef enum LxColliderShape { LX_COLLIDER_BOX, LX_COLLIDER_SPHERE, LX_COLLIDER_CAPSULE, LX_COLLIDER_MESH } LxColliderShape;
@@ -416,7 +419,6 @@ typedef struct LxCollider {
     bool is_trigger;        /* reports overlaps (on_trigger_enter/exit) instead of colliding */
     float friction;         /* 0 ice .. 1 rubber */
     float bounciness;       /* 0 dead .. 1 superball */
-    int layer;              /* 0..31, see LxPhysicsSettings.layer_mask */
 } LxCollider;
 
 typedef struct LxRigidbody {
@@ -981,6 +983,26 @@ char *lx_entity_serialize(const LxScene *s, LxEntity root);           /* prefab 
 
 LxEntity lx_entity_find_child(const LxScene *s, LxEntity parent, const char *name);   /* searches all descendants */
 
+/* Layers: every object is on one, and they are named in Project Settings. What a layer is for is up
+ * to the game - ground, enemies, scenery - and two things use them: the collision matrix, which decides
+ * which layers touch each other at all, and the queries, which take a mask of the layers to look at.
+ *
+ * A mask is a bit per layer. In a graph, where bits are awkward, the queries take the names instead:
+ * "Ground, Props" means those two, and nothing means every layer. */
+typedef struct LxLayers { char name[LX_LAYER_COUNT][LX_LAYER_NAME_MAX]; } LxLayers;
+LxLayers *lx_layers(void);                        /* the project's, live: editing it changes the game */
+const char *lx_layer_name(int layer);             /* its name, or "Layer 9" when it has none */
+bool lx_layer_named(int layer);                   /* someone gave it a name */
+int lx_layer_find(const char *name);              /* -1 when no layer is called that */
+/* "Ground, Props" -> the bits for those layers. Empty or NULL is every layer, and a name no layer has
+ * is ignored, so a typo narrows the search rather than silently finding nothing. */
+uint32_t lx_layer_mask(const char *names);
+void lx_layer_mask_names(uint32_t mask, char *out, size_t cap);   /* back the other way, for showing it */
+
+/* An object's layer. Its colliders are on it, so this is what the collision matrix and every query see. */
+void lx_entity_set_layer(LxScene *s, LxEntity e, int layer);
+int lx_entity_layer(const LxScene *s, LxEntity e);
+
 /* Tags: one short label per object ("Player", "Enemy", "Pickup") for finding things quickly. */
 #define LX_TAG_MAX 32
 void lx_entity_set_tag(LxScene *s, LxEntity e, const char *tag);
@@ -1235,6 +1257,7 @@ typedef struct LxBuildSettings {
 
 typedef struct LxProject {
     char name[LX_NAME_MAX];
+    LxLayers layers;
     char company[LX_NAME_MAX];
     char version[32];
     char root[LX_PATH_MAX];       /* project folder */

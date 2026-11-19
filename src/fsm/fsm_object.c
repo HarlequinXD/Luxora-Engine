@@ -459,12 +459,50 @@ static const LxFsmActionDesc A_O_ASSET_EXISTS = {"Asset Exists", "Resources", "T
     {P("Asset Path", LX_FSM_STRING, ""), POPT("Store Result", LX_FSM_BOOL), PEV("Exists Event"), PEV("Missing Event")},
     0, 0, LX_FSM_ONCE, o_asset_exists, o_asset_exists, NULL};
 
+
+/* An object's layer, by name. Numbers are what physics works in, but a graph should not have to know
+ * that layer 6 is the one the ground is on - and it would be wrong the moment someone renumbered it. */
+static void o_set_layer(LxFsmCtx *c) {
+    LxEntity e = fsm_obj(c, 0);
+    if (!e) return;
+    const char *name = lx_fsm_string(c, 1);
+    int layer = lx_layer_find(name);
+    if (layer < 0) { fsm_send(c, 3); return; }
+    lx_entity_set_layer(c->scene, e, layer);
+    if (lx_fsm_bool(c, 2))
+        for (LxEntity ch = lx_entity_first_child(c->scene, e); ch; ch = lx_entity_next_sibling(c->scene, ch))
+            lx_entity_set_layer(c->scene, ch, layer);
+}
+static const LxFsmActionDesc A_O_SET_LAYER = {"Set Layer", "Game Object",
+    "Moves an object onto a layer, which decides what it collides with and which searches find it.",
+    "{0} -> layer {1}",
+    {POBJ("Object"), PT("Layer", LX_FSM_STRING, "Default", "the layer's name, from Project Settings"),
+     PT("Include Children", LX_FSM_BOOL, "false", "move everything directly under it as well"),
+     PEV("No Such Layer Event")},
+    0, 0, LX_FSM_ONCE, o_set_layer, o_set_layer, NULL};
+
+static void o_get_layer(LxFsmCtx *c) {
+    LxEntity e = fsm_obj(c, 0);
+    int layer = e ? lx_entity_layer(c->scene, e) : 0;
+    lx_fsm_set_string(c, 1, e ? lx_layer_name(layer) : "");
+    lx_fsm_set_int(c, 2, layer);
+    const char *want = lx_fsm_string(c, 3);
+    if (want && want[0]) fsm_send(c, lx_layer_find(want) == layer && e ? 4 : 5);
+}
+static const LxFsmActionDesc A_O_GET_LAYER = {"Get Layer", "Game Object",
+    "Which layer an object is on, by name and by number, and whether it is the one you were asking about.",
+    "layer of {0}",
+    {POBJ("Object"), POPT("Store Layer Name", LX_FSM_STRING), POPT("Store Layer Number", LX_FSM_INT),
+     PT("Is It", LX_FSM_STRING, "", "a layer name to compare against; empty sends no event"),
+     PEV("Yes Event"), PEV("No Event")},
+    0, 0, LX_FSM_EVERY_FRAME, o_get_layer, o_get_layer, NULL};
+
 /* ==========================================================================================
  *  registration
  * ========================================================================================== */
 void fsm_register_object(void) {
     static const LxFsmActionDesc *all[] = {
-        &A_O_OWNER, &A_O_FIND, &A_O_FIND_ALL_TAG, &A_O_FIND_CLOSEST, &A_O_RANDOM_TAG, &A_O_COUNT_TAG,
+        &A_O_OWNER, &A_O_FIND, &A_O_SET_LAYER, &A_O_GET_LAYER, &A_O_FIND_ALL_TAG, &A_O_FIND_CLOSEST, &A_O_RANDOM_TAG, &A_O_COUNT_TAG,
         &A_O_GET_PARENT, &A_O_SET_PARENT, &A_O_GET_CHILD, &A_O_GET_CHILDREN, &A_O_DESTROY_CHILDREN,
         &A_O_GET_NAME, &A_O_SET_NAME, &A_O_SET_TAG, &A_O_HAS_TAG, &A_O_SET_ACTIVE, &A_O_IS_ACTIVE,
         &A_O_EXISTS, &A_O_EQUALS, &A_O_SELECT,

@@ -12,6 +12,7 @@ static void save_project(UiNode *n) {
     *lx_graphics_settings() = ED.project.graphics;
     *lx_audio_settings() = ED.project.audio;
     *lx_physics_settings() = ED.project.physics;
+    *lx_layers() = ED.project.layers;   /* the names go with them: the game reads layers by name */
     lx_renderer_set_vsync(ED.project.graphics.vsync);
     lx_project_save(&ED.project);
     ed_update_title();
@@ -158,24 +159,51 @@ static void build_graphics(UiNode *b) {
 /* ---------------- Physics ---------------- */
 void ed_settings_rebuild(void);
 static int g_phys_hz;
-static bool g_layers[8][8];
+static bool g_layers[LX_LAYER_COUNT][LX_LAYER_COUNT];
 static void phys_rate_changed(UiNode *n) {
     if (g_phys_hz < 10) g_phys_hz = 10;
     ED.project.physics.fixed_timestep = 1.0f / (float)g_phys_hz;
     save_project(n);
 }
+
+/* Which layers are worth a row in the matrix: the named ones, and layer 0, which is where everything
+ * starts. Showing all 32 would be a wall of boxes nobody has a use for. */
+static int layer_rows(int *out) {
+    int n = 0;
+    for (int i = 0; i < LX_LAYER_COUNT; i++)
+        if (i == 0 || lx_layer_named(i)) out[n++] = i;
+    return n;
+}
+
 static void layer_changed(UiNode *n) {
-    int i = (int)n->tag / 8, j = (int)n->tag % 8;
+    int i = (int)n->tag / LX_LAYER_COUNT, j = (int)n->tag % LX_LAYER_COUNT;
     g_layers[j][i] = g_layers[i][j];   /* collisions are symmetric */
     uint32_t *mask = ED.project.physics.layer_mask;
-    for (int a = 0; a < 8; a++)
-        for (int b = 0; b < 8; b++) {
+    for (int a = 0; a < LX_LAYER_COUNT; a++)
+        for (int b = 0; b < LX_LAYER_COUNT; b++) {
             if (g_layers[a][b]) mask[a] |= 1u << b;
             else mask[a] &= ~(1u << b);
         }
     save_project(n);
     ed_settings_rebuild();
 }
+
+static void layer_name_changed(UiNode *n) {
+    /* a name nobody can look up is worse than none: two layers called the same thing make
+       lx_layer_find answer with whichever comes first, so the second one gives its name up */
+    int me = (int)n->tag;
+    LxLayers *l = &ED.project.layers;
+    for (int i = 0; i < LX_LAYER_COUNT; i++)
+        if (i != me && l->name[i][0] && !strcmp(l->name[i], l->name[me])) {
+            ui_notify(ED.ui, "Layer %d is already called %s", i, l->name[i]);
+            l->name[me][0] = 0;
+            break;
+        }
+    *lx_layers() = ED.project.layers;
+    save_project(n);
+    ed_settings_rebuild();
+}
+
 static void build_physics(UiNode *b) {
     UiCtx *ui = ED.ui;
     LxPhysicsSettings *p = &ED.project.physics;
@@ -186,34 +214,67 @@ static void build_physics(UiNode *b) {
     row_int(s, "Solver Iterations", &p->solver_iterations, 1, 100);
     note(s, UI_ICON_INFO, "Higher rates and more iterations make tall stacks and fast objects more stable at a CPU cost. "
                           "60 Hz with 10 iterations suits most games.");
-    s = ed_section(b, UI_ICON_COLLIDER, "Layer Collisions (layers 0-7)", &g_dummy_open, NULL);
-    note(s, UI_ICON_INFO, "A Collider's Layer decides what it can hit. Untick a box to make two layers pass through each other. "
-                          "Queries take a layer mask too.");
+
+    /* ---- the layers themselves ---- */
+    s = ed_section(b, UI_ICON_LAYERS, "Layers", &g_dummy_open, NULL);
+    note(s, UI_ICON_INFO, "Every object is on a layer, chosen beside its Tag in the Inspector. Name one here to start "
+                          "using it: the collision matrix below and the queries in a graph both go by these names.");
+    for (int i = 0; i < LX_LAYER_COUNT; i++) {
+        /* the named ones, and the first empty one after them - a new layer is made by naming it,
+           and offering all 32 at once would be a list nobody reads */
+        static bool shown_empty;
+        if (i == 0) shown_empty = false;
+        bool named = lx_layer_named(i);
+        if (!named) {
+            if (shown_empty) continue;
+            shown_empty = true;
+        }
+        char label[32];
+        snprintf(label, sizeof label, "Layer %d", i);
+        UiNode *row = ed_prop_row(s, label);
+        UiNode *tf = ui_textfield(ui, row, ED.project.layers.name[i], LX_LAYER_NAME_MAX);
+        tf->grow = 1;
+        tf->h = 22;
+        tf->tag = i;
+        tf->on_change = layer_name_changed;
+        if (i == 0) lx_strcpy(tf->hint, sizeof tf->hint, "Default");
+        else if (!named) lx_strcpy(tf->hint, sizeof tf->hint, "name it to add a layer");
+    }
+
+    /* ---- what touches what ---- */
+    int rows[LX_LAYER_COUNT];
+    int nr = layer_rows(rows);
+    s = ed_section(b, UI_ICON_COLLIDER, "Layer Collisions", &g_dummy_open, NULL);
+    note(s, UI_ICON_INFO, "Untick a box to let two layers pass through each other. Queries take their own list of "
+                          "layers, so this is only about things bumping into each other.");
     UiNode *head = ui_box(ui, s, UI_ROW);
     head->h = 22;
     UiNode *pad = ui_label(ui, head, "");
-    pad->w = 70;
-    for (int j = 0; j < 8; j++) {
-        char t[8];
-        snprintf(t, sizeof t, "%d", j);
-        UiNode *l = ui_label(ui, head, t);
+    pad->w = 110;
+    for (int j = 0; j < nr; j++) {
+        char t2[8];
+        snprintf(t2, sizeof t2, "%d", rows[j]);
+        UiNode *l = ui_label(ui, head, t2);
         l->w = 32;
         l->center_text = true;
+        lx_strcpy(l->tooltip, sizeof l->tooltip, lx_layer_name(rows[j]));
     }
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < nr; i++) {
         UiNode *row = ui_box(ui, s, UI_ROW);
         row->h = 26;
-        char t[16];
-        snprintf(t, sizeof t, "Layer %d", i);
-        UiNode *l = ui_label(ui, row, t);
-        l->w = 70;
-        for (int j = 0; j < 8; j++) {
-            g_layers[i][j] = (p->layer_mask[i] >> j) & 1u;
+        char t2[64];
+        snprintf(t2, sizeof t2, "%d: %s", rows[i], lx_layer_name(rows[i]));
+        UiNode *l = ui_label(ui, row, t2);
+        l->w = 110;
+        l->font = UI_FONT_SMALL;
+        for (int j = 0; j < nr; j++) {
+            int a = rows[i], bb = rows[j];
+            g_layers[a][bb] = (p->layer_mask[a] >> bb) & 1u;
             UiNode *spacer = ui_box(ui, row, UI_ROW);
             spacer->w = 32;
             if (j < i) continue;   /* the matrix is symmetric: show one half */
-            UiNode *cb = ui_checkbox(ui, spacer, "", &g_layers[i][j]);
-            cb->tag = i * 8 + j;
+            UiNode *cb = ui_checkbox(ui, spacer, "", &g_layers[a][bb]);
+            cb->tag = a * LX_LAYER_COUNT + bb;
             cb->on_change = layer_changed;
         }
     }

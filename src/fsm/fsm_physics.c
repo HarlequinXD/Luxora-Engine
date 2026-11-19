@@ -158,7 +158,7 @@ static void col_set(LxFsmCtx *c) {
     if (!lx_fsm_is_none(c, 5)) col->size = lx_fsm_vec3(c, 5);
     if (!lx_fsm_is_none(c, 6)) col->radius = lx_maxf(0.0001f, lx_fsm_float(c, 6));
     if (!lx_fsm_is_none(c, 7)) col->height = lx_maxf(0.0001f, lx_fsm_float(c, 7));
-    if (!lx_fsm_is_none(c, 8)) col->layer = lx_fsm_int(c, 8) & 31;
+    if (!lx_fsm_is_none(c, 8)) lx_entity_set_layer(c->scene, e, lx_fsm_int(c, 8) & 31);
 }
 static const LxFsmActionDesc A_COL_SET = {"Set Collider", "Collider", "Changes a collider: trigger or solid, how slippery and bouncy it is, its shape and its layer. None leaves a setting alone.",
     "collider of {0}",
@@ -178,7 +178,7 @@ static void col_get(LxFsmCtx *c) {
     lx_fsm_set_vec3(c, 2, col->center);
     lx_fsm_set_vec3(c, 3, col->size);
     lx_fsm_set_float(c, 4, col->radius);
-    lx_fsm_set_int(c, 6, col->layer);
+    lx_fsm_set_int(c, 6, lx_entity_layer(c->scene, e));
 }
 static const LxFsmActionDesc A_COL_GET = {"Get Collider", "Collider", "Reads a collider's trigger flag, shape and layer.", "collider of {0}",
     {POBJ("Object"), POPT("Store Is Trigger", LX_FSM_BOOL), POPT("Store Center", LX_FSM_VEC3), POPT("Store Size", LX_FSM_VEC3),
@@ -269,7 +269,7 @@ static void q_raycast(LxFsmCtx *c) {
     origin = lx_add3(origin, offset);
     LxRaycastHit hit = {0};
     bool got = lx_physics_raycast_ignore(c->scene, origin, lx_norm3(dir), lx_fsm_float(c, 4),
-                                         LX_ALL_LAYERS, lx_fsm_bool(c, 5) ? from : 0, &hit);
+                                         lx_layer_mask(lx_fsm_string(c, 14)), lx_fsm_bool(c, 5) ? from : 0, &hit);
     if (got) {
         char tag[LX_NAME_MAX];
         lx_strcpy(tag, sizeof tag, lx_fsm_string(c, 6));
@@ -289,7 +289,8 @@ static const LxFsmActionDesc A_Q_RAYCAST = {"Raycast", "Physics Queries", "Fires
      P("Distance", LX_FSM_FLOAT, "50"), PT("Ignore Self", LX_FSM_BOOL, "true", "never hit the firing object or its children"),
      PT("Tag Filter", LX_FSM_STRING, "", "only count hits carrying this tag"),
      POPT("Store Did Hit", LX_FSM_BOOL), POPT("Store Hit Object", LX_FSM_OBJECT), POPT("Store Hit Point", LX_FSM_VEC3),
-     POPT("Store Hit Normal", LX_FSM_VEC3), POPT("Store Distance", LX_FSM_FLOAT), PEV("Hit Event"), PEV("Miss Event")},
+     POPT("Store Hit Normal", LX_FSM_VEC3), POPT("Store Distance", LX_FSM_FLOAT), PEV("Hit Event"), PEV("Miss Event"),
+     PT("Layers", LX_FSM_STRING, "", "which layers to look at, by name: \"Ground, Props\". Empty looks at every layer")},
     0, 0, LX_FSM_EVERY_FRAME, q_raycast, q_raycast, NULL};
 
 static void q_linecast(LxFsmCtx *c) {
@@ -299,7 +300,8 @@ static void q_linecast(LxFsmCtx *c) {
     LxVec3 d = lx_sub3(pb, pa);
     float len = lx_len3(d);
     LxRaycastHit hit = {0};
-    bool blocked = len > 1e-6f && lx_physics_raycast_ignore(c->scene, pa, lx_scale3(d, 1.0f / len), len, LX_ALL_LAYERS, a, &hit);
+    bool blocked = len > 1e-6f && lx_physics_raycast_ignore(c->scene, pa, lx_scale3(d, 1.0f / len), len,
+                                                            lx_layer_mask(lx_fsm_string(c, 9)), a, &hit);
     lx_fsm_set_bool(c, 4, !blocked);
     lx_fsm_set_object(c, 5, blocked ? hit.entity : 0);
     lx_fsm_set_vec3(c, 6, blocked ? hit.point : pb);
@@ -310,7 +312,8 @@ static const LxFsmActionDesc A_Q_LINECAST = {"Line Of Sight", "Physics Queries",
     {POBJT("From Object", "the eye"), POBJNT("To Object", "None uses the position below"),
      P("From Position", LX_FSM_VEC3, "0 0 0"), P("To Position", LX_FSM_VEC3, "0 0 0"),
      POPT("Store Is Clear", LX_FSM_BOOL), POPT("Store Blocker", LX_FSM_OBJECT), POPT("Store Hit Point", LX_FSM_VEC3),
-     PEV("Clear Event"), PEV("Blocked Event")},
+     PEV("Clear Event"), PEV("Blocked Event"),
+     PT("Layers", LX_FSM_STRING, "", "which layers to look at, by name: \"Ground, Props\". Empty looks at every layer")},
     0, 0, LX_FSM_EVERY_FRAME, q_linecast, q_linecast, NULL};
 
 static void q_sphere_cast(LxFsmCtx *c) {
@@ -320,7 +323,7 @@ static void q_sphere_cast(LxFsmCtx *c) {
     LxVec3 dir = lx_norm3(lx_fsm_vec3(c, 2));
     LxRaycastHit hit = {0};
     bool got = lx_physics_sphere_cast(c->scene, origin, lx_maxf(0.001f, lx_fsm_float(c, 3)), dir,
-                                      lx_fsm_float(c, 4), LX_ALL_LAYERS, &hit);
+                                      lx_fsm_float(c, 4), lx_layer_mask(lx_fsm_string(c, 11)), &hit);
     lx_fsm_set_bool(c, 5, got);
     lx_fsm_set_object(c, 6, got ? hit.entity : 0);
     lx_fsm_set_vec3(c, 7, got ? hit.point : lx_v3(0, 0, 0));
@@ -332,7 +335,8 @@ static const LxFsmActionDesc A_Q_SPHERE_CAST = {"Sphere Cast", "Physics Queries"
     {POBJ("From Object"), P("Offset", LX_FSM_VEC3, "0 0 0"), P("Direction", LX_FSM_VEC3, "0 0 1"),
      P("Radius", LX_FSM_FLOAT, "0.5"), P("Distance", LX_FSM_FLOAT, "10"),
      POPT("Store Did Hit", LX_FSM_BOOL), POPT("Store Hit Object", LX_FSM_OBJECT), POPT("Store Hit Point", LX_FSM_VEC3),
-     POPT("Store Distance", LX_FSM_FLOAT), PEV("Hit Event"), PEV("Miss Event")},
+     POPT("Store Distance", LX_FSM_FLOAT), PEV("Hit Event"), PEV("Miss Event"),
+     PT("Layers", LX_FSM_STRING, "", "which layers to look at, by name: \"Ground, Props\". Empty looks at every layer")},
     0, 0, LX_FSM_EVERY_FRAME, q_sphere_cast, q_sphere_cast, NULL};
 
 static void q_overlap_sphere(LxFsmCtx *c) {
@@ -340,7 +344,8 @@ static void q_overlap_sphere(LxFsmCtx *c) {
     LxVec3 center = at ? lx_entity_world_position(c->scene, at) : lx_fsm_vec3(c, 1);
     if (at && !lx_fsm_is_none(c, 1)) center = lx_add3(center, lx_fsm_vec3(c, 1));
     LxEntity found[256];
-    int n = lx_physics_overlap_sphere(c->scene, center, lx_maxf(0, lx_fsm_float(c, 2)), LX_ALL_LAYERS, found, 256);
+    int n = lx_physics_overlap_sphere(c->scene, center, lx_maxf(0, lx_fsm_float(c, 2)),
+                                      lx_layer_mask(lx_fsm_string(c, 10)), found, 256);
     char tag[LX_NAME_MAX];
     lx_strcpy(tag, sizeof tag, lx_fsm_string(c, 3));
     bool skip_self = lx_fsm_bool(c, 4);
@@ -368,7 +373,8 @@ static const LxFsmActionDesc A_Q_OVERLAP_SPHERE = {"Overlap Sphere", "Physics Qu
      P("Radius", LX_FSM_FLOAT, "5"), PT("Tag Filter", LX_FSM_STRING, "", "empty = anything"),
      PT("Ignore Self", LX_FSM_BOOL, "true", "leave this object out"),
      PARRT("Store List", "an Object array"), POPT("Store Count", LX_FSM_INT), POPT("Store Closest", LX_FSM_OBJECT),
-     PEV("Found Event"), PEV("None Found Event")},
+     PEV("Found Event"), PEV("None Found Event"),
+     PT("Layers", LX_FSM_STRING, "", "which layers to look at, by name: \"Ground, Props\". Empty looks at every layer")},
     0, 0, LX_FSM_EVERY_FRAME, q_overlap_sphere, q_overlap_sphere, NULL};
 
 static void q_overlap_box(LxFsmCtx *c) {
@@ -376,7 +382,8 @@ static void q_overlap_box(LxFsmCtx *c) {
     LxVec3 center = at ? lx_entity_world_position(c->scene, at) : lx_fsm_vec3(c, 1);
     LxQuat rot = at ? lx_entity_world_rotation(c->scene, at) : lx_quat_identity();
     LxEntity found[256];
-    int n = lx_physics_overlap_box(c->scene, center, lx_scale3(lx_fsm_vec3(c, 2), 0.5f), rot, LX_ALL_LAYERS, found, 256);
+    int n = lx_physics_overlap_box(c->scene, center, lx_scale3(lx_fsm_vec3(c, 2), 0.5f), rot,
+                                   lx_layer_mask(lx_fsm_string(c, 8)), found, 256);
     char tag[LX_NAME_MAX];
     lx_strcpy(tag, sizeof tag, lx_fsm_string(c, 3));
     LxArray list = lx_fsm_array(c, 4);
@@ -395,7 +402,8 @@ static const LxFsmActionDesc A_Q_OVERLAP_BOX = {"Overlap Box", "Physics Queries"
     "overlap box at {0}",
     {POBJT("At Object", "the centre; its rotation turns the box"), P("Position", LX_FSM_VEC3, "0 0 0"),
      P("Size", LX_FSM_VEC3, "2 2 2"), PT("Tag Filter", LX_FSM_STRING, "", "empty = anything"),
-     PARRT("Store List", "an Object array"), POPT("Store Count", LX_FSM_INT), PEV("Found Event"), PEV("None Found Event")},
+     PARRT("Store List", "an Object array"), POPT("Store Count", LX_FSM_INT), PEV("Found Event"), PEV("None Found Event"),
+     PT("Layers", LX_FSM_STRING, "", "which layers to look at, by name: \"Ground, Props\". Empty looks at every layer")},
     0, 0, LX_FSM_EVERY_FRAME, q_overlap_box, q_overlap_box, NULL};
 
 static void q_mouse_pick(LxFsmCtx *c) {

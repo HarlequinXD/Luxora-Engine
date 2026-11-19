@@ -31,6 +31,7 @@ static void write_entity(LxStrBuf *sb, const LxScene *s, LxEntity e, int id_of_p
     int id = (*next_id)++;
     lx_sb_printf(sb, "\n[entity]\nid = %d\nparent = %d\nname = %s\nactive = %d\n", id, id_of_parent, d->name, d->active);
     if (d->tag[0]) lx_sb_printf(sb, "tag = %s\n", d->tag);
+    if (d->layer) lx_sb_printf(sb, "layer = %d\n", (int)d->layer);
     if (d->prefab[0] && !prefab_root) lx_sb_printf(sb, "prefab = %s\n", d->prefab);
     if (prefab_root) lx_sb_printf(sb, "position = 0 0 0\n");   /* a prefab is placed where it's spawned */
     else lx_sb_printf(sb, "position = %.6g %.6g %.6g\n", d->position.x, d->position.y, d->position.z);
@@ -81,8 +82,8 @@ static void write_entity(LxStrBuf *sb, const LxScene *s, LxEntity e, int id_of_p
         const LxCollider *c = &d->collider;
         lx_sb_printf(sb, "collider.shape = %s\ncollider.center = %g %g %g\ncollider.size = %g %g %g\ncollider.radius = %g\n",
                      shape_names[(int)c->shape & 3], c->center.x, c->center.y, c->center.z, c->size.x, c->size.y, c->size.z, c->radius);
-        lx_sb_printf(sb, "collider.height = %g\ncollider.trigger = %d\ncollider.friction = %g\ncollider.bounce = %g\ncollider.layer = %d\n",
-                     c->height, c->is_trigger, c->friction, c->bounciness, c->layer);
+        lx_sb_printf(sb, "collider.height = %g\ncollider.trigger = %d\ncollider.friction = %g\ncollider.bounce = %g\n",
+                     c->height, c->is_trigger, c->friction, c->bounciness);
     }
     if (d->comps & LX_COMP_RIGIDBODY) {
         const LxRigidbody *b = &d->body;
@@ -228,6 +229,7 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
             if (pid > 0 && pid < ids_cap && ids[pid]) lx_entity_set_parent(s, cur_e, ids[pid]);
         } else if (!strcmp(k, "name")) lx_strcpy(d->name, sizeof d->name, v);
         else if (!strcmp(k, "tag")) lx_strcpy(d->tag, sizeof d->tag, v);
+        else if (!strcmp(k, "layer")) d->layer = (int8_t)(atoi(v) & 31);
         else if (!strcmp(k, "prefab")) lx_strcpy(d->prefab, sizeof d->prefab, v);
         else if (!strcmp(k, "active")) d->active = lx_parse_bool(v);
         else if (!strcmp(k, "position")) d->position = lx_parse_vec3(v);
@@ -313,7 +315,8 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
             else if (!strcmp(f, "trigger")) c->is_trigger = lx_parse_bool(v);
             else if (!strcmp(f, "friction")) c->friction = (float)atof(v);
             else if (!strcmp(f, "bounce")) c->bounciness = (float)atof(v);
-            else if (!strcmp(f, "layer")) c->layer = atoi(v);
+            /* the layer used to live on the collider: an older scene still says so, and it means the object */
+            else if (!strcmp(f, "layer")) lx_entity_set_layer(s, cur_e, atoi(v));
         } else if (!strncmp(k, "body.", 5)) {
             const char *f = k + 5;
             bool had_collider = (d->comps & LX_COMP_COLLIDER) != 0;

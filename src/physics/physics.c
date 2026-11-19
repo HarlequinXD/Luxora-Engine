@@ -717,7 +717,7 @@ static void gather(LxScene *s, LxPhysicsWorld *w, float dt, bool side_effects) {
             b.kind = BODY_KINEMATIC;
             b.character = true;
             b.friction = 0;
-            b.layer = d->comps & LX_COMP_COLLIDER ? d->collider.layer : 0;
+            b.layer = d->layer & 31;
         } else {
             const LxCollider *col = &d->collider;
             b.shape = col->shape;
@@ -725,7 +725,7 @@ static void gather(LxScene *s, LxPhysicsWorld *w, float dt, bool side_effects) {
             b.trigger = col->is_trigger;
             b.friction = lx_clampf(col->friction, 0, 2);
             b.restitution = lx_clampf(col->bounciness, 0, 1);
-            b.layer = col->layer & 31;
+            b.layer = d->layer & 31;
             b.offset = lx_v3(col->center.x * sc.x, col->center.y * sc.y, col->center.z * sc.z);
             bool dynamic = (d->comps & LX_COMP_RIGIDBODY) && !d->body.is_kinematic;
             if (b.shape == LX_COLLIDER_MESH && dynamic) {
@@ -1317,8 +1317,20 @@ bool lx_physics_sphere_cast(LxScene *s, LxVec3 origin, float radius, LxVec3 dir,
     float len = lx_len3(dir);
     if (len < 1e-9f) return false;
     LxVec3 d = scl(dir, 1.0f / len);
-    /* march, then bisect to the first touching position */
-    float step = lx_maxf(radius * 0.5f, 0.02f), prev = 0;
+    /* march, then bisect to the first touching position.
+     *
+     * The march has to end whatever it is handed. A distance of NaN compares false against everything,
+     * so "t > max_dist" and "t >= max_dist" are both false and the sweep runs for ever - and an
+     * enormous distance with a small sphere is the same hang with extra steps. Neither showed up while
+     * every query looked at every layer, because the probe hit something immediately and returned;
+     * a query that looks at a layer nothing is on marches the whole way. */
+    if (!(max_dist > 0) || !(radius >= 0)) return false;   /* NaN, negative, nothing to sweep */
+    float step = lx_maxf(radius * 0.5f, 0.02f);
+    if (!(step > 0)) step = 0.02f;
+    /* a long sweep takes bigger steps rather than more of them: coarser, but it finishes */
+    const float max_steps = 4096.0f;
+    if (max_dist / step > max_steps) step = max_dist / max_steps;
+    float prev = 0;
     for (float t = 0;; t += step) {
         if (t > max_dist) t = max_dist;
         Body p = probe_sphere(lx_madd3(origin, d, t), radius);

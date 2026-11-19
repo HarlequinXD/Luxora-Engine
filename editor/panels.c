@@ -447,6 +447,25 @@ static void transform_changed(UiNode *n) {
     if (d) lx_entity_set_euler(ED.scene, ED.inspector_entity, d->euler);
     ed_mark_changed();
 }
+/* The dropdown wants a list of names that stays put while it is open, and every layer has to be in it
+ * - an object can be on one nobody has named yet, and leaving it out would silently move it. */
+static const char *const *ed_layer_names(void) {
+    static char buf[LX_LAYER_COUNT][LX_LAYER_NAME_MAX + 12];
+    static const char *ptrs[LX_LAYER_COUNT];
+    for (int i = 0; i < LX_LAYER_COUNT; i++) {
+        if (lx_layer_named(i)) snprintf(buf[i], sizeof buf[i], "%d: %s", i, lx_layer_name(i));
+        else snprintf(buf[i], sizeof buf[i], "%d", i);
+        ptrs[i] = buf[i];
+    }
+    return ptrs;
+}
+static int g_layer_pick;
+static void layer_changed(UiNode *n) {
+    LxEntity e = ED.selected;
+    if (ED.scene && e) lx_entity_set_layer(ED.scene, e, g_layer_pick);
+    ed_field_changed(n);
+}
+
 static void name_changed(UiNode *n) { LX_UNUSED(n); ED.hierarchy_hash = 0; ed_mark_changed(); ed_commit(); }
 static void active_changed(UiNode *n) { LX_UNUSED(n); ED.hierarchy_hash = 0; lx_scene_mark_static_dirty(ED.scene); ed_mark_changed(); ed_commit(); }
 static void structural_changed(UiNode *n) { LX_UNUSED(n); ed_mark_changed(); ed_commit(); ED.inspector_dirty = true; ED.hierarchy_hash = 0; }
@@ -652,7 +671,7 @@ static void build_entity_inspector(UiNode *body) {
     name->font = UI_FONT_BOLD;
     name->on_change = name_changed;
 
-    /* tag */
+    /* tag, and the layer beside it */
     UiNode *tag_row = ed_prop_row(body, "Tag");
     ui_pad(tag_row, 12, 0, 10, 0);
     UiNode *tag = ui_textfield(ui, tag_row, d->tag, sizeof d->tag);
@@ -661,6 +680,17 @@ static void build_entity_inspector(UiNode *body) {
     lx_strcpy(tag->hint, sizeof tag->hint, "Untagged");
     lx_strcpy(tag->tooltip, sizeof tag->tooltip, "A label scripts can find objects by (lx_entity_find_with_tag), e.g. Player, Enemy, Pickup");
     tag->on_change = ed_field_changed;
+    UiNode *lay_lbl = ui_label(ui, tag_row, "Layer");
+    lay_lbl->w = 40;
+    lay_lbl->fg = t->text_dim;
+    g_layer_pick = d->layer;
+    UiNode *lay = ui_dropdown(ui, tag_row, &g_layer_pick, ed_layer_names(), LX_LAYER_COUNT);
+    lay->w = 120;
+    lay->h = 22;
+    lay->on_change = layer_changed;
+    lx_strcpy(lay->tooltip, sizeof lay->tooltip,
+              "Which layer this object is on: what it collides with, and which raycasts find it. "
+              "Name the layers in Project Settings.");
 
     /* prefab instance: where it came from, and apply / select / unlink */
     LxEntity proot = ed_prefab_root(e);
@@ -855,10 +885,13 @@ static void build_entity_inspector(UiNode *body) {
             slider_row(sec, "Friction", &d->collider.friction, 0, 1)->on_change = ed_field_changed;
             slider_row(sec, "Bounciness", &d->collider.bounciness, 0, 1)->on_change = ed_field_changed;
         }
+        /* the layer belongs to the object, not to the collider: it is set beside the Tag, and saying so
+           here is better than a second control that would have to agree with the first */
         UiNode *lr = ed_prop_row(sec, "Layer");
-        UiNode *ln = ui_int(ui, lr, &d->collider.layer, 0, 31);
+        UiNode *ln = ui_label(ui, lr, lx_layer_name(d->layer));
         ln->grow = 1;
-        ln->on_change = ed_field_changed;
+        ln->fg = t->text_dim;
+        lx_strcpy(ln->tooltip, sizeof ln->tooltip, "Set on the object, beside its Tag at the top of the Inspector");
         if (!(d->comps & LX_COMP_RIGIDBODY)) {
             UiNode *hint = ui_label(ui, sec, "Static: never moves. Add a Rigidbody to make it fall, roll and get pushed.");
             hint->font = UI_FONT_SMALL;

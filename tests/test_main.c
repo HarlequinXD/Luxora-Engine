@@ -238,6 +238,106 @@ static void test_character_no_sinking(void) {
     }
 }
 
+/* Layers: a number for physics, a name for everybody else. */
+static void test_layers(void) {
+    printf("layers\n");
+    LxLayers *l = lx_layers();
+    memset(l, 0, sizeof *l);
+    lx_strcpy(l->name[0], LX_LAYER_NAME_MAX, "Default");
+    lx_strcpy(l->name[3], LX_LAYER_NAME_MAX, "Ground");
+    lx_strcpy(l->name[7], LX_LAYER_NAME_MAX, "Props");
+
+    CHECK(!strcmp(lx_layer_name(3), "Ground") && lx_layer_named(3), "a named layer gives its name");
+    CHECK(!strcmp(lx_layer_name(9), "Layer 9") && !lx_layer_named(9), "an unnamed one still has something to call it (%s)",
+          lx_layer_name(9));
+    CHECK(lx_layer_find("Ground") == 3 && lx_layer_find("ground") == 3, "a layer is found by name, whatever its case");
+    CHECK(lx_layer_find(" Props ") == 7, "with the spaces around it trimmed");
+    CHECK(lx_layer_find("Nothing") < 0, "and not found when there is no such layer");
+    CHECK(lx_layer_find("Layer 9") == 9, "an unnamed layer can still be named by number");
+
+    CHECK(lx_layer_mask("") == LX_ALL_LAYERS && lx_layer_mask(NULL) == LX_ALL_LAYERS, "no layers named means every layer");
+    CHECK(lx_layer_mask("Ground") == (1u << 3), "one name is one bit (%u)", lx_layer_mask("Ground"));
+    CHECK(lx_layer_mask("Ground, Props") == ((1u << 3) | (1u << 7)), "a list is the bits of all of them");
+    CHECK(lx_layer_mask("Ground;Props") == ((1u << 3) | (1u << 7)), "a semicolon separates them too");
+    CHECK(lx_layer_mask("Ground, Nothing") == (1u << 3), "a name no layer has is passed over");
+    /* a mask of nothing finds nothing, which looks exactly like a broken query: a list that named no
+       layer at all is far more likely to be a typo than a request to search nowhere */
+    CHECK(lx_layer_mask("Nothing, Nowhere") == LX_ALL_LAYERS, "a list of names that are all wrong searches everywhere");
+    {
+        char names[128];
+        lx_layer_mask_names((1u << 3) | (1u << 7), names, sizeof names);
+        CHECK(!strcmp(names, "Ground, Props"), "a mask reads back as its names (%s)", names);
+        lx_layer_mask_names(LX_ALL_LAYERS, names, sizeof names);
+        CHECK(!strcmp(names, "every layer"), "and all of them says so (%s)", names);
+        lx_layer_mask_names(0, names, sizeof names);
+        CHECK(!strcmp(names, "no layers"), "as does none of them (%s)", names);
+    }
+
+    /* an object carries its layer, and a scene remembers it */
+    LxScene *s = lx_scene_create("Layers");
+    LxEntity e = lx_entity_create(s, "Thing");
+    CHECK(lx_entity_layer(s, e) == 0, "an object starts on the default layer");
+    lx_entity_set_layer(s, e, 7);
+    CHECK(lx_entity_layer(s, e) == 7, "and can be moved to another");
+    lx_entity_set_layer(s, e, 99);
+    CHECK(lx_entity_layer(s, e) == 7, "a layer that does not exist is refused (%d)", lx_entity_layer(s, e));
+    char *text = lx_scene_serialize(s);
+    LxScene *back = lx_scene_create("Back");
+    lx_scene_deserialize_into(back, text, 0);
+    LxEntity e2 = lx_entity_find(back, "Thing");
+    CHECK(e2 && lx_entity_layer(back, e2) == 7, "the layer is saved with the scene (%d)",
+          e2 ? lx_entity_layer(back, e2) : -1);
+    lx_free(text);
+    lx_scene_destroy(back);
+
+    /* a scene from before the layer moved off the collider still means the object */
+    {
+        const char *old_scene =
+            "[entity]\nname = Old\ncomponents = collider\ncollider.shape = box\ncollider.layer = 3\n";
+        LxScene *o = lx_scene_create("Old");
+        lx_scene_deserialize_into(o, old_scene, 0);
+        LxEntity oe = lx_entity_find(o, "Old");
+        CHECK(oe && lx_entity_layer(o, oe) == 3, "an older scene's collider layer becomes the object's (%d)",
+              oe ? lx_entity_layer(o, oe) : -1);
+        lx_scene_destroy(o);
+    }
+
+    /* and the thing it is all for: a query that only looks at some of them */
+    {
+        LxScene *q = lx_scene_create("Query");
+        LxEntity ground = lx_spawn_primitive(q, LX_PRIM_CUBE, "Floor", lx_v3(0, 0, 0));
+        lx_add_collider(q, ground, LX_COLLIDER_BOX);
+        lx_entity_set_layer(q, ground, 3);
+        LxEntity prop = lx_spawn_primitive(q, LX_PRIM_CUBE, "Crate", lx_v3(0, 3, 0));
+        lx_add_collider(q, prop, LX_COLLIDER_BOX);
+        lx_entity_set_layer(q, prop, 7);
+        lx_scene_simulate(q, 1.0f / 60.0f);
+        LxRaycastHit hit;
+        bool any = lx_physics_raycast(q, lx_v3(0, 10, 0), lx_v3(0, -1, 0), 100, LX_ALL_LAYERS, &hit);
+        CHECK(any && hit.entity == prop, "with every layer the ray meets the nearer one first");
+        bool only_ground = lx_physics_raycast(q, lx_v3(0, 10, 0), lx_v3(0, -1, 0), 100, lx_layer_mask("Ground"), &hit);
+        CHECK(only_ground && hit.entity == ground, "asking for Ground passes straight through the crate");
+        bool none = lx_physics_raycast(q, lx_v3(0, 10, 0), lx_v3(0, -1, 0), 100, 1u << 12, &hit);
+        CHECK(!none, "and a layer nothing is on finds nothing");
+        /* A sweep that meets nothing has to march the whole way, which is where a distance it cannot
+           compare against - NaN, or one too large to step through - used to leave it going for ever.
+           Nothing hit this while every query looked at every layer and so returned on the first probe. */
+        CHECK(!lx_physics_sphere_cast(q, lx_v3(0, 10, 0), 0.3f, lx_v3(0, -1, 0), (float)NAN, LX_ALL_LAYERS, &hit),
+              "a sphere cast with no distance to go gives up rather than hanging");
+        CHECK(!lx_physics_sphere_cast(q, lx_v3(0, 10, 0), 0.3f, lx_v3(0, -1, 0), -5, LX_ALL_LAYERS, &hit),
+              "nor does it sweep backwards");
+        CHECK(!lx_physics_sphere_cast(q, lx_v3(500, 10, 500), 0.01f, lx_v3(0, -1, 0), 1e9f, 1u << 12, &hit),
+              "a sweep of a million metres past everything still ends");
+        CHECK(lx_physics_sphere_cast(q, lx_v3(0, 10, 0), 0.3f, lx_v3(0, -1, 0), 100, lx_layer_mask("Ground"), &hit) &&
+                  hit.entity == ground,
+              "and one that is looking for the ground still finds it");
+        lx_scene_destroy(q);
+    }
+    lx_scene_destroy(s);
+    memset(lx_layers(), 0, sizeof(LxLayers));
+    lx_strcpy(lx_layers()->name[0], LX_LAYER_NAME_MAX, "Default");
+}
+
 static void test_physics(void) {
     printf("physics\n");
     /* resting sphere and box */
@@ -3271,6 +3371,7 @@ int main(void) {
     test_input();
     test_reflection_probe();
     test_icon_images();
+    test_layers();
     test_physics();
     test_character_no_sinking();
     test_game_ui();

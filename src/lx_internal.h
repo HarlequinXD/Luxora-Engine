@@ -325,6 +325,7 @@ typedef struct LxEntityData {
     int audio_voice;  /* runtime voice index or -1 */
     uint32_t order;   /* creation order key */
     char tag[LX_TAG_MAX];
+    int8_t layer;             /* 0..31: the collision matrix and every query see this */
     char prefab[LX_REF_MAX];  /* the prefab this object was made from ("" = none) */
     bool pending_destroy;     /* destroyed during the frame: removed when the frame ends */
     int16_t lm_index;         /* baked lighting: lightmap atlas, -1 = none */
