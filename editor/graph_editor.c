@@ -725,7 +725,7 @@ static void draw_state(UiCtx *ui, const LxGraph *g, int i, const LxFsmRun *run) 
         char info[160];
         if (is_sub) sub_info(g, st, run, info, sizeof info);
         else snprintf(info, sizeof info, "sends %s", lx_graph_exit_event(st));
-        uint32_t c = is_sub && run && info[0] ? UI_HEX(0xffb03a) : COL_DIM;
+        uint32_t c = is_sub && active ? UI_HEX(0xffb03a) : COL_DIM;   /* orange: where it is playing now */
         float tw = ui_text_width(ui, UI_FONT_SMALL, info);
         ui_draw_text(ui, UI_FONT_SMALL, x + lx_maxf(6 * s, (w - tw) * 0.5f), ry + (rh - ui_line_height(ui, UI_FONT_SMALL)) * 0.5f, info, c);
     }

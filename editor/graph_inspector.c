@@ -786,6 +786,27 @@ static void comment_text_changed(UiNode *n) {
     ge_commit(false, NULL);
 }
 
+static void open_sub_click(UiNode *n) { ge_enter_scope((int)n->tag); }
+static void state_history_changed(UiNode *n) {
+    PB *b = n->user;
+    LxGraph *g = ge_graph();
+    if (!g || b->st < 0 || b->st >= g->state_count) return;
+    g->states[b->st].history = b->b;
+    ge_commit(false, NULL);
+}
+static void exit_event_changed(UiNode *n) {
+    PB *b = n->user;
+    LxGraph *g = ge_graph();
+    if (!g || b->st < 0 || b->st >= g->state_count) return;
+    char ev[LX_FSM_NAME];
+    size_t k = 0;
+    for (const char *p = b->s; *p && k + 1 < sizeof ev; p++) ev[k++] = *p == ' ' ? '_' : (char)toupper((unsigned char)*p);
+    ev[k] = 0;
+    LxGraphState *st = &g->states[b->st];
+    lx_strcpy(st->exit_event, sizeof st->exit_event, strcmp(ev, "FINISHED") ? ev : "");
+    if (st->exit_event[0] && !lx_graph_find_event(g, st->exit_event)) lx_graph_add_event(g, st->exit_event);
+    ge_commit(false, NULL);
+}
 static void build_state_tab(UiNode *body) {
     UiCtx *ui = ED.ui;
     LxGraph *g = ge_graph();
@@ -840,6 +861,30 @@ static void build_state_tab(UiNode *body) {
     UiNode *sq = ui_checkbox(ui, row, "one action at a time", &sb->b);
     sq->user = sb;
     sq->on_change = state_seq_changed;
+    if (st->kind == LX_GS_SUB) {   /* a Sub State: look inside, and whether it remembers where it was */
+        row = prow(body, "Sub State", NULL);
+        UiNode *ob = ui_button(ui, row, "Open (double-click it)", open_sub_click);
+        ob->h = 22;
+        ob->grow = 1;
+        ob->icon = UI_ICON_GRAPH;
+        ob->tag = si;
+        PB *hb = pb_new(PB_MISC);
+        hb->st = si;
+        hb->b = st->history;
+        row = prow(body, "History", "Coming back carries on where each region left off, instead of from its start");
+        UiNode *hc = ui_checkbox(ui, row, "remember where it left off", &hb->b);
+        hc->user = hb;
+        hc->on_change = state_history_changed;
+    }
+    if (st->kind == LX_GS_EXIT) {   /* an Exit: what its Sub State is told */
+        PB *eb = pb_new(PB_MISC);
+        eb->st = si;
+        lx_strcpy(eb->s, sizeof eb->s, lx_graph_exit_event(st));
+        row = prow(body, "Sends", "The event its Sub State receives when this Exit is reached");
+        UiNode *ef = ui_textfield(ui, row, eb->s, LX_FSM_NAME);
+        ef->grow = 1; ef->h = 22; ef->user = eb; ef->on_change = exit_event_changed;
+        hint(body, "Reaching an Exit ends the Sub State's turn: the Sub State gets this event, and its own transition for it decides where to go.");
+    }
     /* transitions */
     heading(body, "Transitions");
     if (!st->trans_count) hint(body, "None yet: right-click the state › Add Transition, or pick an event in an action below.");
