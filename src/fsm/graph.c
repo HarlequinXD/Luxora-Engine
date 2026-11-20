@@ -123,6 +123,7 @@ char *lx_graph_to_text(const LxGraph *g) {
         put_escaped(&sb, "value", v->value);
         lx_sb_printf(&sb, "inspector = %d\n", v->inspector);
         if (v->tooltip[0]) put_escaped(&sb, "tooltip", v->tooltip);
+        if (v->watch) lx_sb_printf(&sb, "watch = 1\n");
     }
     for (int i = 0; i < g->global_count; i++) {
         lx_sb_printf(&sb, "\n[global]\n");
@@ -242,6 +243,7 @@ LxGraph *lx_graph_from_text(const char *text) {
             else if (!strcmp(k, "value")) lx_strcpy(x->value, sizeof x->value, v);
             else if (!strcmp(k, "inspector")) x->inspector = lx_parse_bool(v);
             else if (!strcmp(k, "tooltip")) lx_strcpy(x->tooltip, sizeof x->tooltip, v);
+            else if (!strcmp(k, "watch")) x->watch = lx_parse_bool(v);
             break;
         }
         case GLOBAL: {

@@ -12,7 +12,7 @@
 #define GE_COLORS 8
 
 typedef enum GeDrag { GE_DRAG_NONE, GE_DRAG_PAN, GE_DRAG_MOVE, GE_DRAG_LINK, GE_DRAG_BOX, GE_DRAG_COMMENT, GE_DRAG_COMMENT_SIZE,
-                      GE_DRAG_START, GE_DRAG_MINIMAP } GeDrag;
+                      GE_DRAG_START, GE_DRAG_MINIMAP, GE_DRAG_TIMELINE } GeDrag;
 
 typedef struct GraphEd {
     /* widgets */
@@ -55,6 +55,9 @@ typedef struct GraphEd {
     double last_commit_time;
     /* options */
     bool debug, hints, minimap;
+    /* the history timeline (while playing): the entry being looked at, -1 none */
+    int scrub;
+    UiNode *pause_btn, *step_btn;
     /* Action Browser */
     char ab_search[64];
     char ab_sel[64];

@@ -57,6 +57,7 @@ typedef struct LxGraphVar {
     LxFsmType type;
     char value[LX_REF_MAX];                 /* starting value as text */
     bool inspector;                         /* shown (and overridable) on the State Graph component */
+    bool watch;                             /* editor: its value shown on the graph while playing */
     char tooltip[128];
 } LxGraphVar;
 
@@ -207,6 +208,7 @@ typedef struct LxFsmBound {   /* one action as it runs */
     LxFsmValue lit[LX_FSM_MAX_PARAMS];
     void *state;
     bool finished, entered;
+    float progress;                  /* lx_fsm_progress, -1 = not reported */
 } LxFsmBound;
 
 typedef struct LxFsmRun {

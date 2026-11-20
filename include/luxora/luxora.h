@@ -706,6 +706,9 @@ void lx_fsm_set_vec3(struct LxFsmCtx *c, int p, LxVec3 v);
 void lx_fsm_set_color(struct LxFsmCtx *c, int p, LxVec4 v);
 void lx_fsm_set_object(struct LxFsmCtx *c, int p, LxEntity v);
 void lx_fsm_finish(struct LxFsmCtx *c);                       /* this action is done */
+/* how far along a long action is, 0..1: the State Graph editor shows it as a bar while playing. Actions with a
+ * Duration, Time, Delay or Timeout setting get one without calling this. */
+void lx_fsm_progress(struct LxFsmCtx *c, float p);
 void lx_fsm_send(struct LxFsmCtx *c, const char *event);      /* to this graph (changes state) */
 float lx_fsm_state_time(struct LxFsmCtx *c);                  /* seconds in the current state */
 /* the event that entered this state: its value, who sent it, and the other object (collisions, triggers) */

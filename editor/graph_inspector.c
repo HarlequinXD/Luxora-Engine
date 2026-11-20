@@ -634,6 +634,7 @@ static void action_running_frame(UiNode *n) {
     if (in && b->st < in->bound_states && b->ac < in->bound_counts[b->st]) {
         const LxFsmBound *bd = &r->bound[b->st][b->ac];
         on = bd->entered && !bd->finished;
+        if (bd->entered && bd->finished) { n->icon = UI_ICON_CHECK; n->icon_color = UI_HEX(0x7cc24e); return; }   /* done this time round */
     }
     n->icon = on ? UI_ICON_PLAY : UI_ICON_NONE;
     n->icon_color = COL_OK;
@@ -1168,6 +1169,13 @@ static void var_inspector_changed(UiNode *n) {
     ge_commit(false, NULL);
     ED.inspector_dirty = true;   /* the object's Inspector shows exposed variables */
 }
+static void var_watch_changed(UiNode *n) {
+    PB *b = n->user;
+    LxGraph *g = ge_graph();
+    if (!g || b->st < 0 || b->st >= g->var_count) return;
+    g->vars[b->st].watch = b->b;
+    ge_commit(false, NULL);
+}
 static void live_value_frame(UiNode *n) {
     PB *b = n->user;
     char v[96] = "";
@@ -1233,6 +1241,13 @@ static void var_block(UiNode *body, int i, const LxGraphVar *v, bool global) {
         cb->user = ib;
         cb->on_change = var_inspector_changed;
         lx_strcpy(cb->tooltip, sizeof cb->tooltip, "Show it in the object's Inspector, so each object can use its own value");
+        PB *wb = pb_new(PB_MISC);
+        wb->st = i;
+        wb->b = v->watch;
+        UiNode *wc = ui_checkbox(ui, vr, "Watch", &wb->b);
+        wc->user = wb;
+        wc->on_change = var_watch_changed;
+        lx_strcpy(wc->tooltip, sizeof wc->tooltip, "Show its live value on the graph while playing");
     }
     if (ED.play != ED_EDIT && GE.debug) {
         UiNode *lr = ui_box(ui, wrap, UI_ROW);

@@ -555,6 +555,7 @@ static void enter_state(LxScene *s, LxFsmRun *r, int idx);
 static void change_state(LxScene *s, LxFsmRun *r, int target, const char *event);
 
 static LxFsmRun *R(LxFsmRun *r) { return r->root ? r->root : r; }
+static void note_history(LxScene *s, LxFsmRun *r, int target, const char *event);
 
 /* ---------------- nested runs ---------------- */
 static LxFsmRun *kid_new(LxFsmRun *up, int scope, int region) {
@@ -669,6 +670,7 @@ static void spawn_kids(LxScene *s, LxFsmRun *r, int idx) {
         int start = region_entry(R(r), idx, reg);
         if (start < 0) continue;
         LxFsmRun *k = kid_new(r, idx, reg);
+        note_history(s, k, start, k->last_event);   /* where it starts shows in the history too */
         enter_state(s, k, start);
     }
 }
@@ -683,6 +685,7 @@ static void spawn_top_regions(LxScene *s, LxFsmRun *root) {
         int start = region_entry(root, -1, reg);
         if (start < 0) continue;
         LxFsmRun *k = kid_new(root, -1, reg);
+        note_history(s, k, start, "START");
         enter_state(s, k, start);
     }
 }
@@ -891,6 +894,7 @@ static bool start_action(LxScene *s, LxFsmRun *r, int st, int a) {
     if (b->state && b->desc->state_size) memset(b->state, 0, b->desc->state_size);
     b->finished = false;
     b->entered = true;
+    b->progress = -1;
     LxFsmCtx c = ctx_for(s, r, a, 0);
     LxFsmRun *root = R(r);
     root->in_action++;
@@ -1302,7 +1306,11 @@ bool lx_fsm_set_var_float(LxScene *s, LxEntity e, int slot, const char *var, flo
 
 void lx_fsm_finish(LxFsmCtx *c) {
     LxFsmBound *b = cur_bound(c);
-    if (b) b->finished = true;
+    if (b) { b->finished = true; b->progress = 1; }
+}
+void lx_fsm_progress(LxFsmCtx *c, float p) {
+    LxFsmBound *b = cur_bound(c);
+    if (b && p == p) b->progress = lx_clampf(p, 0, 1);
 }
 void lx_fsm_send(LxFsmCtx *c, const char *event) {
     if (!c->run || !event || !event[0] || !strcmp(event, "None")) return;

@@ -8,7 +8,7 @@
 #include "graph_editor.h"
 #include <math.h>
 
-GraphEd GE = {.zoom = 1, .sel_trans = -1, .sel_comment = -1, .minimap = true, .hints = true, .link_state = -1};
+GraphEd GE = {.zoom = 1, .sel_trans = -1, .sel_comment = -1, .minimap = true, .hints = true, .link_state = -1, .scrub = -1};
 
 static const uint32_t STATE_COLORS[GE_COLORS] = {0x34363c, 0x7a2412, 0x1d3a5f, 0x4a2350, 0x24502c, 0x1d4a4a, 0x5a4a14, 0x2a2b30};
 static const char *const COLOR_NAMES[GE_COLORS] = {"Default", "Red", "Blue", "Purple", "Green", "Teal", "Yellow", "Grey"};
@@ -198,6 +198,7 @@ void ge_redo(void) {
 /* ======================================================================
  *  geometry (graph units are logical pixels at 100%)
  * ====================================================================== */
+static float bottom_pad(void);
 static float SC(void) { return ui_scale(ED.ui) * GE.zoom; }
 static float sx(float gx) { return GE.canvas->x + (gx - GE.pan_x) * SC(); }
 static float sy(float gy) { return GE.canvas->y + (gy - GE.pan_y) * SC(); }
@@ -345,7 +346,7 @@ static void minimap_rect(float *x, float *y, float *w, float *h) {
     *w = 160 * s;
     *h = 100 * s;
     *x = GE.canvas->x + GE.canvas->cw - *w - 10 * s;
-    *y = GE.canvas->y + GE.canvas->ch - *h - 10 * s;
+    *y = GE.canvas->y + GE.canvas->ch - *h - 10 * s - bottom_pad();
 }
 static bool minimap_shown(void) {
     LxGraph *g = ge_graph();
@@ -450,6 +451,132 @@ static void draw_grid(UiCtx *ui, UiNode *n) {
     for (float y = n->y + oy; y < n->y + n->ch; y += step) ui_draw_rect(ui, n->x, y, n->cw, 1, c, 0);
 }
 
+/* ---------------- live play ---------------- */
+/* how far a running action has got, 0..1; -1 when it isn't a timed one */
+static float action_progress(const LxFsmRun *r, int st, int a) {
+    if (!r || st < 0 || st >= r->bound_states || a < 0 || a >= r->bound_counts[st]) return -1;
+    const LxFsmBound *b = &r->bound[st][a];
+    if (!b->entered || !b->desc) return -1;
+    if (b->finished) return 1;
+    if (b->progress >= 0) return b->progress;
+    static const char *const timed[] = {"Duration", "Time", "Delay", "Timeout", "Seconds"};
+    for (int k = 0; k < LX_FSM_MAX_PARAMS && b->desc->params[k].name; k++) {
+        if (b->desc->params[k].type != LX_FSM_FLOAT) continue;
+        bool is_t = false;
+        for (int q = 0; q < 5 && !is_t; q++) is_t = !strcmp(b->desc->params[k].name, timed[q]);
+        if (!is_t) continue;
+        float d = b->lit[k].f;
+        if (b->var[k] >= 0 && b->var[k] < r->var_count) d = r->vars[b->var[k]].f;
+        else if (b->var[k] <= -2) { const LxFsmValue *gv = lx_fsm_global_value(-2 - b->var[k]); d = gv ? gv->f : 0; }
+        if (d > 0) return lx_clampf(r->state_time / d, 0, 1);
+    }
+    return -1;
+}
+/* the variables a state's actions use, the watched ones (or all of them in Debug), formatted */
+static int state_values(const LxGraph *g, const LxFsmRun *run, int si, char *out, size_t cap) {
+    out[0] = 0;
+    if (!run) return 0;
+    const LxGraphState *st = &g->states[si];
+    int n = 0;
+    size_t len = 0;
+    char seen[8][LX_FSM_NAME];
+    for (int a = 0; a < st->action_count && n < 4; a++)
+        for (int k = 0; k < LX_FSM_MAX_PARAMS && n < 4; k++) {
+            const LxGraphParam *p = &st->actions[a].p[k];
+            if (!p->is_var) continue;
+            int vi = -1;
+            for (int v = 0; v < g->var_count && vi < 0; v++) if (!strcmp(g->vars[v].name, p->value)) vi = v;
+            if (vi < 0 || vi >= run->var_count || (!g->vars[vi].watch && !GE.debug)) continue;
+            bool dup = false;
+            for (int q = 0; q < n; q++) dup |= !strcmp(seen[q], p->value);
+            if (dup) continue;
+            lx_strcpy(seen[n], LX_FSM_NAME, p->value);
+            char val[64];
+            lx_fsm_value_format(&run->vars[vi], val, sizeof val, NULL);
+            len += (size_t)snprintf(out + len, len < cap ? cap - len : 0, "%s%s %s", n ? "   " : "", p->value, val);
+            n++;
+            if (len >= cap) return n;
+        }
+    return n;
+}
+
+/* the timeline strip under the graph while playing: one block per state the graph went through */
+static float g_tl[4];   /* x, y, w, h on screen when shown */
+static bool timeline_shown(void) {
+    LxFsmRun *run = ge_run();
+    return run && run->history_count > 0 && GE.canvas && GE.canvas->ch > 200 * ui_scale(ED.ui);
+}
+static float bottom_pad(void) { return timeline_shown() ? 40 * ui_scale(ED.ui) : 0; }
+static int timeline_entry_at(const LxFsmRun *run, float mx) {
+    if (!run || run->history_count <= 0 || g_tl[2] <= 0) return -1;
+    double t0 = run->history[0].time, t1 = lx_game_time(ED.scene);
+    if (t1 <= t0) t1 = t0 + 0.001;
+    double t = t0 + (double)((mx - g_tl[0]) / g_tl[2]) * (t1 - t0);
+    int k = 0;
+    while (k + 1 < run->history_count && run->history[k + 1].time <= t) k++;
+    return k;
+}
+static void draw_timeline(UiCtx *ui, UiNode *n, const LxGraph *g, const LxFsmRun *run) {
+    float s = ui_scale(ui), x = n->x + 10 * s, w = n->cw - 20 * s, h = 22 * s, y = n->y + n->ch - h - 10 * s;
+    g_tl[0] = x; g_tl[1] = y; g_tl[2] = w; g_tl[3] = h;
+    ui_draw_rect(ui, x - 4 * s, y - 4 * s, w + 8 * s, h + 8 * s, UI_RGBA(10, 7, 7, 230), 6 * s);
+    double t0 = run->history[0].time, t1 = lx_game_time(ED.scene);
+    if (t1 <= t0) t1 = t0 + 0.001;
+    for (int k = 0; k < run->history_count; k++) {
+        double a = run->history[k].time, b = k + 1 < run->history_count ? run->history[k + 1].time : t1;
+        float bx = x + (float)((a - t0) / (t1 - t0)) * w, bw = lx_maxf(2, (float)((b - a) / (t1 - t0)) * w);
+        int si = run->history[k].state;
+        uint32_t c = si >= 0 && si < g->state_count ? ge_state_color(g->states[si].color == 0 ? 7 : g->states[si].color) : COL_EDGE;
+        bool on = k == GE.scrub, last = k == run->history_count - 1;
+        ui_draw_rect(ui, bx, y, bw - 1, h, on ? COL_ACCENT : last ? UI_HEX(0x3d7cf5) : c, 3 * s);
+        if (si >= 0 && si < g->state_count && bw > ui_text_width(ui, UI_FONT_SMALL, g->states[si].name) + 10 * s) {
+            ui_push_clip(ui, bx, y, bw, h);
+            ui_draw_text(ui, UI_FONT_SMALL, bx + 5 * s, y + (h - ui_line_height(ui, UI_FONT_SMALL)) * 0.5f, g->states[si].name, UI_HEX(0xffffff));
+            ui_pop_clip(ui);
+        }
+    }
+    /* the one under the mouse, or being looked at: what, when, why */
+    LxVec2 m = lx_mouse_pos();
+    int k = GE.scrub;
+    if (m.x >= x && m.x < x + w && m.y >= y - 4 * s && m.y < y + h + 4 * s) k = timeline_entry_at(run, m.x);
+    if (k >= 0 && k < run->history_count) {
+        int si = run->history[k].state;
+        char tip[200];
+        snprintf(tip, sizeof tip, "%s   at %.2f s   via %s", si >= 0 && si < g->state_count ? g->states[si].name : "?",
+                 run->history[k].time - t0, run->history[k].event[0] ? run->history[k].event : "START");
+        float tw = ui_text_width(ui, UI_FONT_SMALL, tip) + 16 * s, tx = lx_clampf(m.x - tw * 0.5f, n->x + 4 * s, n->x + n->cw - tw - 4 * s);
+        if (k == GE.scrub && !(m.x >= x && m.x < x + w)) tx = x;
+        ui_draw_rect(ui, tx, y - 30 * s, tw, 22 * s, UI_HEX(0x111214), 4 * s);
+        ui_draw_border(ui, tx, y - 30 * s, tw, 22 * s, COL_EDGE, 4 * s, 1);
+        ui_draw_text(ui, UI_FONT_SMALL, tx + 8 * s, y - 30 * s + (22 * s - ui_line_height(ui, UI_FONT_SMALL)) * 0.5f, tip, COL_TEXT);
+    }
+}
+
+/* watched variables, top right of the graph */
+static void draw_watch(UiCtx *ui, UiNode *n, const LxGraph *g, const LxFsmRun *run) {
+    int count = 0;
+    for (int i = 0; i < g->var_count; i++) count += g->vars[i].watch;
+    if (!count) return;
+    float s = ui_scale(ui), lh = ui_line_height(ui, UI_FONT_SMALL) + 4 * s, w = 220 * s, h = (float)(count + 1) * lh + 10 * s;
+    float x = n->x + n->cw - w - 10 * s, y = n->y + 10 * s;
+    ui_draw_rect(ui, x, y, w, h, UI_RGBA(10, 7, 7, 220), 6 * s);
+    ui_draw_border(ui, x, y, w, h, COL_EDGE, 6 * s, 1);
+    ui_draw_text(ui, UI_FONT_SMALL, x + 10 * s, y + 6 * s, run ? "WATCH" : "WATCH  (live while playing)", COL_DIM);
+    float ry = y + 6 * s + lh;
+    for (int i = 0; i < g->var_count; i++) {
+        if (!g->vars[i].watch) continue;
+        char val[96];
+        if (run && i < run->var_count) lx_fsm_value_format(&run->vars[i], val, sizeof val, NULL);
+        else lx_strcpy(val, sizeof val, g->vars[i].value);
+        ui_draw_text(ui, UI_FONT_SMALL, x + 10 * s, ry, g->vars[i].name, UI_HEX(0xc89cff));
+        float vw = ui_text_width(ui, UI_FONT_MONO, val);
+        ui_push_clip(ui, x, ry, w - 8 * s, lh);
+        ui_draw_text(ui, UI_FONT_MONO, x + w - 10 * s - vw, ry, val, run ? UI_HEX(0xffb03a) : COL_DIM);
+        ui_pop_clip(ui);
+        ry += lh;
+    }
+}
+
 static void draw_state(UiCtx *ui, const LxGraph *g, int i, const LxFsmRun *run) {
     const LxGraphState *st = &g->states[i];
     float s = SC(), x = sx(st->x), y = sy(st->y), w = state_w(st) * s, h = state_h(st) * s, th = GE_TITLE_H * s, rh = GE_ROW_H * s;
@@ -541,11 +668,56 @@ static void draw_state(UiCtx *ui, const LxGraph *g, int i, const LxFsmRun *run) 
         ui_draw_line(ui, tx + tw * 0.5f, tab_y + tab_h, tx + tw * 0.5f, y - 3 * s, 1.6f * ui_scale(ui), lc);
         ui_draw_triangle(ui, tx + tw * 0.5f, y - 1 * s, tx + tw * 0.5f - 4 * s, y - 6 * s, tx + tw * 0.5f + 4 * s, y - 6 * s, lc);
     }
-    /* debug: time in the active state */
-    if (active && GE.debug) {
-        char b[32];
-        snprintf(b, sizeof b, "%.1fs", (double)ar->state_time);
-        ui_draw_text(ui, UI_FONT_SMALL, x + w - ui_text_width(ui, UI_FONT_SMALL, b), y + h + 3 * s, b, UI_HEX(0xffb03a));
+    if (active) {
+        /* the longest-running timed action's progress, as a bar along the title's foot */
+        float prog = -1;
+        int running = 0;
+        for (int a = 0; a < ar->bound_counts[i]; a++) {
+            const LxFsmBound *b = &ar->bound[i][a];
+            if (b->entered && !b->finished && b->desc) running++;
+            float p = b->finished ? -1 : action_progress(ar, i, a);
+            if (p >= 0 && (prog < 0 || p < prog)) prog = p;
+        }
+        if (prog >= 0) {
+            ui_draw_rect(ui, x + 3 * s, y + th - 3 * s, w - 6 * s, 2 * s, UI_RGBA(0, 0, 0, 90), 0);
+            ui_draw_rect(ui, x + 3 * s, y + th - 3 * s, (w - 6 * s) * prog, 2 * s, UI_HEX(0xffb03a), 0);
+        }
+        float by = y + h + 3 * s;
+        if (GE.debug) {   /* time in the state, and how many of its actions are still going */
+            char b[48];
+            if (running) snprintf(b, sizeof b, "%d running  %.1fs", running, (double)ar->state_time);
+            else snprintf(b, sizeof b, "%.1fs", (double)ar->state_time);
+            ui_draw_text(ui, UI_FONT_SMALL, x + w - ui_text_width(ui, UI_FONT_SMALL, b), by, b, UI_HEX(0xffb03a));
+        }
+        char vals[200];
+        if (GE.zoom >= 0.5f && state_values(g, run, i, vals, sizeof vals)) {
+            ui_push_clip(ui, x - 40 * s, by, w + 80 * s, 20 * s);
+            ui_draw_text(ui, UI_FONT_SMALL, x, by + (GE.debug ? ui_line_height(ui, UI_FONT_SMALL) : 0), vals, UI_HEX(0xc89cff));
+            ui_pop_clip(ui);
+        }
+    }
+    /* the timeline points here */
+    if (run && GE.scrub >= 0 && GE.scrub < run->history_count && run->history[GE.scrub].state == i) {
+        ui_draw_border(ui, x - 7 * s, y - 7 * s, w + 14 * s, h + 14 * s, UI_HEX(0xffb03a), r + 6 * s, 2 * ui_scale(ui));
+        ui_draw_rect(ui, x - 7 * s, y - 7 * s, w + 14 * s, h + 14 * s, UI_RGBA(255, 176, 58, 26), r + 6 * s);
+    }
+}
+
+/* where it has just been: the last few states glow faintly, fading as they get older */
+static void draw_trail(UiCtx *ui, const LxGraph *g, const LxFsmRun *run) {
+    if (!run || run->history_count < 2 || !ED.scene) return;
+    double now = lx_game_time(ED.scene);
+    float s = SC();
+    for (int k = run->history_count - 2; k >= 0 && k >= run->history_count - 6; k--) {
+        int si = run->history[k].state;
+        if (si < 0 || si >= g->state_count || !vis(g, si) || lx_fsm_run_in_state((LxFsmRun *)run, si)) continue;
+        double age = now - run->history[k + 1].time;   /* since it left */
+        if (age > 2.5 || age < 0) continue;
+        float a = (float)(1.0 - age / 2.5) * 0.55f;
+        const LxGraphState *st = &g->states[si];
+        float x = sx(st->x), y = sy(st->y), w = state_w(st) * s, h = state_h(st) * s;
+        ui_draw_rect(ui, x - 4 * s, y - 4 * s, w + 8 * s, h + 8 * s, ui_alpha(UI_HEX(0xffb03a), a * 0.35f), 8 * s);
+        ui_draw_border(ui, x - 4 * s, y - 4 * s, w + 8 * s, h + 8 * s, ui_alpha(UI_HEX(0xffb03a), a), 8 * s, 1.5f * ui_scale(ui));
     }
 }
 
@@ -711,6 +883,7 @@ static void canvas_draw(UiNode *n, UiCtx *ui) {
     /* the description under the breadcrumbs */
     if (g->description[0] && ge_scope() < 0) draw_wrapped(ui, UI_FONT_SMALL, n->x + 18 * s, n->y + 42 * s, 420 * s, n->y + 120 * s, g->description, UI_RGBA(241, 230, 225, 56));
     draw_regions(ui, g, run);
+    draw_trail(ui, g, run);
     for (int i = 0; i < g->comment_count; i++) if (comment_vis(g, i)) draw_comment(ui, g, i);
     /* links under the states */
     for (int i = 0; i < g->state_count; i++) {
@@ -724,6 +897,14 @@ static void canvas_draw(UiNode *n, UiCtx *ui) {
                        (sr && sr->prev_state == i && sr->state_time < 1.0f && !strcmp(sr->last_event, st->trans[t].event));
             draw_curve(ui, p, hot ? COL_HOT : COL_LINK, (hot ? 2.4f : 1.6f) * s * lx_clampf(GE.zoom, 0.7f, 1.3f), true);
             ui_draw_circle(ui, sx(p[0]), sy(p[1]), 3 * SC(), hot ? COL_HOT : COL_LINK, 10);
+            /* it just fired: a pulse runs along it */
+            if (sr && sr->prev_state == i && sr->state_time < 0.6f && !strcmp(sr->last_event, st->trans[t].event)) {
+                float u = lx_clampf(sr->state_time / 0.45f, 0, 1);
+                LxVec2 q = bez(p, u);
+                float rr = 6 * SC() * (1.2f - 0.4f * u);
+                ui_draw_circle(ui, sx(q.x), sy(q.y), rr * 1.9f, ui_alpha(UI_HEX(0xffb03a), 0.25f * (1 - u * 0.5f)), 16);
+                ui_draw_circle(ui, sx(q.x), sy(q.y), rr, UI_HEX(0xffb03a), 16);
+            }
         }
     }
     for (int i = 0; i < g->state_count; i++) if (vis(g, i) && !is_selected(i)) draw_state(ui, g, i, run);
@@ -762,11 +943,14 @@ static void canvas_draw(UiNode *n, UiCtx *ui) {
                                             "Middle/Alt-drag: pan · Scroll: zoom · F: frame", "Del · Ctrl+C/V/D · Ctrl+Z: undo"};
         float lh = ui_line_height(ui, UI_FONT_SMALL), room = n->cw - (map ? 180 * s : 0) - 24 * s;
         int count = (int)(sizeof lines / sizeof lines[0]);
-        float y = n->y + n->ch - lh * (float)count - 10 * s;
+        float y = n->y + n->ch - lh * (float)count - 10 * s - bottom_pad();
         for (int i = 0; i < count; i++)
             if (ui_text_width(ui, UI_FONT_SMALL, lines[i]) < room) ui_draw_text(ui, UI_FONT_SMALL, n->x + 12 * s, y + lh * (float)i, lines[i], UI_RGBA(241, 230, 225, 80));
     }
     if (map) draw_minimap(ui, g, run);
+    draw_watch(ui, n, g, run);
+    if (timeline_shown()) draw_timeline(ui, n, g, run);
+    else { g_tl[2] = 0; GE.scrub = -1; }
     if (GE.focused) ui_draw_border(ui, n->x, n->y, n->cw, n->ch, ui_alpha(COL_ACCENT, 0.35f), 0, 1);
     ui_pop_clip(ui);
 }
@@ -1622,7 +1806,9 @@ static void canvas_frame(UiNode *n) {
         bool dbl = now - GE.last_click < 0.35 && fabsf(m.x - GE.last_click_pos.x) < 6 && fabsf(m.y - GE.last_click_pos.y) < 6;
         GE.last_click = dbl ? 0 : now;
         GE.last_click_pos = m;
-        if (pressed_m || alt || space) GE.drag = GE_DRAG_PAN;
+        if (pressed_l && g_tl[2] > 0 && m.x >= g_tl[0] && m.x < g_tl[0] + g_tl[2] && m.y >= g_tl[1] - 4 && m.y < g_tl[1] + g_tl[3] + 4)
+            GE.drag = GE_DRAG_TIMELINE;   /* the history strip: look back through where the graph went */
+        else if (pressed_m || alt || space) GE.drag = GE_DRAG_PAN;
         else {
             Hit h = hit_test(m.x, m.y);
             switch (h.kind) {
@@ -1705,6 +1891,20 @@ static void canvas_frame(UiNode *n) {
     switch (GE.drag) {
     case GE_DRAG_PAN: GE.pan_x -= dx / SC(); GE.pan_y -= dy / SC(); break;
     case GE_DRAG_MINIMAP: minimap_pan(m.x, m.y); break;
+    case GE_DRAG_TIMELINE: {
+        LxFsmRun *run = ge_run();
+        int k = timeline_entry_at(run, m.x);
+        if (k >= 0 && k != GE.scrub) {
+            GE.scrub = k;
+            int si = run->history[k].state;
+            if (si >= 0 && si < g->state_count) {   /* show that state: inside its Sub State if it is in one */
+                if (!vis(g, si)) ge_enter_scope(lx_graph_parent_index(g, si));
+                GE.framed = true;
+                ge_select_state(si, false);
+            }
+        }
+        break;
+    }
     case GE_DRAG_MOVE:
         if (GE.drag_moved) {
             float ddx = gx_of(m.x) - gx_of(GE.last.x), ddy = gy_of(m.y) - gy_of(GE.last.y);
@@ -1918,6 +2118,8 @@ static void tb_debug(UiNode *b) { GE.debug = !GE.debug; b->selected = GE.debug; 
 static void tb_hints(UiNode *b) { GE.hints = !GE.hints; b->selected = GE.hints; ge_prefs_save(); }
 static void tb_errors(UiNode *b) { LX_UNUSED(b); if (GE.insp_tabs) GE.insp_tabs->tab_index = 0; }
 static void tb_ab(UiNode *b) { LX_UNUSED(b); ge_action_browser_toggle(); }
+static void tb_pause(UiNode *b) { LX_UNUSED(b); ed_pause(); }
+static void tb_step(UiNode *b) { LX_UNUSED(b); if (ED.play == ED_PLAYING) ed_pause(); ed_step(); }
 static void tb_prefs(UiNode *b) {
     UiNode *p = ui_popup(ED.ui, b->x, b->y - 120 * ui_scale(ED.ui), 220);
     if (!p) return;
@@ -2016,6 +2218,13 @@ static void panel_frame(UiNode *n) {
         GE.errors_btn->fg = np ? UI_HEX(0xff6b5a) : UI_HEX(0x7cc24e);
     }
     if (GE.lock_btn) GE.lock_btn->selected = GE.locked;
+    if (GE.pause_btn) {
+        GE.pause_btn->hidden = ED.play == ED_EDIT;
+        ui_set_text(GE.pause_btn, ED.play == ED_PAUSED ? "Resume" : "Pause");
+        GE.pause_btn->icon = ED.play == ED_PAUSED ? UI_ICON_PLAY : UI_ICON_PAUSE;
+        GE.pause_btn->selected = ED.play == ED_PAUSED;
+    }
+    if (GE.step_btn) GE.step_btn->hidden = ED.play == ED_EDIT;
     ge_inspector_frame();
 }
 
@@ -2084,6 +2293,10 @@ UiNode *ed_graph_panel(UiNode *parent) {
     tbtn(bb, "Preferences", UI_ICON_GEAR, NULL, tb_prefs)->w = 110;
     GE.errors_btn = tbtn(bb, "Errors: 0", UI_ICON_WARNING, "Problems in this graph (listed in the FSM tab)", tb_errors);
     GE.errors_btn->w = 100;
+    GE.pause_btn = tbtn(bb, "Pause", UI_ICON_PAUSE, "Pause the game to look at the graph (the timeline below the graph shows where it has been)", tb_pause);
+    GE.pause_btn->w = 84;
+    GE.step_btn = tbtn(bb, "Step", UI_ICON_STEP, "Play one frame", tb_step);
+    GE.step_btn->w = 70;
     ui_spacer(ui, bb);
     UiNode *ab = tbtn(bb, "Action Browser", UI_ICON_LIST, "Find actions to add to the selected state (Space in the graph)", tb_ab);
     ab->w = 140;
@@ -2103,6 +2316,8 @@ UiNode *ed_graph_panel(UiNode *parent) {
     ui_track(&GE.hints_btn);
     ui_track(&GE.errors_btn);
     ui_track(&GE.ab_btn);
+    ui_track(&GE.pause_btn);
+    ui_track(&GE.step_btn);
     GE.insp_dirty = true;
     return p;
 }
