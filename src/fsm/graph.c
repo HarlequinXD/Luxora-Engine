@@ -53,6 +53,7 @@ void lx_graph_free(LxGraph *g) {
     lx_free(g->vars);
     lx_free(g->globals);
     lx_free(g->comments);
+    lx_free(g->regions);
     lx_free(g);
 }
 
@@ -65,6 +66,8 @@ LxGraph *lx_graph_clone(const LxGraph *g) {
 }
 
 void lx_graph_touch(LxGraph *g) { g->version++; g->dirty = true; }
+
+static int clamp_region(int r) { return r < 0 ? 0 : r >= LX_FSM_REGIONS ? LX_FSM_REGIONS - 1 : r; }
 
 /* ---------------- text format ---------------- */
 /* values are one line: newlines in text (comments, descriptions) are written as \n */
@@ -132,10 +135,18 @@ char *lx_graph_to_text(const LxGraph *g) {
         put_escaped(&sb, "name", st->name);
         lx_sb_printf(&sb, "pos = %g %g\ncolor = %d\nsequence = %d\n", (double)st->x, (double)st->y, st->color, st->sequence);
         if (st->breakpoint) lx_sb_printf(&sb, "breakpoint = 1\n");
+        if (st->kind == LX_GS_SUB) lx_sb_printf(&sb, "kind = sub\n");
+        if (st->kind == LX_GS_EXIT) lx_sb_printf(&sb, "kind = exit\n");
+        if (st->parent[0]) put_escaped(&sb, "parent", st->parent);
+        if (st->region) lx_sb_printf(&sb, "region = %d\n", st->region);
+        if (st->exit_event[0]) put_escaped(&sb, "exit_event", st->exit_event);
+        if (st->history) lx_sb_printf(&sb, "history = 1\n");
+        if (st->collapsed) lx_sb_printf(&sb, "collapsed = 1\n");
         if (st->description[0]) put_escaped(&sb, "description", st->description);
         for (int t = 0; t < st->trans_count; t++) {
             char e1[160], e2[160];
             lx_sb_printf(&sb, "transition = %s > %s\n", esc(st->trans[t].event, e1, sizeof e1), esc(st->trans[t].to, e2, sizeof e2));
+            if (st->trans[t].via) lx_sb_printf(&sb, "via = %g %g\n", (double)st->trans[t].via_x, (double)st->trans[t].via_y);   /* the line above's */
         }
         for (int a = 0; a < st->action_count; a++) {
             const LxGraphAction *ac = &st->actions[a];
@@ -154,9 +165,18 @@ char *lx_graph_to_text(const LxGraph *g) {
             }
         }
     }
+    for (int i = 0; i < g->region_count; i++) {
+        const LxGraphRegion *rg = &g->regions[i];
+        lx_sb_printf(&sb, "\n[region]\n");
+        put_escaped(&sb, "parent", rg->parent);
+        lx_sb_printf(&sb, "index = %d\n", rg->index);
+        put_escaped(&sb, "name", rg->name);
+        put_escaped(&sb, "start", rg->start);
+    }
     for (int i = 0; i < g->comment_count; i++) {
         const LxGraphComment *c = &g->comments[i];
         lx_sb_printf(&sb, "\n[comment]\nrect = %g %g %g %g\ncolor = %d\n", (double)c->x, (double)c->y, (double)c->w, (double)c->h, c->color);
+        if (c->parent[0]) put_escaped(&sb, "parent", c->parent);
         put_escaped(&sb, "text", c->text);
     }
     if (!sb.data) lx_sb_printf(&sb, "");
@@ -182,7 +202,7 @@ LxGraph *lx_graph_from_text(const char *text) {
     const char *cur = text;
     char k[256], v[1024];
     int r;
-    enum { NONE, GRAPH, EVENT, VAR, GLOBAL, STATE, ACTION, COMMENT } sec = NONE;
+    enum { NONE, GRAPH, EVENT, VAR, GLOBAL, STATE, ACTION, COMMENT, REGION } sec = NONE;
     LxGraphState *st = NULL;
     LxGraphAction *ac = NULL;
     while ((r = lx_kv_next(&cur, k, sizeof k, v, sizeof v))) {
@@ -198,6 +218,7 @@ LxGraph *lx_graph_from_text(const char *text) {
                 ac->enabled = true;
                 ac->update = (LxFsmUpdate)-1;   /* not written: the action's own default (below) */
             } else if (!strcmp(k, "comment")) { sec = COMMENT; PUSH(g->comments, g->comment_count, g->comment_cap, LxGraphComment); }
+            else if (!strcmp(k, "region")) { sec = REGION; PUSH(g->regions, g->region_count, g->region_cap, LxGraphRegion); }
             else sec = NONE;
             continue;
         }
@@ -236,7 +257,19 @@ LxGraph *lx_graph_from_text(const char *text) {
             else if (!strcmp(k, "sequence")) st->sequence = lx_parse_bool(v);
             else if (!strcmp(k, "breakpoint")) st->breakpoint = lx_parse_bool(v);
             else if (!strcmp(k, "description")) lx_strcpy(st->description, sizeof st->description, v);
-            else if (!strcmp(k, "transition")) {
+            else if (!strcmp(k, "kind")) st->kind = !strcmp(v, "sub") ? LX_GS_SUB : !strcmp(v, "exit") ? LX_GS_EXIT : LX_GS_STATE;
+            else if (!strcmp(k, "parent")) lx_strcpy(st->parent, sizeof st->parent, v);
+            else if (!strcmp(k, "region")) st->region = clamp_region(atoi(v));
+            else if (!strcmp(k, "exit_event")) lx_strcpy(st->exit_event, sizeof st->exit_event, v);
+            else if (!strcmp(k, "history")) st->history = lx_parse_bool(v);
+            else if (!strcmp(k, "collapsed")) st->collapsed = lx_parse_bool(v);
+            else if (!strcmp(k, "via") && st->trans_count) {
+                LxGraphTransition *t = &st->trans[st->trans_count - 1];
+                LxVec3 q = lx_parse_vec3(v);
+                t->via = true;
+                t->via_x = q.x;
+                t->via_y = q.y;
+            } else if (!strcmp(k, "transition")) {
                 LxGraphTransition *t = PUSH(st->trans, st->trans_count, st->trans_cap, LxGraphTransition);
                 char *gt = strstr(v, " > ");
                 if (gt) { *gt = 0; unescape(gt + 3); lx_strcpy(t->to, sizeof t->to, gt + 3); }
@@ -259,18 +292,42 @@ LxGraph *lx_graph_from_text(const char *text) {
                 }
             }
             break;
+        case REGION: {
+            LxGraphRegion *rg = &g->regions[g->region_count - 1];
+            if (!strcmp(k, "parent")) lx_strcpy(rg->parent, sizeof rg->parent, v);
+            else if (!strcmp(k, "index")) rg->index = clamp_region(atoi(v));
+            else if (!strcmp(k, "name")) lx_strcpy(rg->name, sizeof rg->name, v);
+            else if (!strcmp(k, "start")) lx_strcpy(rg->start, sizeof rg->start, v);
+            break;
+        }
         case COMMENT: {
             LxGraphComment *c = &g->comments[g->comment_count - 1];
             if (!strcmp(k, "rect")) { LxVec4 q = lx_parse_vec4(v); c->x = q.x; c->y = q.y; c->w = q.z; c->h = q.w; }
             else if (!strcmp(k, "color")) c->color = atoi(v);
             else if (!strcmp(k, "text")) lx_strcpy(c->text, sizeof c->text, v);
+            else if (!strcmp(k, "parent")) lx_strcpy(c->parent, sizeof c->parent, v);
             break;
         }
         default: break;
         }
     }
     if (!g->state_count) { lx_graph_free(g); return NULL; }
-    if (!lx_graph_find_state(g, g->start)) lx_strcpy(g->start, sizeof g->start, g->states[0].name);
+    /* a parent that isn't a Sub State (deleted, renamed by hand): the state comes back to the top */
+    for (int i = 0; i < g->state_count; i++) {
+        LxGraphState *x = &g->states[i];
+        int pi = x->parent[0] ? lx_graph_state_index(g, x->parent) : -1;
+        if (x->parent[0] && (pi < 0 || pi == i || g->states[pi].kind != LX_GS_SUB)) { x->parent[0] = 0; x->region = 0; }
+    }
+    for (int i = 0; i < g->comment_count; i++) {
+        int pi = g->comments[i].parent[0] ? lx_graph_state_index(g, g->comments[i].parent) : -1;
+        if (pi < 0 || g->states[pi].kind != LX_GS_SUB) g->comments[i].parent[0] = 0;
+    }
+    for (int i = 0; i < g->state_count; i++)   /* a loop of parents (hand-edited file): cut it */
+        if (lx_graph_depth(g, i) > 32) { g->states[i].parent[0] = 0; g->states[i].region = 0; }
+    if (!lx_graph_find_state(g, g->start)) {   /* (one in the wrong place is passed over when it plays: lx_graph_region_start) */
+        int top = lx_graph_region_start(g, -1, 0);
+        lx_strcpy(g->start, sizeof g->start, g->states[top >= 0 ? top : 0].name);
+    }
     for (int i = 0; i < g->state_count; i++)
         for (int a = 0; a < g->states[i].action_count; a++) {
             LxGraphAction *x = &g->states[i].actions[a];
@@ -379,6 +436,93 @@ LxGraphState *lx_graph_add_state(LxGraph *g, const char *name, float x, float y)
     return st;
 }
 
+/* ---------------- nesting ---------------- */
+int lx_graph_parent_index(const LxGraph *g, int state) {
+    if (state < 0 || state >= g->state_count || !g->states[state].parent[0]) return -1;
+    return lx_graph_state_index(g, g->states[state].parent);
+}
+int lx_graph_depth(const LxGraph *g, int state) {
+    int d = 0;
+    for (int p = lx_graph_parent_index(g, state); p >= 0 && d <= 33; p = lx_graph_parent_index(g, p)) d++;
+    return d;
+}
+bool lx_graph_in_scope(const LxGraph *g, int state, int parent) {
+    if (state < 0 || state >= g->state_count) return false;
+    return lx_graph_parent_index(g, state) == parent;
+}
+bool lx_graph_is_inside(const LxGraph *g, int state, int ancestor) {
+    int d = 0;
+    for (int p = lx_graph_parent_index(g, state); p >= 0 && d < 33; p = lx_graph_parent_index(g, p), d++)
+        if (p == ancestor) return true;
+    return false;
+}
+const char *lx_graph_exit_event(const LxGraphState *st) { return st && st->exit_event[0] ? st->exit_event : "FINISHED"; }
+
+static const char *parent_name(const LxGraph *g, int parent) { return parent >= 0 && parent < g->state_count ? g->states[parent].name : ""; }
+
+int lx_graph_region_count(const LxGraph *g, int parent) {
+    int n = 1;
+    const char *pn = parent_name(g, parent);
+    for (int i = 0; i < g->region_count; i++)
+        if (!strcmp(g->regions[i].parent, pn) && g->regions[i].index + 1 > n) n = g->regions[i].index + 1;
+    for (int i = 0; i < g->state_count; i++)
+        if (lx_graph_in_scope(g, i, parent) && g->states[i].region + 1 > n) n = g->states[i].region + 1;
+    return n > LX_FSM_REGIONS ? LX_FSM_REGIONS : n;
+}
+LxGraphRegion *lx_graph_region(LxGraph *g, int parent, int index, bool create) {
+    const char *pn = parent_name(g, parent);
+    for (int i = 0; i < g->region_count; i++)
+        if (!strcmp(g->regions[i].parent, pn) && g->regions[i].index == index) return &g->regions[i];
+    if (!create || index < 0 || index >= LX_FSM_REGIONS) return NULL;
+    LxGraphRegion *rg = PUSH(g->regions, g->region_count, g->region_cap, LxGraphRegion);
+    lx_strcpy(rg->parent, sizeof rg->parent, pn);
+    rg->index = index;
+    return rg;
+}
+const char *lx_graph_region_name(const LxGraph *g, int parent, int index) {
+    LxGraphRegion *rg = lx_graph_region((LxGraph *)g, parent, index, false);
+    return rg ? rg->name : "";
+}
+int lx_graph_region_start(const LxGraph *g, int parent, int index) {
+    const char *want = NULL;
+    if (parent < 0 && index == 0) want = g->start;
+    else {
+        LxGraphRegion *rg = lx_graph_region((LxGraph *)g, parent, index, false);
+        if (rg) want = rg->start;
+    }
+    int si = want && want[0] ? lx_graph_state_index(g, want) : -1;
+    if (si >= 0 && lx_graph_in_scope(g, si, parent) && g->states[si].region == index) return si;
+    for (int i = 0; i < g->state_count; i++)   /* none chosen: the first one in it */
+        if (lx_graph_in_scope(g, i, parent) && g->states[i].region == index && g->states[i].kind != LX_GS_EXIT) return i;
+    for (int i = 0; i < g->state_count; i++)
+        if (lx_graph_in_scope(g, i, parent) && g->states[i].region == index) return i;
+    return -1;
+}
+void lx_graph_set_region_start(LxGraph *g, int parent, int index, const char *state) {
+    if (parent < 0 && index == 0) lx_strcpy(g->start, sizeof g->start, state ? state : "");
+    else {
+        LxGraphRegion *rg = lx_graph_region(g, parent, index, true);
+        if (rg) lx_strcpy(rg->start, sizeof rg->start, state ? state : "");
+    }
+    lx_graph_touch(g);
+}
+void lx_graph_remove_region(LxGraph *g, int parent, int index) {
+    if (index <= 0) return;
+    const char *pn = parent_name(g, parent);
+    for (int i = 0; i < g->state_count; i++)
+        if (lx_graph_in_scope(g, i, parent)) {
+            if (g->states[i].region == index) g->states[i].region = index - 1;
+            else if (g->states[i].region > index) g->states[i].region--;
+        }
+    for (int i = g->region_count - 1; i >= 0; i--) {
+        LxGraphRegion *rg = &g->regions[i];
+        if (strcmp(rg->parent, pn)) continue;
+        if (rg->index == index) { memmove(rg, rg + 1, sizeof *rg * (size_t)(g->region_count - i - 1)); g->region_count--; }
+        else if (rg->index > index) rg->index--;
+    }
+    lx_graph_touch(g);
+}
+
 static void retarget(LxGraph *g, const char *from, const char *to) {
     for (int i = 0; i < g->state_count; i++)
         for (int t = 0; t < g->states[i].trans_count; t++)
@@ -387,9 +531,28 @@ static void retarget(LxGraph *g, const char *from, const char *to) {
         if (!strcmp(g->globals[t].to, from)) lx_strcpy(g->globals[t].to, LX_FSM_NAME, to);
     if (!strcmp(g->start, from)) lx_strcpy(g->start, sizeof g->start, to);
 }
+/* (region starts are handled by rename/remove themselves) */
 
 void lx_graph_remove_state(LxGraph *g, int index) {
     if (index < 0 || index >= g->state_count || g->state_count <= 1) return;   /* a graph keeps at least one state */
+    /* a Sub State takes everything inside it along (each child removes its own children first) */
+    if (g->states[index].kind == LX_GS_SUB) {
+        char keep[LX_FSM_NAME];
+        lx_strcpy(keep, sizeof keep, g->states[index].name);
+        for (int guard = 0; guard < 100000; guard++) {
+            int me = lx_graph_state_index(g, keep), child = -1;
+            for (int i = 0; i < g->state_count && child < 0; i++) if (i != me && lx_graph_parent_index(g, i) == me) child = i;
+            if (child < 0 || g->state_count <= 2) break;
+            lx_graph_remove_state(g, child);
+        }
+        index = lx_graph_state_index(g, keep);
+        if (index < 0) return;
+        for (int i = g->region_count - 1; i >= 0; i--)
+            if (!strcmp(g->regions[i].parent, keep)) { memmove(&g->regions[i], &g->regions[i + 1], sizeof g->regions[0] * (size_t)(g->region_count - i - 1)); g->region_count--; }
+        for (int i = g->comment_count - 1; i >= 0; i--)
+            if (!strcmp(g->comments[i].parent, keep)) { memmove(&g->comments[i], &g->comments[i + 1], sizeof g->comments[0] * (size_t)(g->comment_count - i - 1)); g->comment_count--; }
+    }
+    if (g->state_count <= 1) return;
     char name[LX_FSM_NAME];
     lx_strcpy(name, sizeof name, g->states[index].name);
     state_free(&g->states[index]);
@@ -399,7 +562,13 @@ void lx_graph_remove_state(LxGraph *g, int index) {
     /* global transitions to it go away */
     for (int t = g->global_count - 1; t >= 0; t--)
         if (!g->globals[t].to[0]) { memmove(&g->globals[t], &g->globals[t + 1], sizeof *g->globals * (size_t)(g->global_count - t - 1)); g->global_count--; }
-    if (!g->start[0]) lx_strcpy(g->start, sizeof g->start, g->states[0].name);
+    for (int i = 0; i < g->region_count; i++) if (!strcmp(g->regions[i].start, name)) g->regions[i].start[0] = 0;
+    for (int i = 0; i < g->state_count; i++)   /* children of a deleted Sub State that survived (only when it was the last) */
+        if (!strcmp(g->states[i].parent, name)) { g->states[i].parent[0] = 0; g->states[i].region = 0; }
+    if (!g->start[0] || lx_graph_state_index(g, g->start) < 0) {
+        int s0 = lx_graph_region_start(g, -1, 0);
+        lx_strcpy(g->start, sizeof g->start, g->states[s0 >= 0 ? s0 : 0].name);
+    }
     lx_graph_touch(g);
 }
 
@@ -411,6 +580,12 @@ bool lx_graph_rename_state(LxGraph *g, int index, const char *name) {
     lx_strcpy(old, sizeof old, g->states[index].name);
     lx_strcpy(g->states[index].name, LX_FSM_NAME, name);
     retarget(g, old, name);
+    for (int i = 0; i < g->state_count; i++) if (!strcmp(g->states[i].parent, old)) lx_strcpy(g->states[i].parent, LX_FSM_NAME, name);
+    for (int i = 0; i < g->comment_count; i++) if (!strcmp(g->comments[i].parent, old)) lx_strcpy(g->comments[i].parent, LX_FSM_NAME, name);
+    for (int i = 0; i < g->region_count; i++) {
+        if (!strcmp(g->regions[i].parent, old)) lx_strcpy(g->regions[i].parent, LX_FSM_NAME, name);
+        if (!strcmp(g->regions[i].start, old)) lx_strcpy(g->regions[i].start, LX_FSM_NAME, name);
+    }
     lx_graph_touch(g);
     return true;
 }
@@ -608,8 +783,19 @@ int lx_graph_problems(const LxGraph *g, char (*out)[160], int max) {
     for (int i = 0; i < g->state_count; i++) {
         const LxGraphState *st = &g->states[i];
         for (int t = 0; t < st->trans_count; t++) {
+            int to = st->trans[t].to[0] ? lx_graph_state_index(g, st->trans[t].to) : -1;
             if (!st->trans[t].to[0]) PROBLEM("%s: transition %s isn't connected", st->name, st->trans[t].event);
-            else if (!lx_graph_find_state(g, st->trans[t].to)) PROBLEM("%s: %s goes to a missing state", st->name, st->trans[t].event);
+            else if (to < 0) PROBLEM("%s: %s goes to a missing state", st->name, st->trans[t].event);
+            else if (lx_graph_parent_index(g, to) != lx_graph_parent_index(g, i))
+                PROBLEM("%s: %s goes to %s, which is inside another Sub State (use a global transition)", st->name, st->trans[t].event, st->trans[t].to);
+            else if (g->states[to].region != st->region)
+                PROBLEM("%s: %s goes to %s in another region", st->name, st->trans[t].event, st->trans[t].to);
+        }
+        if (st->kind == LX_GS_EXIT && !st->parent[0]) PROBLEM("%s: an Exit only works inside a Sub State", st->name);
+        if (st->kind == LX_GS_SUB) {
+            bool any = false;
+            for (int k = 0; k < g->state_count && !any; k++) any = lx_graph_parent_index(g, k) == i;
+            if (!any) PROBLEM("%s: the Sub State is empty (double-click it to add states inside)", st->name);
         }
         for (int a = 0; a < st->action_count; a++) {
             const LxGraphAction *ac = &st->actions[a];
@@ -630,6 +816,8 @@ int lx_graph_problems(const LxGraph *g, char (*out)[160], int max) {
         for (int i = 0; i < g->state_count && !handled; i++)
             for (int t = 0; t < g->states[i].trans_count; t++) handled |= !strcmp(g->states[i].trans[t].event, name);
         for (int t = 0; t < g->global_count; t++) handled |= !strcmp(g->globals[t].event, name);
+        for (int i = 0; i < g->state_count && !sent; i++)   /* an Exit sends its event to its Sub State */
+            sent = g->states[i].kind == LX_GS_EXIT && !strcmp(lx_graph_exit_event(&g->states[i]), name);
         for (int i = 0; i < g->state_count && !sent; i++)
             for (int a = 0; a < g->states[i].action_count && !sent; a++)
                 for (int k = 0; k < LX_FSM_MAX_PARAMS; k++)

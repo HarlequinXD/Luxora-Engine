@@ -552,14 +552,153 @@ LxEntity lx_fsm_event_other(LxFsmCtx *c) { return c->run ? c->run->event_other :
  *  running
  * ====================================================================== */
 static void enter_state(LxScene *s, LxFsmRun *r, int idx);
+static void change_state(LxScene *s, LxFsmRun *r, int target, const char *event);
 
-static int transition_target(const LxFsmRun *r, const char *event) {
+static LxFsmRun *R(LxFsmRun *r) { return r->root ? r->root : r; }
+
+/* ---------------- nested runs ---------------- */
+static LxFsmRun *kid_new(LxFsmRun *up, int scope, int region) {
+    LxFsmRun *root = R(up);
+    LxFsmRun *k = lx_calloc(1, sizeof *k);
+    k->graph = root->graph;
+    k->actions_epoch = root->actions_epoch;
+    k->bound_version = root->bound_version;
+    k->self = root->self;
+    k->slot = root->slot;
+    k->state = -1;
+    k->prev_state = -1;
+    k->pending = -1;
+    k->bound = root->bound;
+    k->bound_counts = root->bound_counts;
+    k->bound_states = root->bound_states;
+    k->vars = root->vars;
+    k->var_names = root->var_names;
+    k->var_count = root->var_count;
+    k->started = true;
+    k->root = root;
+    k->up = up;
+    k->scope = scope;
+    k->region = region;
+    lx_strcpy(k->last_event, LX_FSM_NAME, up->last_event);
+    k->event_value = up->event_value;
+    k->event_sender = up->event_sender;
+    k->event_other = up->event_other;
+    k->last_other = root->last_other;
+    k->system_seq = root->system_seq;
+    memcpy(k->system_ring, root->system_ring, sizeof k->system_ring);
+    LX_VEC_PUSH(up->kids, up->kid_count, up->kid_cap, k);
+    return k;
+}
+
+static void exit_state(LxScene *s, LxFsmRun *r);
+
+/* the regions playing inside `scope` (a Sub State) stop: their states exit, innermost first */
+static void kill_kids(LxScene *s, LxFsmRun *r, int scope, bool any_scope) {
+    LxFsmRun *root = R(r);
+    for (int i = r->kid_count - 1; i >= 0; i--) {
+        if (i >= r->kid_count) continue;
+        LxFsmRun *k = r->kids[i];
+        if (!any_scope && k->scope != scope) continue;
+        exit_state(s, k);
+        if (k->scope >= 0 && root->remember && k->scope < root->path_states && k->state >= 0 &&
+            k->state < k->graph->state_count && k->graph->states[k->state].kind != LX_GS_EXIT)   /* coming back to an Exit would leave at once */
+            root->remember[k->scope * LX_FSM_REGIONS + k->region] = k->state;
+        k->dead = true;
+        memmove(&r->kids[i], &r->kids[i + 1], sizeof r->kids[0] * (size_t)(r->kid_count - i - 1));
+        r->kid_count--;
+        LX_VEC_PUSH(root->grave, root->grave_count, root->grave_cap, k);
+    }
+}
+
+static void kid_free(LxFsmRun *k) {
+    for (int i = 0; i < k->kid_count; i++) kid_free(k->kids[i]);
+    lx_free(k->kids);
+    lx_free(k);
+}
+/* runs that have left are freed once nothing of theirs can still be on the stack */
+static void flush_grave(LxFsmRun *root) {
+    if (root->in_action || !root->grave_count) return;
+    for (int i = 0; i < root->grave_count; i++) kid_free(root->grave[i]);
+    root->grave_count = 0;
+}
+
+LxFsmRun *lx_fsm_run_in_state(LxFsmRun *r, int state) {
+    if (!r || r->dead) return NULL;
+    if (r->state == state && state >= 0) return r;
+    for (int i = 0; i < r->kid_count; i++) {
+        LxFsmRun *f = lx_fsm_run_in_state(r->kids[i], state);
+        if (f) return f;
+    }
+    return NULL;
+}
+LxFsmRun *lx_fsm_run_for_scope(LxFsmRun *r, int scope, int region) {
+    if (!r || r->dead) return NULL;
+    if (r->scope == scope && r->region == region && (r->root || (scope == -1 && region == 0))) return r;
+    if (!r->root && scope == -1 && region == 0) return r;
+    for (int i = 0; i < r->kid_count; i++) {
+        LxFsmRun *f = lx_fsm_run_for_scope(r->kids[i], scope, region);
+        if (f) return f;
+    }
+    return NULL;
+}
+
+/* the start of a region that is starting: where a jump into it was headed, where it left off (history), or
+ * its start state */
+static int region_entry(LxFsmRun *root, int scope, int region) {
+    const LxGraph *g = root->graph;
+    if (scope >= 0 && scope < root->path_states) {
+        int want = root->enter_path ? root->enter_path[scope] : -1;
+        if (want >= 0 && want < g->state_count && lx_graph_in_scope(g, want, scope) && g->states[want].region == region) {
+            root->enter_path[scope] = -1;
+            return want;
+        }
+        if (g->states[scope].history && root->remember) {
+            int was = root->remember[scope * LX_FSM_REGIONS + region];
+            if (was >= 0 && was < g->state_count && lx_graph_in_scope(g, was, scope) && g->states[was].region == region) return was;
+        }
+    }
+    return lx_graph_region_start(g, scope, region);
+}
+
+/* a Sub State was entered: each of its regions starts playing */
+static void spawn_kids(LxScene *s, LxFsmRun *r, int idx) {
+    const LxGraph *g = r->graph;
+    int n = lx_graph_region_count(g, idx);
+    for (int reg = 0; reg < n; reg++) {
+        if (r->dead || r->state != idx || R(r)->error) return;
+        int start = region_entry(R(r), idx, reg);
+        if (start < 0) continue;
+        LxFsmRun *k = kid_new(r, idx, reg);
+        enter_state(s, k, start);
+    }
+}
+/* the graph's own second region and on play beside the root for as long as the graph runs */
+static void spawn_top_regions(LxScene *s, LxFsmRun *root) {
+    int n = lx_graph_region_count(root->graph, -1);
+    for (int reg = 1; reg < n; reg++) {
+        if (root->error) return;
+        bool have = false;
+        for (int i = 0; i < root->kid_count; i++) have |= root->kids[i]->scope == -1 && root->kids[i]->region == reg;
+        if (have) continue;
+        int start = region_entry(root, -1, reg);
+        if (start < 0) continue;
+        LxFsmRun *k = kid_new(root, -1, reg);
+        enter_state(s, k, start);
+    }
+}
+
+/* ---------------- transitions ---------------- */
+static int own_target(const LxFsmRun *r, const char *event) {
     const LxGraph *g = r->graph;
     if (r->state >= 0 && r->state < g->state_count) {
         const LxGraphState *st = &g->states[r->state];
         for (int t = 0; t < st->trans_count; t++)
             if (!strcmp(st->trans[t].event, event)) return lx_graph_state_index(g, st->trans[t].to);
     }
+    return -1;
+}
+static int global_target(const LxFsmRun *r, const char *event) {
+    const LxGraph *g = r->graph;
     for (int t = 0; t < g->global_count; t++)
         if (!strcmp(g->globals[t].event, event)) return lx_graph_state_index(g, g->globals[t].to);
     return -1;
@@ -579,48 +718,94 @@ static LxFsmCtx ctx_for(LxScene *s, LxFsmRun *r, int a, float dt) {
 static void exit_state(LxScene *s, LxFsmRun *r) {
     if (r->state < 0 || r->state >= r->bound_states) return;
     int st = r->state;
+    kill_kids(s, r, st, false);   /* inside first */
+    LxFsmRun *root = R(r);
     for (int a = 0; a < r->bound_counts[st]; a++) {
         LxFsmBound *b = &r->bound[st][a];
         if (b->entered && b->desc && b->desc->on_exit) {
             LxFsmCtx c = ctx_for(s, r, a, 0);
-            r->in_action++;
+            root->in_action++;
             b->desc->on_exit(&c);
-            r->in_action--;
+            root->in_action--;
         }
         b->entered = false;
     }
 }
 
+static void note_history(LxScene *s, LxFsmRun *r, int target, const char *event) {
+    LxFsmRun *root = R(r);
+    if (root->history_count == 64) { memmove(root->history, root->history + 1, sizeof root->history[0] * 63); root->history_count--; }
+    root->history[root->history_count].state = target;
+    lx_strcpy(root->history[root->history_count].event, LX_FSM_NAME, event ? event : "");
+    root->history[root->history_count].time = lx_game_time(s);
+    root->history_count++;
+}
+
+/* A global transition, or one that leads into another Sub State: go down from the graph to the deepest Sub
+ * State that is already playing on the way to the target, change state there, and let each Sub State
+ * entered on the way start at the next step of the path. */
+static void jump(LxScene *s, LxFsmRun *root, int target, const char *event) {
+    const LxGraph *g = root->graph;
+    int chain[40], n = 0;
+    for (int x = target; x >= 0 && n < 40; x = lx_graph_parent_index(g, x)) chain[n++] = x;   /* target .. its top-level ancestor */
+    if (!n) return;
+    int top = chain[n - 1];
+    LxFsmRun *run = root;
+    if (g->states[top].region != 0) {
+        run = NULL;
+        for (int i = 0; i < root->kid_count && !run; i++)
+            if (root->kids[i]->scope == -1 && root->kids[i]->region == g->states[top].region) run = root->kids[i];
+        if (!run) return;
+    }
+    int at = n - 1;   /* chain[at] is what `run` should be in */
+    while (at > 0 && run->state == chain[at]) {
+        LxFsmRun *next = NULL;
+        for (int i = 0; i < run->kid_count && !next; i++)
+            if (run->kids[i]->scope == chain[at] && run->kids[i]->region == g->states[chain[at - 1]].region) next = run->kids[i];
+        if (!next) break;
+        run = next;
+        at--;
+    }
+    if (root->enter_path)
+        for (int i = at; i >= 1; i--) if (chain[i] < root->path_states) root->enter_path[chain[i]] = chain[i - 1];
+    lx_strcpy(run->last_event, LX_FSM_NAME, root->last_event);
+    run->event_value = root->event_value;
+    run->event_sender = root->event_sender;
+    run->event_other = root->event_other;
+    exit_state(s, run);
+    run->prev_state = run->state;
+    note_history(s, run, target, event);
+    enter_state(s, run, chain[at]);
+}
+
 static void change_state(LxScene *s, LxFsmRun *r, int target, const char *event) {
-    if (target < 0) return;
-    if (++r->loops > LX_FSM_MAX_LOOP) {
-        if (!r->error) LX_ERROR("State graph %s on %s: more than %d state changes in one frame (an endless loop?) - stopped",
-                                r->graph->name, lx_entity_name(s, r->self), LX_FSM_MAX_LOOP);
-        r->error = true;   /* stays on the state it reached, so the editor shows where it looped */
+    if (target < 0 || r->dead) return;
+    LxFsmRun *root = R(r);
+    if (++root->loops > LX_FSM_MAX_LOOP) {
+        if (!root->error) LX_ERROR("State graph %s on %s: more than %d state changes in one frame (an endless loop?) - stopped",
+                                   r->graph->name, lx_entity_name(s, r->self), LX_FSM_MAX_LOOP);
+        root->error = true;   /* stays on the state it reached, so the editor shows where it looped */
         return;
     }
+    const LxGraph *g = r->graph;
+    if (!lx_graph_in_scope(g, target, r->scope) || g->states[target].region != r->region) { jump(s, root, target, event); return; }
     exit_state(s, r);
     r->prev_state = r->state;
-    if (r->history_count == 64) { memmove(r->history, r->history + 1, sizeof r->history[0] * 63); r->history_count--; }
-    r->history[r->history_count].state = target;
-    lx_strcpy(r->history[r->history_count].event, LX_FSM_NAME, event ? event : "");
-    r->history[r->history_count].time = lx_game_time(s);
-    r->history_count++;
+    note_history(s, r, target, event);
     enter_state(s, r, target);
 }
 
-/* an event arrives: taken now, or right after the running action returns */
-static bool deliver(LxScene *s, LxFsmRun *r, const char *event, float value, LxEntity sender, LxEntity other) {
-    if (!r->graph || r->state < 0 || !event || !event[0]) return false;
-    int target = transition_target(r, event);
-    if (target < 0) return false;
-    if (r->in_action) {
-        if (r->pending < 0) {   /* the first event wins until it's taken */
-            r->pending = target;
-            lx_strcpy(r->pending_event, LX_FSM_NAME, event);
-            r->pend_value = value;
-            r->pend_sender = sender;
-            r->pend_other = other;
+/* a transition is taken now, or right after the running action returns */
+static bool take(LxScene *s, LxFsmRun *r, int target, const char *event, float value, LxEntity sender, LxEntity other) {
+    LxFsmRun *root = R(r);
+    if (root->in_action) {
+        if (root->pending < 0) {   /* the first event wins until it's taken */
+            root->pending = target;
+            root->pend_run = r;
+            lx_strcpy(root->pending_event, LX_FSM_NAME, event);
+            root->pend_value = value;
+            root->pend_sender = sender;
+            root->pend_other = other;
         }
         return true;
     }
@@ -628,22 +813,55 @@ static bool deliver(LxScene *s, LxFsmRun *r, const char *event, float value, LxE
     r->event_value = value;
     r->event_sender = sender;
     r->event_other = other;
+    if (r != root) {
+        lx_strcpy(root->last_event, LX_FSM_NAME, event);
+        root->event_value = value;
+        root->event_sender = sender;
+        root->event_other = other;
+    }
     change_state(s, r, target, event);
     return true;
 }
 
+/* an event arrives: the innermost states that react to it take it, then their Sub States, then the graph's
+ * global transitions */
+static bool deliver_in(LxScene *s, LxFsmRun *r, const char *event, float value, LxEntity sender, LxEntity other) {
+    if (r->dead || r->state < 0) return false;
+    for (int i = 0; i < r->kid_count; i++)
+        if (deliver_in(s, r->kids[i], event, value, sender, other)) return true;
+    int target = own_target(r, event);
+    if (target < 0) return false;
+    return take(s, r, target, event, value, sender, other);
+}
+static bool deliver(LxScene *s, LxFsmRun *r, const char *event, float value, LxEntity sender, LxEntity other) {
+    if (!r || !event || !event[0]) return false;
+    r = R(r);
+    if (!r->graph || r->state < 0) return false;
+    bool took = deliver_in(s, r, event, value, sender, other);
+    if (!took) {
+        int target = global_target(r, event);
+        if (target >= 0) took = take(s, r, target, event, value, sender, other);
+    }
+    flush_grave(r);
+    return took;
+}
+
 /* after an action returns: take the transition it asked for */
 static bool take_pending(LxScene *s, LxFsmRun *r) {
-    if (r->pending < 0 || r->in_action) return false;
-    int t = r->pending;
+    LxFsmRun *root = R(r);
+    if (root->pending < 0 || root->in_action) return false;
+    int t = root->pending;
+    LxFsmRun *run = root->pend_run ? root->pend_run : root;
     char ev[LX_FSM_NAME];
-    lx_strcpy(ev, sizeof ev, r->pending_event);
-    r->pending = -1;
-    lx_strcpy(r->last_event, LX_FSM_NAME, ev);
-    r->event_value = r->pend_value;
-    r->event_sender = r->pend_sender;
-    r->event_other = r->pend_other;
-    change_state(s, r, t, ev);
+    lx_strcpy(ev, sizeof ev, root->pending_event);
+    root->pending = -1;
+    root->pend_run = NULL;
+    if (run->dead) return true;   /* its Sub State left meanwhile: the event went with it */
+    lx_strcpy(run->last_event, LX_FSM_NAME, ev);
+    run->event_value = root->pend_value;
+    run->event_sender = root->pend_sender;
+    run->event_other = root->pend_other;
+    change_state(s, run, t, ev);
     return true;
 }
 
@@ -657,9 +875,13 @@ static bool all_finished(const LxFsmRun *r) {
 }
 
 static void check_finished(LxScene *s, LxFsmRun *r) {
-    if (r->state < 0 || r->finished_sent || !all_finished(r)) return;
+    if (r->dead || r->state < 0 || r->finished_sent || !all_finished(r)) return;
+    /* a Sub State finishes through its Exits, an Exit is where it stops */
+    if (r->graph->states[r->state].kind != LX_GS_STATE) return;
     r->finished_sent = true;
-    deliver(s, r, "FINISHED", 0, r->self, 0);
+    int target = own_target(r, "FINISHED");
+    if (target < 0 && !r->root) target = global_target(r, "FINISHED");   /* the graph's own: a global FINISHED too */
+    if (target >= 0) take(s, r, target, "FINISHED", 0, r->self, 0);
 }
 
 /* runs one action's enter; returns false if the state changed meanwhile */
@@ -670,15 +892,16 @@ static bool start_action(LxScene *s, LxFsmRun *r, int st, int a) {
     b->finished = false;
     b->entered = true;
     LxFsmCtx c = ctx_for(s, r, a, 0);
-    r->in_action++;
+    LxFsmRun *root = R(r);
+    root->in_action++;
     bool cont = (b->desc->flags & LX_FSM_A_CONTINUOUS) != 0;
     if (b->desc->on_enter) b->desc->on_enter(&c);
     else if (!cont && b->src->update == LX_FSM_ONCE && b->desc->on_update) b->desc->on_update(&c);   /* "Once" on an update-only action: one go */
-    r->in_action--;
-    if (r->state != st) return false;
+    root->in_action--;
+    if (r->dead || r->state != st) return false;
     if (!(b->desc->flags & LX_FSM_A_CONTINUOUS) && b->src->update == LX_FSM_ONCE) b->finished = true;
     if (take_pending(s, r)) return false;
-    return r->state == st;
+    return !r->dead && r->state == st;
 }
 
 /* the most recent breakpoint the editor has not picked up yet */
@@ -692,6 +915,15 @@ bool lx_fsm_breakpoint_taken(LxFsmBreak *out) {
     return true;
 }
 void lx_fsm_breakpoints_clear(void) { g_break_taken = false; }
+
+/* an Exit was reached: its Sub State gets the Exit's event */
+static void exit_reached(LxScene *s, LxFsmRun *r) {
+    LxFsmRun *up = r->up;
+    if (!up || up->dead || up->state != r->scope) return;
+    const char *ev = lx_graph_exit_event(&r->graph->states[r->state]);
+    int target = own_target(up, ev);
+    if (target >= 0) take(s, up, target, ev, 0, r->self, 0);
+}
 
 static void enter_state(LxScene *s, LxFsmRun *r, int idx) {
     if (idx < 0 || idx >= r->graph->state_count) { r->state = -1; return; }
@@ -715,13 +947,31 @@ static void enter_state(LxScene *s, LxFsmRun *r, int idx) {
         if (!start_action(s, r, idx, a)) return;
         if (seq && !r->bound[idx][a].finished) break;   /* the rest start one by one */
     }
-    check_finished(s, r);
+    LxGraphStateKind kind = r->graph->states[idx].kind;
+    if (kind == LX_GS_SUB) spawn_kids(s, r, idx);
+    else if (kind == LX_GS_EXIT) exit_reached(s, r);
+    if (!r->dead && r->state == idx) check_finished(s, r);
+}
+
+static void paths_size(LxFsmRun *root) {
+    int n = root->graph ? root->graph->state_count : 0;
+    if (n == root->path_states && root->remember) return;
+    lx_free(root->remember);
+    lx_free(root->enter_path);
+    root->path_states = n;
+    root->remember = lx_alloc(sizeof(int) * (size_t)(n ? n : 1) * LX_FSM_REGIONS);
+    root->enter_path = lx_alloc(sizeof(int) * (size_t)(n ? n : 1));
+    for (int i = 0; i < (n ? n : 1) * LX_FSM_REGIONS; i++) root->remember[i] = -1;
+    for (int i = 0; i < (n ? n : 1); i++) root->enter_path[i] = -1;
 }
 
 static void run_start(LxScene *s, LxFsmRun *r) {
     r->started = true;
     r->pending = -1;
-    int st = lx_graph_state_index(r->graph, r->graph->start);
+    r->scope = -1;
+    r->region = 0;
+    paths_size(r);
+    int st = lx_graph_region_start(r->graph, -1, 0);
     if (st < 0 && r->graph->state_count) st = 0;
     r->history_count = 0;
     r->history[0].state = st;
@@ -730,10 +980,17 @@ static void run_start(LxScene *s, LxFsmRun *r) {
     r->history_count = 1;
     lx_strcpy(r->last_event, LX_FSM_NAME, "START");
     enter_state(s, r, st);
+    spawn_top_regions(s, r);
+    flush_grave(r);
 }
 
-/* the graph was edited while running: keep the current state, re-enter it only if its actions changed */
+/* the graph was edited while running: keep the current state, re-enter it only if its actions changed. Sub
+ * States and regions that were playing start again from their start states. */
 static void rebind(LxScene *s, LxFsmRun *r, const LxStateGraphSlot *slot) {
+    if (r->kid_count && r->bound && r->actions_epoch == g_actions_epoch) kill_kids(s, r, 0, true);
+    else if (r->kid_count) { for (int i = 0; i < r->kid_count; i++) kid_free(r->kids[i]); r->kid_count = 0; }
+    r->in_action = 0;
+    flush_grave(r);
     char cur[LX_FSM_NAME] = "";
     const LxFsmActionDesc *types[64];   /* compared, never read: a script reload may have unloaded them */
     int ntypes = 0;
@@ -754,8 +1011,9 @@ static void rebind(LxScene *s, LxFsmRun *r, const LxStateGraphSlot *slot) {
     }
     bound_free(r);
     bind(r, s, slot);
+    paths_size(r);
     int idx = lx_graph_state_index(r->graph, cur);
-    if (idx < 0) {   /* the state was deleted or renamed: start over */
+    if (idx < 0 || !lx_graph_in_scope(r->graph, idx, -1) || r->graph->states[idx].region != 0) {   /* deleted, renamed or moved: start over */
         for (int a = 0; a < ntypes; a++) lx_free(states_[a]);
         if (r->started && r->graph->state_count) { r->state = -1; run_start(s, r); }
         return;
@@ -771,20 +1029,34 @@ static void rebind(LxScene *s, LxFsmRun *r, const LxStateGraphSlot *slot) {
             b->finished = flags_f[a];
             b->entered = flags_e[a];
         }
+        if (r->graph->states[idx].kind == LX_GS_SUB) spawn_kids(s, r, idx);
     } else {
         for (int a = 0; a < ntypes; a++) lx_free(states_[a]);
         enter_state(s, r, idx);
     }
+    if (r->started) spawn_top_regions(s, r);
+    flush_grave(r);
 }
 
 static void run_free(LxScene *s, LxFsmRun *r) {
-    if (s && r->graph && r->bound && r->actions_epoch == g_actions_epoch) exit_state(s, r);   /* not into unloaded script code */
+    if (s && r->graph && r->bound && r->actions_epoch == g_actions_epoch) {
+        kill_kids(s, r, 0, true);
+        exit_state(s, r);   /* not into unloaded script code */
+    }
+    for (int i = 0; i < r->kid_count; i++) kid_free(r->kids[i]);
+    lx_free(r->kids);
+    r->in_action = 0;
+    flush_grave(r);
+    lx_free(r->grave);
+    lx_free(r->remember);
+    lx_free(r->enter_path);
     bound_free(r);
     for (int i = 0; i < r->var_count; i++) value_release(&r->vars[i]);
     lx_free(r->vars);
     lx_free(r->var_names);
     memset(r, 0, sizeof *r);
     r->state = -1;
+    r->scope = -1;
 }
 
 void lx_fsm_entity_free(LxEntityData *d) {
@@ -801,7 +1073,7 @@ static LxFsmInstance *instance_for(LxScene *s, LxEntity e, LxEntityData *d) {
     if (!d->sgraph || !(d->comps & LX_COMP_STATE_GRAPH)) return NULL;
     if (!d->fsm) {
         d->fsm = lx_calloc(1, sizeof *d->fsm);
-        for (int i = 0; i < LX_FSM_GRAPHS_PER_OBJECT; i++) { d->fsm->runs[i].state = -1; d->fsm->runs[i].pending = -1; }
+        for (int i = 0; i < LX_FSM_GRAPHS_PER_OBJECT; i++) { d->fsm->runs[i].state = -1; d->fsm->runs[i].pending = -1; d->fsm->runs[i].scope = -1; }
     }
     LxFsmInstance *in = d->fsm;
     in->count = d->sgraph->count;
@@ -811,7 +1083,7 @@ static LxFsmInstance *instance_for(LxScene *s, LxEntity e, LxEntityData *d) {
         if (r->graph != g) {
             run_free(s, r);
             r->graph = g;
-            if (g) { r->self = e; r->slot = i; r->pending = -1; bind(r, s, &d->sgraph->slots[i]); }
+            if (g) { r->self = e; r->slot = i; r->pending = -1; r->scope = -1; bind(r, s, &d->sgraph->slots[i]); paths_size(r); }
         } else if (g && r->bound_version != g->version) rebind(s, r, &d->sgraph->slots[i]);
         r->self = e;
     }
@@ -824,14 +1096,13 @@ LxFsmRun *lx_fsm_run_of(LxScene *s, LxEntity e, int slot) {
     return &d->fsm->runs[slot];
 }
 
-static void update_run(LxScene *s, LxFsmRun *r, float dt, LxFsmUpdate phase) {
-    if (!r->graph || r->error) return;
-    if (!r->started) { if (phase == LX_FSM_EVERY_FRAME) run_start(s, r); return; }
-    if (r->state < 0) return;
+static void update_one(LxScene *s, LxFsmRun *r, float dt, LxFsmUpdate phase) {
+    if (r->dead || r->state < 0 || R(r)->error) return;
     int st = r->state;
     if (phase == LX_FSM_EVERY_FRAME) r->state_time += dt;
     int n = r->bound_counts[st];
     bool seq = r->graph->states[st].sequence;
+    LxFsmRun *root = R(r);
     for (int a = 0; a < n; a++) {
         LxFsmBound *b = &r->bound[st][a];
         if (!b->entered) {
@@ -849,14 +1120,28 @@ static void update_run(LxScene *s, LxFsmRun *r, float dt, LxFsmUpdate phase) {
         LxFsmUpdate mode = cont ? LX_FSM_EVERY_FRAME : b->src->update;
         if (mode != phase) { if (seq) break; continue; }
         LxFsmCtx c = ctx_for(s, r, a, dt);
-        r->in_action++;
+        root->in_action++;
         b->desc->on_update(&c);
-        r->in_action--;
-        if (r->state != st) return;
+        root->in_action--;
+        if (r->dead || r->state != st) return;
         if (take_pending(s, r)) return;
+        if (r->dead || r->state != st) return;
         if (seq && !b->finished) break;
     }
+    /* what plays inside: Sub State regions (and, on the root, the graph's other regions) */
+    for (int i = 0; i < r->kid_count; i++) {
+        LxFsmRun *k = r->kids[i];
+        update_one(s, k, dt, phase);
+        if (r->dead || r->state != st || root->error) return;
+    }
     check_finished(s, r);
+}
+
+static void update_run(LxScene *s, LxFsmRun *r, float dt, LxFsmUpdate phase) {
+    if (!r->graph || r->error) return;
+    if (!r->started) { if (phase == LX_FSM_EVERY_FRAME) run_start(s, r); return; }
+    update_one(s, r, dt, phase);
+    flush_grave(r);
 }
 
 /* graphs that create objects (Spawn Prefab, Duplicate) get a budget per frame: a graph that copies itself in a
@@ -953,6 +1238,18 @@ int lx_fsm_broadcast_event(LxScene *s, const char *event, float value, LxEntity 
     outside_end(s, b);
     return n;
 }
+/* actions inside Sub States read collision info from their own run */
+static void stamp_kids(LxFsmRun *r) {
+    for (int i = 0; i < r->kid_count; i++) {
+        LxFsmRun *k = r->kids[i];
+        k->last_other = r->last_other;
+        lx_strcpy(k->last_system_event, LX_FSM_NAME, r->last_system_event);
+        k->system_seq = r->system_seq;
+        memcpy(k->system_ring, r->system_ring, sizeof k->system_ring);
+        stamp_kids(k);
+    }
+}
+
 void lx_fsm_system_event(LxScene *s, LxEntity self, const char *event, LxEntity other, float value) {
     LxEntityData *d = lx_entity_data(s, self);
     if (!d || !(d->comps & LX_COMP_STATE_GRAPH)) return;
@@ -965,6 +1262,7 @@ void lx_fsm_system_event(LxScene *s, LxEntity self, const char *event, LxEntity 
             r->system_seq++;
             lx_strcpy(r->system_ring[r->system_seq & 7].event, sizeof r->system_ring[0].event, event);
             r->system_ring[r->system_seq & 7].other = other;
+            stamp_kids(r);
         }
     bool b = outside_begin(s);
     send_to(s, self, event, value, other, other);
@@ -1008,5 +1306,5 @@ void lx_fsm_finish(LxFsmCtx *c) {
 }
 void lx_fsm_send(LxFsmCtx *c, const char *event) {
     if (!c->run || !event || !event[0] || !strcmp(event, "None")) return;
-    deliver(c->scene, c->run, event, 0, c->self, 0);
+    deliver(c->scene, R(c->run), event, 0, c->self, 0);
 }

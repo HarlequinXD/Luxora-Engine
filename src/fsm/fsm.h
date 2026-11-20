@@ -22,7 +22,16 @@ typedef struct LxGraphAction {
 typedef struct LxGraphTransition {
     char event[LX_FSM_NAME];
     char to[LX_FSM_NAME];                   /* "" = not connected yet */
+    bool via;                               /* editor: the link bends through a reroute point */
+    float via_x, via_y;
 } LxGraphTransition;
+
+/* What a state is. A Sub State holds a graph of its own: the states whose parent it is, in one or more
+ * regions that run side by side. Entering it starts each region at its start state; it leaves when one of
+ * its transitions fires, or when a state inside reaches an Exit, which sends the Sub State an event
+ * (FINISHED unless the Exit names another). */
+typedef enum { LX_GS_STATE = 0, LX_GS_SUB = 1, LX_GS_EXIT = 2 } LxGraphStateKind;
+#define LX_FSM_REGIONS 4                    /* regions per graph or Sub State */
 
 typedef struct LxGraphState {
     char name[LX_FSM_NAME];
@@ -31,6 +40,12 @@ typedef struct LxGraphState {
     int color;                              /* index into the state colour palette */
     bool sequence;                          /* run actions one after another */
     bool breakpoint;                        /* entering this state pauses Play mode (editor debugging) */
+    LxGraphStateKind kind;
+    char parent[LX_FSM_NAME];               /* the Sub State it is inside, "" = the graph itself */
+    int region;                             /* which of its parent's regions (0 = the first) */
+    char exit_event[LX_FSM_NAME];           /* Exit: the event its Sub State receives ("" = FINISHED) */
+    bool history;                           /* Sub State: re-entering it carries on where it left off */
+    bool collapsed;                         /* editor: shown as its title only */
     LxGraphAction *actions;
     int action_count, action_cap;
     LxGraphTransition *trans;
@@ -47,7 +62,16 @@ typedef struct LxGraphVar {
 
 typedef struct LxGraphEvent { char name[LX_FSM_NAME]; bool global; } LxGraphEvent;
 
-typedef struct LxGraphComment { float x, y, w, h; int color; char text[512]; } LxGraphComment;
+typedef struct LxGraphComment { float x, y, w, h; int color; char text[512]; char parent[LX_FSM_NAME]; /* the Sub State it is drawn in */ } LxGraphComment;
+
+/* a region of the graph (parent "") or of a Sub State: a name and where it starts. The graph's first
+ * region starts at LxGraph.start; every other region has an entry here. */
+typedef struct LxGraphRegion {
+    char parent[LX_FSM_NAME];
+    int index;
+    char name[LX_FSM_NAME];
+    char start[LX_FSM_NAME];
+} LxGraphRegion;
 
 typedef struct LxGraph {
     char ref[LX_REF_MAX];
@@ -64,6 +88,8 @@ typedef struct LxGraph {
     int global_count, global_cap;
     LxGraphComment *comments;
     int comment_count, comment_cap;
+    LxGraphRegion *regions;
+    int region_count, region_cap;
     uint32_t version;                       /* bumped on every edit: running graphs re-bind */
     bool dirty;                             /* edited since saved */
 } LxGraph;
@@ -112,6 +138,19 @@ LxFsmType lx_fsm_type_parse(const char *s);
 const char *lx_fsm_default_value(LxFsmType t);
 /* plain-English line for an action ("Move self towards Player at 4.5") */
 void lx_graph_action_summary(const LxGraphAction *a, const LxFsmActionDesc *d, char *out, size_t cap);
+/* nesting */
+int lx_graph_parent_index(const LxGraph *g, int state);          /* its Sub State, -1 at the top */
+bool lx_graph_in_scope(const LxGraph *g, int state, int parent);   /* directly inside parent (-1 = top) */
+bool lx_graph_is_inside(const LxGraph *g, int state, int ancestor);   /* at any depth */
+int lx_graph_region_count(const LxGraph *g, int parent);          /* regions of the graph (-1) or a Sub State, at least 1 */
+LxGraphRegion *lx_graph_region(LxGraph *g, int parent, int index, bool create);
+const char *lx_graph_region_name(const LxGraph *g, int parent, int index);   /* "" when it has none */
+int lx_graph_region_start(const LxGraph *g, int parent, int index);         /* the start state's index, -1 if empty */
+void lx_graph_set_region_start(LxGraph *g, int parent, int index, const char *state);
+void lx_graph_remove_region(LxGraph *g, int parent, int index);   /* its states move to the region before */
+int lx_graph_depth(const LxGraph *g, int state);
+const char *lx_graph_exit_event(const LxGraphState *st);           /* FINISHED unless it names one */
+
 /* problems: unconnected transitions, unknown actions, empty required parameters... (count, text lines) */
 int lx_graph_problems(const LxGraph *g, char (*out)[160], int max);   /* how many there are; the first max are written */
 
@@ -205,7 +244,28 @@ typedef struct LxFsmRun {
     double enter_time;
     int history_count;
     struct { int state; char event[LX_FSM_NAME]; float time; } history[64];
+    /* Sub States and regions: every region that is playing (of an active Sub State, or the graph's second
+     * region and on) has a run of its own, nested under the one that started it. Nested runs share the
+     * root's variables and bound actions and keep only their place: which state they are in. */
+    struct LxFsmRun *root, *up;   /* NULL on the root */
+    struct LxFsmRun **kids;
+    int kid_count, kid_cap;
+    int scope;                    /* the Sub State it plays inside, -1 = the graph */
+    int region;
+    bool dead;                    /* has left: freed once nothing is running */
+    /* the root's alone */
+    struct LxFsmRun **grave;
+    int grave_count, grave_cap;
+    int *remember;                /* per (Sub State, region): the state it was last in, for history */
+    int *enter_path;              /* per Sub State: the state inside to start at (a jump into it), -1 none */
+    int path_states;              /* the two arrays' size in states */
+    struct LxFsmRun *pend_run;    /* the run that takes the pending transition */
 } LxFsmRun;
+
+/* the run (the root or a nested one) that is in `state` now, NULL when it isn't active */
+LxFsmRun *lx_fsm_run_in_state(LxFsmRun *root, int state);
+/* the run playing a region of the graph (scope -1) or of a Sub State; NULL when it isn't playing */
+LxFsmRun *lx_fsm_run_for_scope(LxFsmRun *root, int scope, int region);
 
 typedef struct LxFsmInstance {   /* per object: one run per slot */
     LxFsmRun runs[LX_FSM_GRAPHS_PER_OBJECT];

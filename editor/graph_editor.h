@@ -27,6 +27,7 @@ typedef struct GraphEd {
     uint32_t seen_version;       /* graph version the inspector was built for */
     bool insp_dirty;
     /* view */
+    char scope[LX_FSM_NAME];     /* the Sub State being looked inside, "" = the graph itself */
     float pan_x, pan_y, zoom;    /* graph point at the canvas' top-left corner; zoom 1 = 100% */
     bool framed;                 /* the view was fitted once for this graph */
     /* selection */
@@ -77,6 +78,8 @@ void ge_commit(bool structural, const void *key);   /* after any change: undo sn
 void ge_undo(void);
 void ge_redo(void);
 LxFsmRun *ge_run(void);                        /* the running copy in play mode, or NULL */
+int ge_scope(void);                            /* the Sub State being viewed, -1 = the graph */
+void ge_enter_scope(int state);                /* look inside a Sub State (-1: back to the graph) */
 uint32_t ge_state_color(int c);
 void ge_open_action_browser(void);
 void ge_add_action(const char *type);          /* to the selected state */

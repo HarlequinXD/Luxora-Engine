@@ -359,6 +359,113 @@ static void sem_end(void) {
                      "[state]\nname = Yes\n[state]\nname = No\n[state]\nname = Done\n"
 static bool VEQ(LxVec3 a, float X, float Y, float Z, float e) { return NEAR(a.x, X, e) && NEAR(a.y, Y, e) && NEAR(a.z, Z, e); }
 
+/* Sub States and regions */
+static const char *s_in(const char *scope, int region) {
+    LxFsmRun *r = lx_fsm_run_of(g_ss, g_so, 0);
+    if (!r || !r->graph) return "-";
+    int sc = scope ? lx_graph_state_index(r->graph, scope) : -1;
+    LxFsmRun *k = lx_fsm_run_for_scope(r, sc, region);
+    return k && k->state >= 0 ? r->graph->states[k->state].name : "-";
+}
+static void s_send(const char *ev) { lx_fsm_send_event(g_ss, g_so, ev, 0, 0); }
+
+static void test_fsm_nesting(void) {
+    printf("state graph Sub States, Exits, history and regions\n");
+    const float DT = 1.0f / 60;
+    const char *body =
+        "[event]\nname = FIRE\n[event]\nname = RELOAD\n[event]\nname = LEAVE\n[event]\nname = HURT\n[event]\nname = DONE\n"
+        "[event]\nname = SIGNAL\n[event]\nname = POKE\n"
+        "[global]\nevent = HURT\nto = Reload\n[global]\nevent = SIGNAL\nto = Signal\n"
+        "[state]\nname = A\ntransition = GO > Combat\n"
+        "[state]\nname = Combat\nkind = sub\nhistory = 1\ntransition = DONE > A\ntransition = LEAVE > A\n"
+        "[action]\ntype = Float Add\nupdate = every_frame\np0 = $f\np1 = 1\n"
+        "[state]\nname = Aim\nparent = Combat\ntransition = FIRE > Shoot\ntransition = RELOAD > Reload\n"
+        "[state]\nname = Shoot\nparent = Combat\ntransition = FINISHED > Out\n"
+        "[state]\nname = Out\nparent = Combat\nkind = exit\nexit_event = DONE\n"
+        "[state]\nname = Reload\nparent = Combat\n[action]\ntype = Wait\np0 = 100\n"
+        "[state]\nname = Signal\nparent = Combat\n[action]\ntype = Send Event\np0 = LEAVE\np1 = 0\n"
+        "[state]\nname = Breathe\nparent = Combat\nregion = 1\ntransition = POKE > Gasp\n[action]\ntype = Int Add\nupdate = every_frame\np0 = $i\np1 = 1\n"
+        "[state]\nname = Gasp\nparent = Combat\nregion = 1\n"
+        "[state]\nname = Radio\nregion = 1\n[action]\ntype = Float Add\nupdate = every_frame\np0 = $f2\np1 = 1\n"
+        "[region]\nparent = Combat\nindex = 0\nname = Body\nstart = Aim\n"
+        "[region]\nparent = Combat\nindex = 1\nname = Lungs\nstart = Breathe\n"
+        "[region]\nparent = \nindex = 1\nname = Music\nstart = Radio\n";
+    sem_begin(body);
+    sem_run(3, DT);
+    CHECK(!strcmp(sst(), "A") && !strcmp(s_in(NULL, 1), "Radio") && sv("f2") >= 2,
+          "the graph's second region plays beside the first (%s, %s, %g)", sst(), s_in(NULL, 1), sv("f2"));
+    s_send("GO");
+    CHECK(!strcmp(sst(), "Combat") && !strcmp(s_in("Combat", 0), "Aim") && !strcmp(s_in("Combat", 1), "Breathe"),
+          "entering a Sub State starts each of its regions (%s: %s, %s)", sst(), s_in("Combat", 0), s_in("Combat", 1));
+    sem_run(3, DT);
+    CHECK(sv("i") >= 2 && sv("f") >= 2, "the Sub State's own actions and its regions' actions run (%g, %g)", sv("f"), sv("i"));
+    s_send("POKE");
+    CHECK(!strcmp(s_in("Combat", 1), "Gasp") && !strcmp(s_in("Combat", 0), "Aim"), "an event changes the region that reacts to it (%s, %s)",
+          s_in("Combat", 0), s_in("Combat", 1));
+    s_send("FIRE");
+    sem_run(1, DT);
+    CHECK(!strcmp(sst(), "A") && !strcmp(s_in("Combat", 0), "-"),
+          "FINISHED inside leads to an Exit, whose event takes the Sub State out (%s, %s)", sst(), s_in("Combat", 0));
+    LxFsmRun *root = lx_fsm_run_of(g_ss, g_so, 0);
+    bool saw_out = false;
+    for (int h = 0; root && h < root->history_count; h++) saw_out |= root->history[h].state == lx_graph_state_index(root->graph, "Out");
+    CHECK(saw_out, "the Exit shows in the history");
+    s_send("GO");
+    CHECK(!strcmp(s_in("Combat", 0), "Aim"), "history never brings it back to an Exit (%s)", s_in("Combat", 0));
+    s_send("RELOAD");
+    s_send("LEAVE");
+    CHECK(!strcmp(sst(), "A"), "a transition on the Sub State leaves from any state inside (%s)", sst());
+    s_send("GO");
+    CHECK(!strcmp(s_in("Combat", 0), "Reload") && !strcmp(s_in("Combat", 1), "Gasp"),
+          "with history, coming back carries on where each region left off (%s, %s)", s_in("Combat", 0), s_in("Combat", 1));
+    s_send("LEAVE");
+    s_send("HURT");
+    CHECK(!strcmp(sst(), "Combat") && !strcmp(s_in("Combat", 0), "Reload") && !strcmp(s_in(NULL, 1), "Radio"),
+          "a global transition jumps straight into a state inside a Sub State (%s / %s)", sst(), s_in("Combat", 0));
+    s_send("LEAVE");
+    s_send("SIGNAL");
+    sem_run(2, DT);
+    CHECK(!strcmp(sst(), "A"), "an action inside a Sub State sends an event the Sub State itself takes (%s)", sst());
+    for (int k = 0; k < 200; k++) { s_send(k % 3 == 0 ? "GO" : k % 3 == 1 ? "HURT" : "LEAVE"); sem_run(1, DT); }
+    CHECK(strcmp(sst(), ""), "going in and out many times stays sound (%s)", sst());
+    sem_end();
+
+    /* the file keeps all of it, and problems are named */
+    LxGraph *g = lx_graph_from_text(body);
+    CHECK(g != NULL, "a graph with Sub States reads");
+    if (g) {
+        char *t = lx_graph_to_text(g);
+        LxGraph *b = lx_graph_from_text(t);
+        int ci = b ? lx_graph_state_index(b, "Combat") : -1, oi = b ? lx_graph_state_index(b, "Out") : -1;
+        CHECK(b && ci >= 0 && b->states[ci].kind == LX_GS_SUB && b->states[ci].history && oi >= 0 && b->states[oi].kind == LX_GS_EXIT &&
+                  !strcmp(b->states[oi].exit_event, "DONE") && lx_graph_region_count(b, ci) == 2 && lx_graph_region_count(b, -1) == 2 &&
+                  !strcmp(lx_graph_region_name(b, ci, 1), "Lungs") && lx_graph_region_start(b, ci, 1) == lx_graph_state_index(b, "Breathe"),
+              "Sub States, Exits and regions survive saving");
+        if (b) {
+            lx_graph_rename_state(b, ci, "Fight");
+            int ai = lx_graph_state_index(b, "Aim");
+            CHECK(!strcmp(b->states[ai].parent, "Fight") && lx_graph_region_start(b, lx_graph_state_index(b, "Fight"), 1) == lx_graph_state_index(b, "Breathe"),
+                  "renaming a Sub State keeps what is inside it");
+            int before = b->state_count;
+            lx_graph_remove_state(b, lx_graph_state_index(b, "Fight"));
+            CHECK(b->state_count == before - 8 && lx_graph_state_index(b, "Aim") < 0 && lx_graph_region_count(b, -1) == 2,
+                  "deleting a Sub State deletes what is inside it (%d of %d left)", b->state_count, before);
+            lx_graph_free(b);
+        }
+        lx_free(t);
+        /* a transition that crosses into another Sub State is a problem */
+        LxGraphState *a = lx_graph_find_state(g, "A");
+        LxGraphTransition *x = lx_graph_add_transition(g, a, "FIRE");
+        lx_strcpy(x->to, sizeof x->to, "Aim");
+        char probs[16][160];
+        int np = lx_graph_problems(g, probs, 16);
+        bool named = false;
+        for (int k = 0; k < np && k < 16; k++) named |= strstr(probs[k], "inside another Sub State") != NULL;
+        CHECK(named, "a transition into another Sub State is listed as a problem");
+        lx_graph_free(g);
+    }
+}
+
 static void test_fsm_semantics(void) {
     printf("state graph actions (what they do)\n");
     lx_path_join(g_sdir, sizeof g_sdir, tmpdir(), "luxora_test_fsmsem");

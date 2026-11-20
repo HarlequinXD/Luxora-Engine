@@ -630,7 +630,8 @@ static void action_running_frame(UiNode *n) {
     PB *b = n->user;
     LxFsmRun *r = ge_run();
     bool on = false;
-    if (r && r->state == b->st && b->st < r->bound_states && b->ac < r->bound_counts[b->st]) {
+    LxFsmRun *in = r ? lx_fsm_run_in_state(r, b->st) : NULL;   /* maybe inside a Sub State */
+    if (in && b->st < in->bound_states && b->ac < in->bound_counts[b->st]) {
         const LxFsmBound *bd = &r->bound[b->st][b->ac];
         on = bd->entered && !bd->finished;
     }
@@ -823,7 +824,7 @@ static void build_state_tab(UiNode *body) {
     lx_strcpy(nb->s, sizeof nb->s, st->name);
     UiNode *tf = ui_textfield(ui, top, nb->s, LX_FSM_NAME);
     tf->grow = 1; tf->h = 24; tf->font = UI_FONT_BOLD; tf->user = nb; tf->on_change = state_name_changed;
-    if (run && run->state == si) { UiNode *r = label(top, "running", UI_FONT_SMALL, COL_RUN); r->icon = UI_ICON_PLAY; r->icon_color = COL_RUN; }
+    if (run && lx_fsm_run_in_state(run, si)) { UiNode *r = label(top, "running", UI_FONT_SMALL, COL_RUN); r->icon = UI_ICON_PLAY; r->icon_color = COL_RUN; }
     PB *db = pb_new(PB_MISC);
     db->st = si;
     lx_strcpy(db->s, sizeof db->s, st->description);

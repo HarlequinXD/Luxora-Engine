@@ -62,6 +62,40 @@ LxFsmRun *ge_run(void) {
     return r && r->graph && r->graph == ge_graph() ? r : NULL;
 }
 
+/* ---------------- the level being viewed: the graph, or inside a Sub State ---------------- */
+int ge_scope(void) {
+    LxGraph *g = ge_graph();
+    if (!g || !GE.scope[0]) return -1;
+    int i = lx_graph_state_index(g, GE.scope);
+    if (i < 0 || g->states[i].kind != LX_GS_SUB) { GE.scope[0] = 0; return -1; }
+    return i;
+}
+static bool vis(const LxGraph *g, int i) { return i >= 0 && i < g->state_count && lx_graph_in_scope(g, i, ge_scope()); }
+static bool comment_vis(const LxGraph *g, int i) {
+    const char *p = g->comments[i].parent;
+    return GE.scope[0] ? !strcmp(p, GE.scope) : !p[0];
+}
+void ge_enter_scope(int state) {
+    LxGraph *g = ge_graph();
+    if (!g) return;
+    if (state >= 0 && state < g->state_count && g->states[state].kind == LX_GS_SUB) lx_strcpy(GE.scope, sizeof GE.scope, g->states[state].name);
+    else GE.scope[0] = 0;
+    GE.sel_count = 0;
+    GE.sel_trans = -1;
+    GE.sel_comment = -1;
+    GE.framed = false;
+    GE.insp_dirty = true;
+}
+static void scope_up(void) {
+    LxGraph *g = ge_graph();
+    int sc = ge_scope();
+    if (!g || sc < 0) return;
+    ge_enter_scope(lx_graph_parent_index(g, sc));
+    ge_select_state(sc, false);
+}
+/* is this state where its region starts (the START tab)? */
+static bool is_start(const LxGraph *g, int i) { return i == lx_graph_region_start(g, lx_graph_parent_index(g, i), g->states[i].region); }
+
 static void clear_history(void) {
     for (int i = 0; i < GE.undo_count; i++) lx_free(GE.undo[i]);
     for (int i = 0; i < GE.redo_count; i++) lx_free(GE.redo[i]);
@@ -86,6 +120,7 @@ static void set_target(const char *ref, LxEntity obj, int slot) {
     if (!strcmp(ref, GE.ref)) return;
     flush_save();
     lx_strcpy(GE.ref, sizeof GE.ref, ref);
+    GE.scope[0] = 0;
     clear_history();
     LxGraph *g = ge_graph();
     if (g) { GE.last_text = lx_graph_to_text(g); GE.seen_version = g->version; }
@@ -169,13 +204,37 @@ static float sy(float gy) { return GE.canvas->y + (gy - GE.pan_y) * SC(); }
 static float gx_of(float x) { return GE.pan_x + (x - GE.canvas->x) / SC(); }
 static float gy_of(float y) { return GE.pan_y + (y - GE.canvas->y) / SC(); }
 
+/* what a Sub State card says under its transitions: what is inside, or (while playing) where it is */
+static void sub_info(const LxGraph *g, const LxGraphState *st, const LxFsmRun *run, char *out, size_t cap) {
+    int me = (int)(st - g->states), inside = 0;
+    for (int i = 0; i < g->state_count; i++) inside += lx_graph_parent_index(g, i) == me;
+    int regions = lx_graph_region_count(g, me);
+    out[0] = 0;
+    if (run) {
+        size_t n = 0;
+        for (int r = 0; r < regions && n + 2 < cap; r++) {
+            LxFsmRun *k = lx_fsm_run_for_scope((LxFsmRun *)run, me, r);
+            if (!k || k->state < 0) continue;
+            n += (size_t)snprintf(out + n, cap - n, "%s%s", n ? " | " : "", g->states[k->state].name);
+        }
+        if (n) return;
+    }
+    if (regions > 1) snprintf(out, cap, "%d state%s, %d regions", inside, inside == 1 ? "" : "s", regions);
+    else snprintf(out, cap, "%d state%s inside", inside, inside == 1 ? "" : "s");
+}
 static float state_w(const LxGraphState *st) {
     float s = ui_scale(ED.ui);
-    float w = ui_text_width(ED.ui, UI_FONT_BOLD, st->name) / s + (st->sequence ? 52 : 36);
+    float w = ui_text_width(ED.ui, UI_FONT_BOLD, st->name) / s + (st->sequence ? 52 : 36) + (st->kind != LX_GS_STATE ? 22 : 0);
+    if (st->collapsed) return lx_maxf(GE_STATE_W * 0.7f, ceilf(w / 8) * 8);
     for (int t = 0; t < st->trans_count; t++) w = lx_maxf(w, ui_text_width(ED.ui, UI_FONT_BODY, st->trans[t].event) / s + 28);
+    if (st->kind == LX_GS_EXIT) w = lx_maxf(w, ui_text_width(ED.ui, UI_FONT_BODY, lx_graph_exit_event(st)) / s + 52);
     return lx_maxf(GE_STATE_W, ceilf(w / 8) * 8);
 }
-static float state_h(const LxGraphState *st) { return GE_TITLE_H + GE_ROW_H * (float)st->trans_count; }
+static int extra_rows(const LxGraphState *st) { return st->collapsed ? 0 : st->kind != LX_GS_STATE ? 1 : 0; }
+static float state_h(const LxGraphState *st) {
+    if (st->collapsed) return GE_TITLE_H;
+    return GE_TITLE_H + GE_ROW_H * (float)(st->trans_count + extra_rows(st));
+}
 
 /* global transition tabs above a state: right-aligned, side by side */
 static int global_tabs(const LxGraph *g, int si, float *xs, float *ws, int *idx, int max) {
@@ -199,10 +258,11 @@ static int global_tabs(const LxGraph *g, int si, float *xs, float *ws, int *idx,
 static bool link_curve(const LxGraph *g, int si, int ti, float p[8]) {
     const LxGraphState *s = &g->states[si];
     if (ti >= s->trans_count) return false;
-    const LxGraphState *t = lx_graph_find_state(g, s->trans[ti].to);
-    if (!t) return false;
+    int tix = lx_graph_state_index(g, s->trans[ti].to);
+    if (tix < 0 || !vis(g, tix)) return false;
+    const LxGraphState *t = &g->states[tix];
     float sw = state_w(s), tw = state_w(t);
-    float ey = s->y + GE_TITLE_H + GE_ROW_H * (float)ti + GE_ROW_H * 0.5f, ty = t->y + GE_TITLE_H * 0.5f;
+    float ey = s->collapsed ? s->y + GE_TITLE_H * 0.5f : s->y + GE_TITLE_H + GE_ROW_H * (float)ti + GE_ROW_H * 0.5f, ty = t->y + GE_TITLE_H * 0.5f;
     if (t != s && t->x >= s->x + sw - 10) {   /* to the right: leave right, enter left */
         float x1 = s->x + sw, x2 = t->x, c = lx_maxf(40, (x2 - x1) * 0.5f);
         float q[8] = {x1, ey, x1 + c, ey, x2 - c, ty, x2 - 2, ty};
@@ -243,7 +303,41 @@ static void draw_curve(UiCtx *ui, const float p[8], uint32_t col, float thick, b
 /* ======================================================================
  *  hit testing
  * ====================================================================== */
-enum { H_NONE, H_STATE, H_EVENT, H_GLOBAL, H_START, H_COMMENT, H_COMMENT_SIZE, H_MINIMAP };
+enum { H_NONE, H_STATE, H_EVENT, H_GLOBAL, H_START, H_COMMENT, H_COMMENT_SIZE, H_MINIMAP, H_CRUMB, H_REGION };
+
+/* breadcrumbs (where you are: Graph > Combat > Reload), laid out when drawn */
+#define GE_CRUMBS 10
+static struct { float x, y, w, h; int state; } g_crumbs[GE_CRUMBS];
+static int g_crumb_count;
+
+/* a region's lane: around its states, with a header strip on top (graph units) */
+static bool region_rect(const LxGraph *g, int reg, float r[4]) {
+    float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+    for (int i = 0; i < g->state_count; i++) {
+        if (!vis(g, i) || g->states[i].region != reg) continue;
+        const LxGraphState *st = &g->states[i];
+        x0 = lx_minf(x0, st->x);
+        y0 = lx_minf(y0, st->y - 30);
+        x1 = lx_maxf(x1, st->x + state_w(st));
+        y1 = lx_maxf(y1, st->y + state_h(st));
+    }
+    if (x0 > x1) return false;
+    r[0] = x0 - 24;
+    r[1] = y0 - 34;
+    r[2] = x1 - x0 + 48;
+    r[3] = y1 - y0 + 58;
+    return true;
+}
+static bool regions_shown(const LxGraph *g) { return lx_graph_region_count(g, ge_scope()) > 1; }
+static int region_at(const LxGraph *g, float gx, float gy) {
+    if (!regions_shown(g)) return 0;
+    int n = lx_graph_region_count(g, ge_scope());
+    for (int r = 0; r < n; r++) {
+        float q[4];
+        if (region_rect(g, r, q) && gx >= q[0] && gy >= q[1] && gx < q[0] + q[2] && gy < q[1] + q[3]) return r;
+    }
+    return 0;
+}
 typedef struct Hit { int kind, state, trans, comment; } Hit;
 
 static void minimap_rect(float *x, float *y, float *w, float *h) {
@@ -268,30 +362,45 @@ static Hit hit_test(float mx, float my) {
         minimap_rect(&x, &y, &w, &hh);
         if (mx >= x && my >= y && mx < x + w && my < y + hh) { h.kind = H_MINIMAP; return h; }
     }
+    for (int k = 0; k < g_crumb_count; k++)
+        if (mx >= g_crumbs[k].x && my >= g_crumbs[k].y && mx < g_crumbs[k].x + g_crumbs[k].w && my < g_crumbs[k].y + g_crumbs[k].h) {
+            h.kind = H_CRUMB;
+            h.state = g_crumbs[k].state;
+            return h;
+        }
     float gx = gx_of(mx), gy = gy_of(my);
     /* states: topmost first (selected ones are drawn on top) */
     for (int pass = 0; pass < 2; pass++)
         for (int i = g->state_count - 1; i >= 0; i--) {
-            if ((pass == 0) != is_selected(i)) continue;
+            if ((pass == 0) != is_selected(i) || !vis(g, i)) continue;
             const LxGraphState *st = &g->states[i];
             float w = state_w(st);
             if (gx >= st->x && gx < st->x + w && gy >= st->y && gy < st->y + state_h(st)) {
                 h.state = i;
-                if (gy < st->y + GE_TITLE_H) h.kind = H_STATE;
-                else { h.kind = H_EVENT; h.trans = (int)((gy - st->y - GE_TITLE_H) / GE_ROW_H); }
+                int row = gy < st->y + GE_TITLE_H ? -1 : (int)((gy - st->y - GE_TITLE_H) / GE_ROW_H);
+                if (row < 0 || row >= st->trans_count || st->collapsed) h.kind = H_STATE;
+                else { h.kind = H_EVENT; h.trans = row; }
                 return h;
             }
             /* tabs above it */
             if (gy >= st->y - 26 && gy < st->y - 8) {
                 float stw = (ui_text_width(ED.ui, UI_FONT_SMALL, "START") + 12 * ui_scale(ED.ui)) / SC();
-                if (!strcmp(g->start, st->name) && gx >= st->x && gx < st->x + stw) { h.kind = H_START; h.state = i; return h; }
+                if (is_start(g, i) && gx >= st->x && gx < st->x + stw) { h.kind = H_START; h.state = i; return h; }
                 float xs[8], ws[8];
                 int idx[8], n = global_tabs(g, i, xs, ws, idx, 8);
                 for (int k = 0; k < n; k++)
                     if (gx >= xs[k] && gx < xs[k] + ws[k]) { h.kind = H_GLOBAL; h.state = i; h.trans = idx[k]; return h; }
             }
         }
+    if (regions_shown(g)) {
+        int n = lx_graph_region_count(g, ge_scope());
+        for (int r = 0; r < n; r++) {
+            float q[4];
+            if (region_rect(g, r, q) && gx >= q[0] && gx < q[0] + q[2] && gy >= q[1] && gy < q[1] + 22) { h.kind = H_REGION; h.trans = r; return h; }
+        }
+    }
     for (int i = g->comment_count - 1; i >= 0; i--) {
+        if (!comment_vis(g, i)) continue;
         const LxGraphComment *c = &g->comments[i];
         if (gx >= c->x && gx < c->x + c->w && gy >= c->y && gy < c->y + c->h) {
             h.comment = i;
@@ -344,33 +453,45 @@ static void draw_grid(UiCtx *ui, UiNode *n) {
 static void draw_state(UiCtx *ui, const LxGraph *g, int i, const LxFsmRun *run) {
     const LxGraphState *st = &g->states[i];
     float s = SC(), x = sx(st->x), y = sy(st->y), w = state_w(st) * s, h = state_h(st) * s, th = GE_TITLE_H * s, rh = GE_ROW_H * s;
-    bool sel = is_selected(i), active = run && run->state == i;
+    /* while playing: the run that is in this state (it may be inside a Sub State), and the one playing its region */
+    const LxFsmRun *ar = run ? lx_fsm_run_in_state((LxFsmRun *)run, i) : NULL;
+    const LxFsmRun *sr = run ? lx_fsm_run_for_scope((LxFsmRun *)run, lx_graph_parent_index(g, i), st->region) : NULL;
+    bool sel = is_selected(i), active = ar != NULL;
     bool err = active && run->error;
+    bool is_sub = st->kind == LX_GS_SUB, is_exit = st->kind == LX_GS_EXIT;
     float r = 5 * s;
-    /* shadow, glow */
-    ui_draw_rect(ui, x + 2 * s, y + 3 * s, w, h, UI_RGBA(0, 0, 0, 110), r);
+    uint32_t head = is_exit ? UI_HEX(0x6a1d1d) : ge_state_color(st->color);
+    /* shadow (a Sub State: a second card behind, it holds more), glow */
+    if (is_sub) {
+        ui_draw_rect(ui, x + 6 * s, y + 6 * s, w, h, UI_RGBA(0, 0, 0, 90), r);
+        ui_draw_rect(ui, x + 4 * s, y + 4 * s, w, h, UI_HEX(0x222327), r);
+        ui_draw_border(ui, x + 4 * s, y + 4 * s, w, h, COL_EDGE, r, 1);
+    } else ui_draw_rect(ui, x + 2 * s, y + 3 * s, w, h, UI_RGBA(0, 0, 0, 110), r);
     if (active) ui_draw_rect(ui, x - 5 * s, y - 5 * s, w + 10 * s, h + 10 * s, ui_alpha(err ? UI_HEX(0xe5534b) : COL_ACCENT, 0.22f), r + 4 * s);
     ui_draw_rect(ui, x, y, w, h, COL_BOX, r);
     /* title */
     if (active) ui_draw_rect_gradient(ui, x, y, w, th, UI_HEX(0x5a92ff), UI_HEX(0x3d7cf5), r, false);
-    else ui_draw_rect(ui, x, y, w, th, ge_state_color(st->color), r);
-    if (st->trans_count) ui_draw_rect(ui, x, y + th - r, w, r, active ? UI_HEX(0x3d7cf5) : ge_state_color(st->color), 0);
+    else ui_draw_rect(ui, x, y, w, th, head, r);
+    if (h > th + 1) ui_draw_rect(ui, x, y + th - r, w, r, active ? UI_HEX(0x3d7cf5) : head, 0);
     ui_push_clip(ui, x, y, w, h);
     UiFont tf = GE.zoom >= 0.8f ? UI_FONT_BOLD : UI_FONT_SMALL;
     if (GE.zoom >= 0.4f) {
-        float tw = ui_text_width(ui, tf, st->name);
-        ui_draw_text(ui, tf, x + (w - tw) * 0.5f, y + (th - ui_line_height(ui, tf)) * 0.5f, st->name, UI_HEX(0xffffff));
+        float tw = ui_text_width(ui, tf, st->name), icon_w = st->kind != LX_GS_STATE ? 16 * s : 0;
+        float tx = x + (w - tw - icon_w) * 0.5f + icon_w;
+        if (is_sub) ui_draw_icon(ui, UI_ICON_GRAPH, tx - icon_w, y + (th - 12 * s) * 0.5f, 12 * s, ui_alpha(UI_HEX(0xffffff), 0.8f));
+        if (is_exit) ui_draw_icon(ui, UI_ICON_CLOSE, tx - icon_w, y + (th - 12 * s) * 0.5f, 12 * s, ui_alpha(UI_HEX(0xffffff), 0.8f));
+        ui_draw_text(ui, tf, tx, y + (th - ui_line_height(ui, tf)) * 0.5f, st->name, UI_HEX(0xffffff));
         if (st->sequence) ui_draw_icon(ui, UI_ICON_LIST, x + w - 18 * s, y + (th - 12 * s) * 0.5f, 12 * s, ui_alpha(UI_HEX(0xffffff), 0.7f));
         /* a red dot on the left of the title bar: entering this state pauses Play mode */
         if (st->breakpoint) ui_draw_circle(ui, x + 10 * s, y + th * 0.5f, 4.5f * s, UI_HEX(0xe5484d), 12);
     }
     /* event rows */
     UiFont ef = GE.zoom >= 0.8f ? UI_FONT_BODY : UI_FONT_SMALL;
-    for (int t = 0; t < st->trans_count; t++) {
+    for (int t = 0; t < st->trans_count && !st->collapsed; t++) {
         float ry = y + th + rh * (float)t;
         ui_draw_rect(ui, x, ry, w, 1, UI_HEX(0x34363c), 0);
         bool hot = sel && GE.sel_trans == t;
-        bool fired = run && run->prev_state == i && run->state_time < 1.0f && !strcmp(run->last_event, st->trans[t].event);
+        bool fired = sr && sr->prev_state == i && sr->state_time < 1.0f && !strcmp(sr->last_event, st->trans[t].event);
         if (hot || fired) ui_draw_rect(ui, x + 1, ry + 1, w - 2, rh - 1, UI_HEX(0x1f3050), 0);
         if (GE.zoom >= 0.45f) {
             float tw = ui_text_width(ui, ef, st->trans[t].event);
@@ -378,18 +499,29 @@ static void draw_state(UiCtx *ui, const LxGraph *g, int i, const LxFsmRun *run) 
             ui_draw_text(ui, ef, x + (w - tw) * 0.5f, ry + (rh - ui_line_height(ui, ef)) * 0.5f, st->trans[t].event, c);
         }
     }
+    /* what a Sub State holds (or where it is), where an Exit leads */
+    if (extra_rows(st) && GE.zoom >= 0.45f) {
+        float ry = y + th + rh * (float)st->trans_count;
+        ui_draw_rect(ui, x, ry, w, 1, UI_HEX(0x34363c), 0);
+        char info[160];
+        if (is_sub) sub_info(g, st, run, info, sizeof info);
+        else snprintf(info, sizeof info, "sends %s", lx_graph_exit_event(st));
+        uint32_t c = is_sub && run && info[0] ? UI_HEX(0xffb03a) : COL_DIM;
+        float tw = ui_text_width(ui, UI_FONT_SMALL, info);
+        ui_draw_text(ui, UI_FONT_SMALL, x + lx_maxf(6 * s, (w - tw) * 0.5f), ry + (rh - ui_line_height(ui, UI_FONT_SMALL)) * 0.5f, info, c);
+    }
     ui_pop_clip(ui);
     /* border */
     if (sel) ui_draw_border(ui, x - 1, y - 1, w + 2, h + 2, COL_ACCENT, r, 2 * ui_scale(ui));
     else ui_draw_border(ui, x, y, w, h, active ? COL_ACCENT : COL_EDGE, r, 1);
     /* unlinked transitions: a stub */
-    for (int t = 0; t < st->trans_count; t++)
+    for (int t = 0; t < st->trans_count && !st->collapsed; t++)
         if (!st->trans[t].to[0] || !lx_graph_find_state(g, st->trans[t].to))
             ui_draw_circle(ui, x + w, y + th + rh * ((float)t + 0.5f), 3 * s, COL_DIM, 10);
     /* START and global transition tabs */
     UiFont sf = UI_FONT_SMALL;
     float tab_h = lx_maxf(16 * s, ui_line_height(ui, sf) + 2), tab_y = y - 8 * s - tab_h;
-    if (!strcmp(g->start, st->name) && GE.zoom >= 0.35f) {
+    if (is_start(g, i) && GE.zoom >= 0.35f) {
         float tw = ui_text_width(ui, sf, "START") + 12 * ui_scale(ui);
         ui_draw_rect(ui, x, tab_y, tw, tab_h, COL_START, 3 * s);
         ui_draw_text(ui, sf, x + (tw - ui_text_width(ui, sf, "START")) * 0.5f, tab_y + (tab_h - ui_line_height(ui, sf)) * 0.5f, "START", UI_HEX(0x1b1c1f));
@@ -400,7 +532,7 @@ static void draw_state(UiCtx *ui, const LxGraph *g, int i, const LxFsmRun *run) 
     int idx[8], n = global_tabs(g, i, xs, ws, idx, 8);
     for (int k = 0; k < n && GE.zoom >= 0.35f; k++) {
         const char *ev = g->globals[idx[k]].event;
-        bool fired = run && run->state == i && run->state_time < 1.0f && !strcmp(run->last_event, ev);
+        bool fired = ar && ar->state_time < 1.0f && !strcmp(ar->last_event, ev);
         float tx = sx(xs[k]), tw = ws[k] * s;
         ui_draw_rect(ui, tx, tab_y, tw, tab_h, UI_HEX(0x111214), 3 * s);
         ui_draw_border(ui, tx, tab_y, tw, tab_h, fired ? COL_HOT : UI_HEX(0x45474e), 3 * s, 1);
@@ -412,8 +544,60 @@ static void draw_state(UiCtx *ui, const LxGraph *g, int i, const LxFsmRun *run) 
     /* debug: time in the active state */
     if (active && GE.debug) {
         char b[32];
-        snprintf(b, sizeof b, "%.1fs", (double)run->state_time);
+        snprintf(b, sizeof b, "%.1fs", (double)ar->state_time);
         ui_draw_text(ui, UI_FONT_SMALL, x + w - ui_text_width(ui, UI_FONT_SMALL, b), y + h + 3 * s, b, UI_HEX(0xffb03a));
+    }
+}
+
+/* region lanes (a graph or Sub State with more than one region): behind the states, a header strip each */
+static void draw_regions(UiCtx *ui, const LxGraph *g, const LxFsmRun *run) {
+    if (!regions_shown(g)) return;
+    int sc = ge_scope(), n = lx_graph_region_count(g, sc);
+    static const uint32_t tints[LX_FSM_REGIONS] = {0x3d7cf5, 0x7cc24e, 0xffb03a, 0xb16be0};
+    float s = SC();
+    for (int r = 0; r < n; r++) {
+        float q[4];
+        if (!region_rect(g, r, q)) continue;
+        float x = sx(q[0]), y = sy(q[1]), w = q[2] * s, h = q[3] * s;
+        bool playing = run && lx_fsm_run_for_scope((LxFsmRun *)run, sc, r);
+        ui_draw_rect(ui, x, y, w, h, ui_alpha(UI_HEX(tints[r]), 0.05f), 8 * s);
+        ui_draw_border(ui, x, y, w, h, ui_alpha(UI_HEX(tints[r]), playing ? 0.6f : 0.3f), 8 * s, 1);
+        ui_draw_rect(ui, x, y, w, 22 * s, ui_alpha(UI_HEX(tints[r]), 0.16f), 8 * s);
+        if (GE.zoom >= 0.4f) {
+            char label[96];
+            const char *nm = lx_graph_region_name(g, sc, r);
+            snprintf(label, sizeof label, "%s%sRegion %d", nm, nm[0] ? "  ·  " : "", r + 1);
+            ui_draw_text(ui, UI_FONT_SMALL, x + 10 * ui_scale(ui), y + (22 * s - ui_line_height(ui, UI_FONT_SMALL)) * 0.5f, label, ui_alpha(UI_HEX(tints[r]), 0.95f));
+        }
+    }
+}
+
+/* where you are: the graph, then each Sub State down to the one being viewed; click one to go back up */
+static void draw_crumbs(UiCtx *ui, UiNode *n, const LxGraph *g) {
+    float s = ui_scale(ui);
+    int chain[GE_CRUMBS], cn = 0;
+    for (int p = ge_scope(); p >= 0 && cn < GE_CRUMBS - 1; p = lx_graph_parent_index(g, p)) chain[cn++] = p;
+    g_crumb_count = 0;
+    float x = n->x + 12 * s, y = n->y + 10 * s, h = 24 * s;
+    for (int k = cn; k >= 0; k--) {
+        int st = k == cn ? -1 : chain[k];
+        const char *label = st < 0 ? g->name : g->states[st].name;
+        bool here = k == 0;
+        float w = ui_text_width(ui, here ? UI_FONT_BOLD : UI_FONT_BODY, label) + (st < 0 ? 34 : 20) * s;
+        ui_draw_rect(ui, x, y, w, h, here ? UI_RGBA(61, 124, 245, 60) : UI_RGBA(255, 255, 255, 14), 5 * s);
+        if (st < 0) ui_draw_icon(ui, UI_ICON_GRAPH, x + 8 * s, y + (h - 12 * s) * 0.5f, 12 * s, COL_DIM);
+        ui_draw_text(ui, here ? UI_FONT_BOLD : UI_FONT_BODY, x + (st < 0 ? 24 : 10) * s, y + (h - ui_line_height(ui, UI_FONT_BODY)) * 0.5f, label,
+                     here ? COL_TEXT : COL_DIM);
+        if (g_crumb_count < GE_CRUMBS) {
+            g_crumbs[g_crumb_count].x = x; g_crumbs[g_crumb_count].y = y; g_crumbs[g_crumb_count].w = w; g_crumbs[g_crumb_count].h = h;
+            g_crumbs[g_crumb_count].state = here ? -2 : st;   /* -2: where you are already */
+            g_crumb_count++;
+        }
+        x += w;
+        if (k > 0) {
+            ui_draw_icon(ui, UI_ICON_CHEVRON_RIGHT, x + 5 * s, y + (h - 12 * s) * 0.5f, 12 * s, COL_DIM);
+            x += 22 * s;
+        }
     }
 }
 
@@ -437,7 +621,7 @@ static void graph_bounds(const LxGraph *g, float *x0, float *y0, float *x1, floa
     *x0 = *y0 = 1e9f;
     *x1 = *y1 = -1e9f;
     for (int i = 0; i < g->state_count; i++) {
-        if (sel_only && !is_selected(i)) continue;
+        if ((sel_only && !is_selected(i)) || !vis(g, i)) continue;
         const LxGraphState *st = &g->states[i];
         *x0 = lx_minf(*x0, st->x);
         *y0 = lx_minf(*y0, st->y - 30);
@@ -445,6 +629,7 @@ static void graph_bounds(const LxGraph *g, float *x0, float *y0, float *x1, floa
         *y1 = lx_maxf(*y1, st->y + state_h(st));
     }
     for (int i = 0; i < g->comment_count && !sel_only; i++) {
+        if (!comment_vis(g, i)) continue;
         const LxGraphComment *c = &g->comments[i];
         *x0 = lx_minf(*x0, c->x);
         *y0 = lx_minf(*y0, c->y);
@@ -467,12 +652,14 @@ static void draw_minimap(UiCtx *ui, const LxGraph *g, const LxFsmRun *run) {
     ui_draw_rect(ui, mx, my, mw, mh, UI_RGBA(10, 7, 7, 220), 5);
     ui_draw_border(ui, mx, my, mw, mh, UI_HEX(0x34363c), 5, 1);
     for (int i = 0; i < g->comment_count; i++) {
+        if (!comment_vis(g, i)) continue;
         const LxGraphComment *c = &g->comments[i];
         ui_draw_rect(ui, ox + (c->x - x0) * k, oy + (c->y - y0) * k, c->w * k, c->h * k, UI_RGBA(90, 74, 32, 120), 1);
     }
     for (int i = 0; i < g->state_count; i++) {
+        if (!vis(g, i)) continue;
         const LxGraphState *st = &g->states[i];
-        uint32_t c = run && run->state == i ? COL_HOT : is_selected(i) ? COL_ACCENT : ge_state_color(st->color == 0 ? 7 : st->color);
+        uint32_t c = run && lx_fsm_run_in_state((LxFsmRun *)run, i) ? COL_HOT : is_selected(i) ? COL_ACCENT : ge_state_color(st->color == 0 ? 7 : st->color);
         ui_draw_rect(ui, ox + (st->x - x0) * k, oy + (st->y - y0) * k, lx_maxf(2, state_w(st) * k), lx_maxf(2, state_h(st) * k), c, 1);
     }
     ui_draw_border(ui, ox + (vx0 - x0) * k, oy + (vy0 - y0) * k, (vx1 - vx0) * k, (vy1 - vy0) * k, COL_TEXT, 2, 1);
@@ -521,24 +708,27 @@ static void canvas_draw(UiNode *n, UiCtx *ui) {
         return;
     }
     LxFsmRun *run = ge_run();
-    /* watermark: graph name and description */
-    ui_draw_text(ui, UI_FONT_TITLE, n->x + 16 * s, n->y + 10 * s, g->name, UI_RGBA(241, 230, 225, 34));
-    if (g->description[0]) draw_wrapped(ui, UI_FONT_SMALL, n->x + 18 * s, n->y + 44 * s, 420 * s, n->y + 120 * s, g->description, UI_RGBA(241, 230, 225, 56));
-    for (int i = 0; i < g->comment_count; i++) draw_comment(ui, g, i);
+    /* the description under the breadcrumbs */
+    if (g->description[0] && ge_scope() < 0) draw_wrapped(ui, UI_FONT_SMALL, n->x + 18 * s, n->y + 42 * s, 420 * s, n->y + 120 * s, g->description, UI_RGBA(241, 230, 225, 56));
+    draw_regions(ui, g, run);
+    for (int i = 0; i < g->comment_count; i++) if (comment_vis(g, i)) draw_comment(ui, g, i);
     /* links under the states */
     for (int i = 0; i < g->state_count; i++) {
+        if (!vis(g, i)) continue;
         const LxGraphState *st = &g->states[i];
+        const LxFsmRun *sr = run ? lx_fsm_run_for_scope(run, lx_graph_parent_index(g, i), st->region) : NULL;
         for (int t = 0; t < st->trans_count; t++) {
             float p[8];
             if (!link_curve(g, i, t, p)) continue;
             bool hot = (is_selected(i) && (GE.sel_trans < 0 || GE.sel_trans == t)) ||
-                       (run && run->prev_state == i && run->state_time < 1.0f && !strcmp(run->last_event, st->trans[t].event));
+                       (sr && sr->prev_state == i && sr->state_time < 1.0f && !strcmp(sr->last_event, st->trans[t].event));
             draw_curve(ui, p, hot ? COL_HOT : COL_LINK, (hot ? 2.4f : 1.6f) * s * lx_clampf(GE.zoom, 0.7f, 1.3f), true);
             ui_draw_circle(ui, sx(p[0]), sy(p[1]), 3 * SC(), hot ? COL_HOT : COL_LINK, 10);
         }
     }
-    for (int i = 0; i < g->state_count; i++) if (!is_selected(i)) draw_state(ui, g, i, run);
-    for (int i = 0; i < g->state_count; i++) if (is_selected(i)) draw_state(ui, g, i, run);
+    for (int i = 0; i < g->state_count; i++) if (vis(g, i) && !is_selected(i)) draw_state(ui, g, i, run);
+    for (int i = 0; i < g->state_count; i++) if (vis(g, i) && is_selected(i)) draw_state(ui, g, i, run);
+    draw_crumbs(ui, n, g);
     /* gesture feedback */
     LxVec2 m = lx_mouse_pos();
     if (GE.drag == GE_DRAG_LINK && GE.drag_moved && GE.link_state >= 0 && GE.link_state < g->state_count) {
@@ -567,7 +757,8 @@ static void canvas_draw(UiNode *n, UiCtx *ui) {
     }
     bool map = minimap_shown();
     if (GE.hints) {
-        static const char *const lines[] = {"Right-click: add states, comments", "Drag an event onto a state: link it", "Double-click: rename · Space: actions", "Drag a comment: moves the states in it",
+        static const char *const lines[] = {"Right-click: add states, Sub States, comments", "Drag an event onto a state: link it", "Double-click: rename · a Sub State: open it",
+                                            "Esc: back out of a Sub State · Space: actions", "Drag a comment: moves the states in it",
                                             "Middle/Alt-drag: pan · Scroll: zoom · F: frame", "Del · Ctrl+C/V/D · Ctrl+Z: undo"};
         float lh = ui_line_height(ui, UI_FONT_SMALL), room = n->cw - (map ? 180 * s : 0) - 24 * s;
         int count = (int)(sizeof lines / sizeof lines[0]);
@@ -614,8 +805,33 @@ static void add_state_at(float gx, float gy) {
     if (!g) return;
     char name[LX_FSM_NAME];
     lx_graph_unique_name(g, "State 1", name, sizeof name, 0);
-    lx_graph_add_state(g, name, roundf(gx / 8) * 8, roundf(gy / 8) * 8);
+    int reg = region_at(g, gx, gy);
+    LxGraphState *st = lx_graph_add_state(g, name, roundf(gx / 8) * 8, roundf(gy / 8) * 8);
+    lx_strcpy(st->parent, sizeof st->parent, GE.scope);
+    st->region = reg;
     ge_select_state(g->state_count - 1, false);
+    ge_commit(true, NULL);
+}
+/* a Sub State with one state inside it to start from, or an Exit */
+static void add_kind_at(float gx, float gy, LxGraphStateKind kind) {
+    LxGraph *g = ge_graph();
+    if (!g) return;
+    char name[LX_FSM_NAME];
+    lx_graph_unique_name(g, kind == LX_GS_SUB ? "Sub State" : "Exit", name, sizeof name, 0);
+    int reg = region_at(g, gx, gy);
+    LxGraphState *st = lx_graph_add_state(g, name, roundf(gx / 8) * 8, roundf(gy / 8) * 8);
+    st->kind = kind;
+    lx_strcpy(st->parent, sizeof st->parent, GE.scope);
+    st->region = reg;
+    if (kind == LX_GS_EXIT) st->color = 1;
+    int me = g->state_count - 1;
+    if (kind == LX_GS_SUB) {
+        char inner[LX_FSM_NAME];
+        lx_graph_unique_name(g, "State 1", inner, sizeof inner, 0);
+        LxGraphState *in = lx_graph_add_state(g, inner, 80, 80);
+        lx_strcpy(in->parent, sizeof in->parent, g->states[me].name);
+    }
+    ge_select_state(me, false);
     ge_commit(true, NULL);
 }
 
@@ -657,16 +873,32 @@ static void copy_selection(void) {
     LxGraph *g = ge_graph();
     if (!g || !GE.sel_count) return;
     LxGraph *c = lx_graph_clone(g);
-    /* keep only selected states */
+    /* keep the selected states, and everything inside the selected Sub States */
+    bool *keep = lx_calloc((size_t)g->state_count + 1, sizeof(bool));
+    for (int i = 0; i < g->state_count; i++) {
+        keep[i] = is_selected(i);
+        for (int k = 0; k < GE.sel_count && !keep[i]; k++) keep[i] = GE.sel[k] < g->state_count && lx_graph_is_inside(g, i, GE.sel[k]);
+    }
     int n = 0;
     for (int i = 0; i < c->state_count; i++) {
-        if (is_selected(i)) c->states[n++] = c->states[i];
-        else { lx_free(c->states[i].actions); lx_free(c->states[i].trans); }
+        if (keep[i]) {
+            c->states[n] = c->states[i];
+            if (is_selected(i)) c->states[n].parent[0] = 0;   /* the copied tops are relative to wherever they are pasted */
+            n++;
+        } else { lx_free(c->states[i].actions); lx_free(c->states[i].trans); }
     }
+    lx_free(keep);
     c->state_count = n;
     c->global_count = 0;
     c->comment_count = 0;
     c->start[0] = 0;
+    /* the regions of copied Sub States come along (by their names) */
+    int rn = 0;
+    for (int i = 0; i < c->region_count; i++) {
+        bool ok = c->regions[i].parent[0] && lx_graph_find_state(c, c->regions[i].parent);
+        if (ok) c->regions[rn++] = c->regions[i];
+    }
+    c->region_count = rn;
     lx_free(g_clip);
     g_clip = lx_graph_to_text(c);
     lx_graph_free(c);
@@ -679,7 +911,8 @@ static void paste_at(float gx, float gy) {
     LxGraph *c = lx_graph_from_text(g_clip);
     if (!c || !c->state_count) { lx_graph_free(c); return; }
     float x0 = 1e9f, y0 = 1e9f;
-    for (int i = 0; i < c->state_count; i++) { x0 = lx_minf(x0, c->states[i].x); y0 = lx_minf(y0, c->states[i].y); }
+    for (int i = 0; i < c->state_count; i++)
+        if (!c->states[i].parent[0]) { x0 = lx_minf(x0, c->states[i].x); y0 = lx_minf(y0, c->states[i].y); }
     /* new names for clashes; links between pasted states follow */
     char olds[GE_MAX_SEL][LX_FSM_NAME], news[GE_MAX_SEL][LX_FSM_NAME];
     int count = c->state_count < GE_MAX_SEL ? c->state_count : GE_MAX_SEL;
@@ -696,10 +929,22 @@ static void paste_at(float gx, float gy) {
     GE.sel_count = 0;
     for (int i = 0; i < count; i++) {
         const LxGraphState *src = &c->states[i];
-        LxGraphState *st = lx_graph_add_state(g, news[i], roundf((src->x - x0 + gx) / 8) * 8, roundf((src->y - y0 + gy) / 8) * 8);
+        bool top = !src->parent[0];
+        LxGraphState *st = lx_graph_add_state(g, news[i], top ? roundf((src->x - x0 + gx) / 8) * 8 : src->x, top ? roundf((src->y - y0 + gy) / 8) * 8 : src->y);
         int si = g->state_count - 1;
         st->color = src->color;
         st->sequence = src->sequence;
+        st->kind = src->kind;
+        st->history = src->history;
+        st->collapsed = src->collapsed;
+        lx_strcpy(st->exit_event, sizeof st->exit_event, src->exit_event);
+        if (top) { lx_strcpy(st->parent, sizeof st->parent, GE.scope); st->region = region_at(g, st->x, st->y); }
+        else {
+            const char *pp = src->parent;
+            for (int k = 0; k < count; k++) if (!strcmp(olds[k], pp)) pp = news[k];
+            lx_strcpy(st->parent, sizeof st->parent, pp);
+            st->region = src->region;
+        }
         lx_strcpy(st->description, sizeof st->description, src->description);
         for (int a = 0; a < src->action_count; a++) {
             const LxFsmActionDesc *d = lx_fsm_action_find(src->actions[a].type);
@@ -713,63 +958,66 @@ static void paste_at(float gx, float gy) {
             for (int k = 0; k < count; k++) if (!strcmp(olds[k], to)) to = news[k];
             if (nt) lx_strcpy(nt->to, sizeof nt->to, to);
         }
-        if (GE.sel_count < GE_MAX_SEL) GE.sel[GE.sel_count++] = si;
+        if (top && GE.sel_count < GE_MAX_SEL) GE.sel[GE.sel_count++] = si;
+    }
+    for (int r = 0; r < c->region_count; r++) {   /* copied Sub States' regions, under their new names */
+        const char *pp = c->regions[r].parent, *st0 = c->regions[r].start;
+        for (int k = 0; k < count; k++) { if (!strcmp(olds[k], pp)) pp = news[k]; }
+        for (int k = 0; k < count; k++) { if (!strcmp(olds[k], st0)) st0 = news[k]; }
+        int pi = lx_graph_state_index(g, pp);
+        if (pi < 0) continue;
+        LxGraphRegion *rg = lx_graph_region(g, pi, c->regions[r].index, true);
+        if (rg) { lx_strcpy(rg->name, sizeof rg->name, c->regions[r].name); lx_strcpy(rg->start, sizeof rg->start, st0); }
     }
     lx_graph_free(c);
     GE.sel_trans = -1;
     ge_commit(true, NULL);
 }
 
-/* simple layered layout: depth from the start state along transitions */
+/* simple layered layout of the level being viewed: each region in a band of its own, columns by depth from
+ * its start state along transitions */
 static void auto_layout(void) {
     LxGraph *g = ge_graph();
     if (!g || !g->state_count) return;
-    int n = g->state_count;
-    int *depth = lx_calloc((size_t)n, sizeof(int)), *queue = lx_calloc((size_t)n, sizeof(int)), *row = lx_calloc((size_t)n + 1, sizeof(int));
-    for (int i = 0; i < n; i++) depth[i] = -1;
-    int qh = 0, qt = 0, s0 = lx_graph_state_index(g, g->start);
-    if (s0 < 0) s0 = 0;
-    depth[s0] = 0;
-    queue[qt++] = s0;
-    while (qh < qt) {
-        int i = queue[qh++];
-        const LxGraphState *st = &g->states[i];
-        for (int t = 0; t < st->trans_count; t++) {
-            int j = lx_graph_state_index(g, st->trans[t].to);
-            if (j >= 0 && depth[j] < 0) { depth[j] = depth[i] + 1; queue[qt++] = j; }
+    int n = g->state_count, sc = ge_scope(), regions = lx_graph_region_count(g, sc);
+    int *depth = lx_calloc((size_t)n, sizeof(int)), *queue = lx_calloc((size_t)n, sizeof(int));
+    float band_y = 80;
+    for (int reg = 0; reg < regions; reg++) {
+        for (int i = 0; i < n; i++) depth[i] = -1;
+        int qh = 0, qt = 0, s0 = lx_graph_region_start(g, sc, reg);
+        if (s0 >= 0) { depth[s0] = 0; queue[qt++] = s0; }
+        while (qh < qt) {
+            int i = queue[qh++];
+            const LxGraphState *st = &g->states[i];
+            for (int t = 0; t < st->trans_count; t++) {
+                int j = lx_graph_state_index(g, st->trans[t].to);
+                if (j >= 0 && depth[j] < 0 && vis(g, j) && g->states[j].region == reg) { depth[j] = depth[i] + 1; queue[qt++] = j; }
+            }
         }
-    }
-    /* states reached only by global transitions or not at all: their own column at the end */
-    int maxd = 0;
-    for (int i = 0; i < n; i++) if (depth[i] > maxd) maxd = depth[i];
-    for (int i = 0; i < n; i++) if (depth[i] < 0) depth[i] = maxd + 1;
-    float colw[64] = {0};
-    for (int i = 0; i < n; i++) { int d = depth[i] < 63 ? depth[i] : 63; colw[d] = lx_maxf(colw[d], state_w(&g->states[i])); }
-    float colx[64];
-    colx[0] = 80;
-    for (int d = 1; d < 64; d++) colx[d] = colx[d - 1] + colw[d - 1] + 110;
-    float rowy[64];
-    for (int d = 0; d < 64; d++) rowy[d] = 80;
-    for (int qi = 0; qi < n; qi++) {
-        int i = qi < qt ? queue[qi] : -1;
-        if (i < 0) break;
-        int d = depth[i] < 63 ? depth[i] : 63;
-        g->states[i].x = colx[d];
-        g->states[i].y = rowy[d];
-        rowy[d] += state_h(&g->states[i]) + 70;
-    }
-    for (int i = 0; i < n; i++) {
-        bool placed = false;
-        for (int q = 0; q < qt; q++) if (queue[q] == i) placed = true;
-        if (placed) continue;
-        int d = depth[i] < 63 ? depth[i] : 63;
-        g->states[i].x = colx[d];
-        g->states[i].y = rowy[d];
-        rowy[d] += state_h(&g->states[i]) + 70;
+        /* states reached only by global transitions or not at all: their own column at the end */
+        int maxd = 0;
+        for (int i = 0; i < n; i++) if (depth[i] > maxd) maxd = depth[i];
+        for (int i = 0; i < n; i++)
+            if (depth[i] < 0 && vis(g, i) && g->states[i].region == reg) { depth[i] = maxd + 1; queue[qt++] = i; }
+        float colw[64] = {0};
+        for (int q = 0; q < qt; q++) { int i = queue[q], d = depth[i] < 63 ? depth[i] : 63; colw[d] = lx_maxf(colw[d], state_w(&g->states[i])); }
+        float colx[64];
+        colx[0] = 80;
+        for (int d = 1; d < 64; d++) colx[d] = colx[d - 1] + colw[d - 1] + 110;
+        float rowy[64];
+        for (int d = 0; d < 64; d++) rowy[d] = band_y;
+        float bottom = band_y;
+        for (int q = 0; q < qt; q++) {
+            int i = queue[q], d = depth[i] < 63 ? depth[i] : 63;
+            g->states[i].x = colx[d];
+            g->states[i].y = rowy[d];
+            rowy[d] += state_h(&g->states[i]) + 70;
+            bottom = lx_maxf(bottom, rowy[d]);
+        }
+        band_y = bottom + 90;   /* the next region below, clear of this one's lane */
     }
     lx_free(depth);
     lx_free(queue);
-    lx_free(row);
     ge_commit(false, NULL);
     ge_frame_all();
 }
@@ -804,18 +1052,20 @@ static void m_add_comment(UiNode *n) {
     c.w = 220;
     c.h = 90;
     lx_strcpy(c.text, sizeof c.text, "Note");
+    lx_strcpy(c.parent, sizeof c.parent, GE.scope);
     LX_VEC_PUSH(g->comments, g->comment_count, g->comment_cap, c);
     GE.sel_count = 0;
     GE.sel_comment = g->comment_count - 1;
     ge_commit(true, NULL);
 }
 static void m_paste(UiNode *n) { LX_UNUSED(n); paste_at(g_menu_gx, g_menu_gy); }
-static void m_select_all(UiNode *n) {
-    LX_UNUSED(n);
+static void m_select_all_level(void);
+static void m_select_all(UiNode *n) { LX_UNUSED(n); m_select_all_level(); }
+static void m_select_all_level(void) {
     LxGraph *g = ge_graph();
     if (!g) return;
     GE.sel_count = 0;
-    for (int i = 0; i < g->state_count && i < GE_MAX_SEL; i++) GE.sel[GE.sel_count++] = i;
+    for (int i = 0; i < g->state_count && GE.sel_count < GE_MAX_SEL; i++) if (vis(g, i)) GE.sel[GE.sel_count++] = i;
     GE.insp_dirty = true;
 }
 static void m_auto_layout(UiNode *n) { LX_UNUSED(n); auto_layout(); }
@@ -826,8 +1076,212 @@ static void m_set_start(UiNode *n) {
     LX_UNUSED(n);
     LxGraph *g = ge_graph();
     if (!g || g_menu_state < 0 || g_menu_state >= g->state_count) return;
-    lx_strcpy(g->start, sizeof g->start, g->states[g_menu_state].name);
+    const LxGraphState *st = &g->states[g_menu_state];
+    lx_graph_set_region_start(g, lx_graph_parent_index(g, g_menu_state), st->region, st->name);
     ge_commit(true, NULL);
+}
+static void m_add_sub(UiNode *n) { LX_UNUSED(n); add_kind_at(g_menu_gx, g_menu_gy, LX_GS_SUB); }
+static void m_add_exit(UiNode *n) { LX_UNUSED(n); add_kind_at(g_menu_gx, g_menu_gy, LX_GS_EXIT); }
+static void m_open_sub(UiNode *n) { LX_UNUSED(n); ge_enter_scope(g_menu_state); }
+static void m_back_out(UiNode *n) { LX_UNUSED(n); scope_up(); }
+static void m_toggle_history(UiNode *n) {
+    LX_UNUSED(n);
+    LxGraph *g = ge_graph();
+    if (!g || g_menu_state < 0 || g_menu_state >= g->state_count) return;
+    g->states[g_menu_state].history = !g->states[g_menu_state].history;
+    ge_commit(true, NULL);
+}
+static void m_toggle_collapse(UiNode *n) {
+    LX_UNUSED(n);
+    LxGraph *g = ge_graph();
+    if (!g) return;
+    bool to = !(g_menu_state >= 0 && g_menu_state < g->state_count && g->states[g_menu_state].collapsed);
+    for (int k = 0; k < GE.sel_count; k++) if (GE.sel[k] < g->state_count) g->states[GE.sel[k]].collapsed = to;
+    ge_commit(true, NULL);
+}
+static void exit_event_done(const char *text) {
+    LxGraph *g = ge_graph();
+    if (!g || g_menu_state < 0 || g_menu_state >= g->state_count) return;
+    char ev[LX_FSM_NAME];
+    size_t k = 0;
+    for (const char *p = text; *p && k + 1 < sizeof ev; p++) ev[k++] = *p == ' ' ? '_' : (char)toupper((unsigned char)*p);
+    ev[k] = 0;
+    LxGraphState *st = &g->states[g_menu_state];
+    lx_strcpy(st->exit_event, sizeof st->exit_event, strcmp(ev, "FINISHED") ? ev : "");
+    if (ev[0] && strcmp(ev, "FINISHED") && !lx_graph_find_event(g, ev)) lx_graph_add_event(g, ev);
+    /* the Sub State it leaves gets a transition for it, ready to link */
+    int up = lx_graph_parent_index(g, g_menu_state);
+    if (up >= 0 && ev[0]) lx_graph_add_transition(g, &g->states[up], ev[0] ? ev : "FINISHED");
+    ge_commit(true, NULL);
+}
+static void m_exit_event(UiNode *n) {
+    LX_UNUSED(n);
+    LxGraph *g = ge_graph();
+    if (!g || g_menu_state < 0 || g_menu_state >= g->state_count) return;
+    ed_prompt("Exit Event", "The event its Sub State receives (FINISHED, or a name like DIED)", lx_graph_exit_event(&g->states[g_menu_state]), exit_event_done);
+}
+
+static bool in_names(char (*names)[LX_FSM_NAME], int n, const char *nm) {
+    for (int b = 0; b < n; b++) if (!strcmp(names[b], nm)) return true;
+    return false;
+}
+/* the selected states become a new Sub State: links between them stay inside, links into them now lead to it,
+ * links out of them become the Sub State's own (they leave from any state inside) */
+static void group_into_sub(void) {
+    LxGraph *g = ge_graph();
+    if (!g || !GE.sel_count) return;
+    char names[GE_MAX_SEL][LX_FSM_NAME];
+    int n = 0;
+    float x0 = 1e9f, y0 = 1e9f;
+    int reg = -1;
+    for (int k = 0; k < GE.sel_count; k++) {
+        int i = GE.sel[k];
+        if (i >= g->state_count || !vis(g, i)) continue;
+        lx_strcpy(names[n++], LX_FSM_NAME, g->states[i].name);
+        x0 = lx_minf(x0, g->states[i].x);
+        y0 = lx_minf(y0, g->states[i].y);
+        if (reg < 0) reg = g->states[i].region;
+    }
+    if (!n) return;
+    char sub_name[LX_FSM_NAME];
+    lx_graph_unique_name(g, "Sub State", sub_name, sizeof sub_name, 0);
+    LxGraphState *sub = lx_graph_add_state(g, sub_name, roundf(x0 / 8) * 8, roundf(y0 / 8) * 8);
+    sub->kind = LX_GS_SUB;
+    lx_strcpy(sub->parent, sizeof sub->parent, GE.scope);
+    sub->region = reg < 0 ? 0 : reg;
+    int si = g->state_count - 1;
+    bool was_start = false;
+    for (int a = 0; a < n; a++) {
+        int i = lx_graph_state_index(g, names[a]);
+        was_start |= is_start(g, i);
+    }
+    for (int i = 0; i < g->state_count; i++) {
+        if (i == si) continue;
+        LxGraphState *st = &g->states[i];
+        bool inside = in_names(names, n, st->name);
+        for (int t = st->trans_count - 1; t >= 0; t--) {
+            bool to_in = in_names(names, n, st->trans[t].to);
+            if (!inside && to_in) lx_strcpy(st->trans[t].to, sizeof st->trans[t].to, sub_name);   /* into it: to the Sub State */
+            else if (inside && !to_in && st->trans[t].to[0]) {   /* out of it: the Sub State's own */
+                LxGraphTransition *nt = lx_graph_add_transition(g, &g->states[si], st->trans[t].event);
+                if (nt && !nt->to[0]) lx_strcpy(nt->to, sizeof nt->to, st->trans[t].to);
+                lx_graph_remove_transition(&g->states[i], t);
+            }
+        }
+    }
+    for (int a = 0; a < n; a++) {
+        int i = lx_graph_state_index(g, names[a]);
+        lx_strcpy(g->states[i].parent, sizeof g->states[i].parent, sub_name);
+        g->states[i].region = 0;
+        g->states[i].x -= x0 - 80;
+        g->states[i].y -= y0 - 80;
+    }
+    lx_graph_set_region_start(g, si, 0, names[0]);
+    if (was_start) lx_graph_set_region_start(g, ge_scope(), sub->region, sub_name);
+    for (int a = 0; a < n; a++) {   /* the group's own start: the one the others' links lead from first */
+        int i = lx_graph_state_index(g, names[a]);
+        bool reached = false;
+        for (int b = 0; b < n && !reached; b++) {
+            const LxGraphState *o = lx_graph_find_state(g, names[b]);
+            for (int t = 0; o && t < o->trans_count; t++) reached |= !strcmp(o->trans[t].to, names[a]);
+        }
+        if (!reached) { lx_graph_set_region_start(g, si, 0, g->states[i].name); break; }
+    }
+    ge_select_state(si, false);
+    ge_commit(true, NULL);
+    ui_notify(ED.ui, "%d state%s now inside %s (double-click it to open)", n, n == 1 ? "" : "s", sub_name);
+}
+static void m_group_sub(UiNode *n) { LX_UNUSED(n); group_into_sub(); }
+
+/* regions */
+static int g_menu_region = -1;
+static void m_move_region_pick(UiNode *n) {
+    LxGraph *g = ge_graph();
+    if (!g) return;
+    int to = (int)n->tag, sc = ge_scope();
+    if (to >= lx_graph_region_count(g, sc)) { lx_graph_region(g, sc, to, true); }
+    float q[4], top = -1e9f;
+    if (to >= lx_graph_region_count(g, sc) - 1 && !region_rect(g, to, q)) {   /* a new lane goes below the others */
+        for (int r = 0; r < lx_graph_region_count(g, sc); r++) if (region_rect(g, r, q)) top = lx_maxf(top, q[1] + q[3]);
+    }
+    for (int k = 0; k < GE.sel_count; k++) {
+        int i = GE.sel[k];
+        if (i >= g->state_count || !vis(g, i)) continue;
+        if (top > -1e8f) g->states[i].y = roundf((top + 70) / 8) * 8;
+        g->states[i].region = to;
+    }
+    ge_commit(true, NULL);
+}
+static void m_move_region(UiNode *n) {
+    float x = n->x + n->cw, y = n->y;
+    ui_close_popups(ED.ui);
+    LxGraph *g = ge_graph();
+    UiNode *p = ui_popup(ED.ui, x, y, 190);
+    if (!p || !g) return;
+    int sc = ge_scope(), count = lx_graph_region_count(g, sc);
+    for (int r = 0; r < count; r++) {
+        char label[96];
+        const char *nm = lx_graph_region_name(g, sc, r);
+        snprintf(label, sizeof label, "Region %d%s%s", r + 1, nm[0] ? " - " : "", nm);
+        UiNode *it = ui_menu_item(ED.ui, p, label, NULL, m_move_region_pick);
+        it->tag = r;
+    }
+    if (count < LX_FSM_REGIONS) {
+        ui_menu_separator(ED.ui, p);
+        UiNode *it = ui_menu_item(ED.ui, p, "New Region (runs alongside)", NULL, m_move_region_pick);
+        it->icon = UI_ICON_PLUS;
+        it->tag = count;
+    }
+}
+static void m_add_region(UiNode *n) {
+    LX_UNUSED(n);
+    LxGraph *g = ge_graph();
+    if (!g) return;
+    int sc = ge_scope(), count = lx_graph_region_count(g, sc);
+    if (count >= LX_FSM_REGIONS) { ui_notify(ED.ui, "Up to %d regions", LX_FSM_REGIONS); return; }
+    float q[4], below = 80;
+    for (int r = 0; r < count; r++) if (region_rect(g, r, q)) below = lx_maxf(below, q[1] + q[3] + 70);
+    float x = 80;
+    for (int r = 0; r < count; r++) if (region_rect(g, r, q)) { x = q[0] + 24; break; }
+    lx_graph_region(g, sc, count, true);
+    char name[LX_FSM_NAME];
+    lx_graph_unique_name(g, "State 1", name, sizeof name, 0);
+    LxGraphState *st = lx_graph_add_state(g, name, roundf(x / 8) * 8, roundf(below / 8) * 8);
+    lx_strcpy(st->parent, sizeof st->parent, GE.scope);
+    st->region = count;
+    lx_graph_set_region_start(g, sc, count, name);
+    ge_select_state(g->state_count - 1, false);
+    ge_commit(true, NULL);
+    ui_notify(ED.ui, "Region %d plays at the same time as the others", count + 1);
+}
+static void region_name_done(const char *text) {
+    LxGraph *g = ge_graph();
+    if (!g || g_menu_region < 0) return;
+    LxGraphRegion *rg = lx_graph_region(g, ge_scope(), g_menu_region, true);
+    if (rg) lx_strcpy(rg->name, sizeof rg->name, text);
+    ge_commit(true, NULL);
+}
+static void m_region_rename(UiNode *n) {
+    LX_UNUSED(n);
+    LxGraph *g = ge_graph();
+    if (!g || g_menu_region < 0) return;
+    ed_prompt("Region Name", "Name (e.g. Movement, Weapon)", lx_graph_region_name(g, ge_scope(), g_menu_region), region_name_done);
+}
+static void m_region_remove(UiNode *n) {
+    LX_UNUSED(n);
+    LxGraph *g = ge_graph();
+    if (!g || g_menu_region <= 0) return;
+    lx_graph_remove_region(g, ge_scope(), g_menu_region);
+    ge_commit(true, NULL);
+}
+static void m_region_select(UiNode *n) {
+    LX_UNUSED(n);
+    LxGraph *g = ge_graph();
+    if (!g) return;
+    GE.sel_count = 0;
+    for (int i = 0; i < g->state_count && GE.sel_count < GE_MAX_SEL; i++)
+        if (vis(g, i) && g->states[i].region == g_menu_region) GE.sel[GE.sel_count++] = i;
+    GE.insp_dirty = true;
 }
 static void m_toggle_sequence(UiNode *n) {
     LX_UNUSED(n);
@@ -1036,7 +1490,15 @@ static void open_context_menu(Hit h, float mx, float my) {
             mitem(p, "Remove Transition", UI_ICON_TRASH, m_remove_trans);
             ui_menu_separator(ED.ui, p);
         }
-        mitem(p, "Set as Start State", UI_ICON_PLAY, m_set_start);
+        const LxGraphState *ms = &g->states[h.state];
+        if (ms->kind == LX_GS_SUB) {
+            mitem(p, "Open Sub State", UI_ICON_GRAPH, m_open_sub)->hint[0] = 0;
+            UiNode *hi = mitem(p, "Remember Where It Left Off", UI_ICON_NONE, m_toggle_history);
+            if (ms->history) { hi->icon = UI_ICON_CHECK; hi->icon_color = COL_START; }
+            ui_menu_separator(ED.ui, p);
+        }
+        if (ms->kind == LX_GS_EXIT) { mitem(p, "Exit Event...", UI_ICON_NONE, m_exit_event); ui_menu_separator(ED.ui, p); }
+        mitem(p, regions_shown(g) ? "Set as Region Start" : "Set as Start State", UI_ICON_PLAY, m_set_start);
         subitem(p, "Add Transition", m_add_trans);
         subitem(p, "Add Global Transition", m_add_global);
         mitem(p, "Add Action...", UI_ICON_PLUS, m_add_action);
@@ -1045,6 +1507,10 @@ static void open_context_menu(Hit h, float mx, float my) {
         UiNode *bp = mitem(p, "Breakpoint (pause Play here)", UI_ICON_NONE, m_toggle_breakpoint);
         if (g->states[h.state].breakpoint) { bp->icon = UI_ICON_CHECK; bp->icon_color = UI_HEX(0xe5484d); }
         subitem(p, "Color", m_colors);
+        UiNode *cl = mitem(p, ms->collapsed ? "Expand" : "Collapse", ms->collapsed ? UI_ICON_CHEVRON_DOWN : UI_ICON_CHEVRON_UP, m_toggle_collapse);
+        LX_UNUSED(cl);
+        subitem(p, "Move to Region", m_move_region);
+        mitem(p, GE.sel_count > 1 ? "Group into Sub State" : "Put into a Sub State", UI_ICON_GRAPH, m_group_sub);
         ui_menu_separator(ED.ui, p);
         mitem(p, "Rename...", UI_ICON_NONE, m_rename)->hint[0] = 0;
         mitem(p, "Copy", UI_ICON_COPY, m_copy);
@@ -1057,6 +1523,15 @@ static void open_context_menu(Hit h, float mx, float my) {
         mitem(p, "Remove Global Transition", UI_ICON_TRASH, m_remove_global);
         return;
     }
+    if (h.kind == H_REGION) {
+        g_menu_region = h.trans;
+        mitem(p, "Rename Region...", UI_ICON_NONE, m_region_rename);
+        mitem(p, "Select Its States", UI_ICON_SELECT, m_region_select);
+        UiNode *rr = mitem(p, "Remove Region (states join the one before)", UI_ICON_TRASH, m_region_remove);
+        rr->disabled = h.trans == 0;
+        return;
+    }
+    if (h.kind == H_CRUMB) { ui_close_popups(ED.ui); return; }
     if (h.kind == H_COMMENT || h.kind == H_COMMENT_SIZE) {
         GE.sel_count = 0;
         GE.sel_comment = h.comment;
@@ -1066,6 +1541,9 @@ static void open_context_menu(Hit h, float mx, float my) {
         return;
     }
     mitem(p, "Add State", UI_ICON_PLUS, m_add_state);
+    mitem(p, "Add Sub State", UI_ICON_GRAPH, m_add_sub);
+    if (ge_scope() >= 0) mitem(p, "Add Exit", UI_ICON_CLOSE, m_add_exit);
+    mitem(p, "Add Region", UI_ICON_TILES, m_add_region);
     mitem(p, "Add Comment", UI_ICON_INFO, m_add_comment);
     UiNode *ps = mitem(p, "Paste", UI_ICON_COPY, m_paste);
     ps->disabled = !g_clip;
@@ -1074,6 +1552,7 @@ static void open_context_menu(Hit h, float mx, float my) {
     mitem(p, "Auto Layout", UI_ICON_GRID, m_auto_layout);
     mitem(p, "Frame All", UI_ICON_FOCUS, m_frame);
     mitem(p, "Action Browser", UI_ICON_LIST, m_add_action);
+    if (ge_scope() >= 0) { ui_menu_separator(ED.ui, p); mitem(p, "Back Out of Sub State (Esc)", UI_ICON_CHEVRON_UP, m_back_out); }
 }
 
 static void canvas_right_click(UiNode *n) {
@@ -1093,7 +1572,7 @@ static void finish_link(LxGraph *g, float mx, float my) {
     int target = h.kind == H_STATE || h.kind == H_EVENT || h.kind == H_START || h.kind == H_GLOBAL ? h.state : -1;
     if (GE.link_state < 0 || GE.link_state >= g->state_count) return;
     if (GE.link_trans == -2) {   /* START dragged onto a state */
-        if (target >= 0) { lx_strcpy(g->start, sizeof g->start, g->states[target].name); ge_commit(true, NULL); }
+        if (target >= 0) { lx_graph_set_region_start(g, lx_graph_parent_index(g, target), g->states[target].region, g->states[target].name); ge_commit(true, NULL); }
         return;
     }
     if (GE.link_trans == -1) {   /* a global transition re-aimed */
@@ -1148,6 +1627,15 @@ static void canvas_frame(UiNode *n) {
             Hit h = hit_test(m.x, m.y);
             switch (h.kind) {
             case H_MINIMAP: GE.drag = GE_DRAG_MINIMAP; minimap_pan(m.x, m.y); break;
+            case H_CRUMB:
+                if (h.state != -2) ge_enter_scope(h.state);
+                break;
+            case H_REGION:   /* its header: select the region's states and move them together */
+                g_menu_region = h.trans;
+                m_region_select(NULL);
+                if (dbl) { m_region_rename(NULL); break; }
+                GE.drag = GE_DRAG_MOVE;
+                break;
             case H_EVENT:
                 if (!is_selected(h.state) || GE.sel_count != 1) ge_select_state(h.state, false);
                 GE.sel_trans = h.trans;
@@ -1159,7 +1647,13 @@ static void canvas_frame(UiNode *n) {
                            UiNode tmp; memset(&tmp, 0, sizeof tmp); tmp.x = m.x; tmp.y = m.y; event_menu(&tmp, EV_CHANGE); }
                 break;
             case H_STATE:
-                if (dbl) { g_menu_state = h.state; GE.drag = GE_DRAG_NONE; m_rename(NULL); break; }
+                if (dbl) {
+                    g_menu_state = h.state;
+                    GE.drag = GE_DRAG_NONE;
+                    if (g->states[h.state].kind == LX_GS_SUB) ge_enter_scope(h.state);   /* look inside it */
+                    else m_rename(NULL);
+                    break;
+                }
                 if (shift) ge_select_state(h.state, true);
                 else if (!is_selected(h.state)) ge_select_state(h.state, false);
                 else { GE.sel_trans = -1; if (GE.insp_tabs) GE.insp_tabs->tab_index = 1; GE.insp_dirty = true; }
@@ -1189,6 +1683,7 @@ static void canvas_frame(UiNode *n) {
                 if (GE.drag == GE_DRAG_COMMENT && !lx_key_down(LX_KEY_CTRL)) {
                     const LxGraphComment *c = &g->comments[h.comment];
                     for (int i = 0; i < g->state_count && g_group_count < GE_MAX_SEL; i++) {
+                        if (!vis(g, i)) continue;
                         const LxGraphState *st = &g->states[i];
                         if (st->x >= c->x && st->y >= c->y && st->x + state_w(st) <= c->x + c->w && st->y + state_h(st) <= c->y + c->h) g_group[g_group_count++] = i;
                     }
@@ -1255,6 +1750,7 @@ static void canvas_frame(UiNode *n) {
             float x0 = lx_minf(gx_of(GE.press.x), gx_of(m.x)), x1 = lx_maxf(gx_of(GE.press.x), gx_of(m.x));
             float y0 = lx_minf(gy_of(GE.press.y), gy_of(m.y)), y1 = lx_maxf(gy_of(GE.press.y), gy_of(m.y));
             for (int i = 0; i < g->state_count; i++) {
+                if (!vis(g, i)) continue;
                 const LxGraphState *st = &g->states[i];
                 if (st->x < x1 && st->x + state_w(st) > x0 && st->y < y1 && st->y + state_h(st) > y0 && !is_selected(i) && GE.sel_count < GE_MAX_SEL)
                     GE.sel[GE.sel_count++] = i;
@@ -1308,11 +1804,16 @@ bool ed_graph_keys(void) {
         return false;   /* Ctrl+S, Ctrl+P... stay with the editor */
     }
     if (!g) return true;
-    if (lx_key_pressed(LX_KEY_DELETE) || lx_key_pressed(LX_KEY_BACKSPACE)) delete_selection();
+    bool nothing = !GE.sel_count && GE.sel_comment < 0;
+    if (lx_key_pressed(LX_KEY_BACKSPACE) && nothing && ge_scope() >= 0) scope_up();   /* Backspace with nothing selected: up a level */
+    else if (lx_key_pressed(LX_KEY_DELETE) || lx_key_pressed(LX_KEY_BACKSPACE)) delete_selection();
     if (lx_key_pressed(LX_KEY_F)) ge_frame_all();
     if (lx_key_pressed(LX_KEY_HOME)) { GE.sel_count = 0; ge_frame_all(); }
     if (lx_key_pressed(LX_KEY_F2) && GE.sel_count) { g_menu_state = GE.sel[0]; m_rename(NULL); }
-    if (lx_key_pressed(LX_KEY_ESCAPE)) { GE.sel_count = 0; GE.sel_trans = -1; GE.sel_comment = -1; GE.insp_dirty = true; }
+    if (lx_key_pressed(LX_KEY_ESCAPE)) {
+        if (nothing && ge_scope() >= 0) scope_up();   /* nothing to deselect: back out of the Sub State */
+        else { GE.sel_count = 0; GE.sel_trans = -1; GE.sel_comment = -1; GE.insp_dirty = true; }
+    }
     if (lx_key_pressed(LX_KEY_SPACE) && !lx_mouse_down(LX_MOUSE_LEFT)) ge_open_action_browser();
     return true;
 }
@@ -1494,8 +1995,17 @@ static void panel_frame(UiNode *n) {
     if (GE.graph_btn) ui_set_text(GE.graph_btn, "%s", g ? g->name : GE.ref[0] ? "(missing)" : "No graph");
     if (GE.state_lbl) {
         LxFsmRun *run = ge_run();
-        const LxGraphState *st = run && run->state >= 0 && run->state < g->state_count ? &g->states[run->state] : ge_sel_state();
-        ui_set_text(GE.state_lbl, "%s", st ? st->name : "");
+        char path[256] = "";
+        if (run && g) {   /* where it is, all the way in: Combat › Reload */
+            size_t len = 0;
+            for (LxFsmRun *r = run; r && r->state >= 0 && r->state < g->state_count && len + 2 < sizeof path;) {
+                len += (size_t)snprintf(path + len, sizeof path - len, "%s%s", len ? "  >  " : "", g->states[r->state].name);
+                LxFsmRun *next = NULL;
+                for (int k = 0; k < r->kid_count && !next; k++) if (r->kids[k]->scope == r->state && r->kids[k]->region == 0) next = r->kids[k];
+                r = next;
+            }
+        } else if (ge_sel_state()) lx_strcpy(path, sizeof path, ge_sel_state()->name);
+        ui_set_text(GE.state_lbl, "%s", path);
         GE.state_lbl->fg = run ? UI_HEX(0xffb03a) : COL_TEXT;
     }
     if (GE.zoom_btn) ui_set_text(GE.zoom_btn, "%d%%", (int)lroundf(GE.zoom * 100));
@@ -1632,6 +2142,7 @@ bool ed_graph_select_state(const char *name) {
     LxGraph *g = ge_graph();
     int i = g ? lx_graph_state_index(g, name) : -1;
     if (i < 0) return false;
+    if (lx_graph_parent_index(g, i) != ge_scope()) ge_enter_scope(lx_graph_parent_index(g, i));   /* inside a Sub State: look in there */
     ge_select_state(i, false);
     return true;
 }
@@ -1662,7 +2173,30 @@ const char *ed_graph_stress(uint32_t seed) {
     if (!GE.canvas || GE.canvas->cw < 20) { if (ED.view_tabs) ED.view_tabs->tab_index = 1; return "show the graph view"; }
     float cx = GE.canvas->x + (float)trnd((int)GE.canvas->cw), cy = GE.canvas->y + (float)trnd((int)GE.canvas->ch);
     int si = g->state_count ? (int)trnd(g->state_count) : -1;
-    switch (trnd(20)) {
+    switch (trnd(28)) {
+    case 20: if (GE.sel_count) { group_into_sub(); return "group into a Sub State"; } return "group (nothing selected)";
+    case 21: {
+        int subs[64], n = 0;
+        for (int i = 0; i < g->state_count && n < 64; i++) if (g->states[i].kind == LX_GS_SUB) subs[n++] = i;
+        if (n && trnd(2)) { ge_enter_scope(subs[trnd(n)]); return "open a Sub State"; }
+        scope_up();
+        return "back out of a Sub State";
+    }
+    case 22: add_kind_at(gx_of(cx), gy_of(cy), trnd(2) ? LX_GS_SUB : LX_GS_EXIT); return "add a Sub State or Exit";
+    case 23: {
+        if (si < 0) return "region (no state)";
+        ge_select_state(si, false);
+        UiNode tmp;
+        memset(&tmp, 0, sizeof tmp);
+        tmp.tag = (int)trnd(LX_FSM_REGIONS);
+        if (tmp.tag > lx_graph_region_count(g, ge_scope())) tmp.tag = lx_graph_region_count(g, ge_scope());
+        if (vis(g, si)) m_move_region_pick(&tmp);
+        return "move a state to a region";
+    }
+    case 24: m_add_region(NULL); return "add a region";
+    case 25: if (si >= 0) { g_menu_state = si; ge_select_state(si, false); m_toggle_collapse(NULL); } return "collapse a state";
+    case 26: if (si >= 0) { g_menu_state = si; m_toggle_history(NULL); } return "toggle history";
+    case 27: { g_menu_region = (int)trnd(LX_FSM_REGIONS); if (g_menu_region < lx_graph_region_count(g, ge_scope())) m_region_remove(NULL); return "remove a region"; }
     case 0: add_state_at(gx_of(cx), gy_of(cy)); return "add a state";
     case 1: ge_select_state(si, trnd(3) == 0); return "select a state";
     case 2: delete_selection(); return "delete the selection";
