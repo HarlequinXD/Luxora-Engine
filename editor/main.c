@@ -176,6 +176,8 @@ int main(int argc, char **argv) {
         const char *zoom = getenv("LUXORA_GRAPH_ZOOM");   /* screenshots: the graph view's zoom (frames the graph first) */
         extern void ed_graph_set_zoom(float z);
         if (zoom) ed_graph_set_zoom((float)atof(zoom));
+        extern void ed_graph_quick_add_on_open(void);
+        if (getenv("LUXORA_GRAPH_QUICKADD")) ed_graph_quick_add_on_open();   /* screenshots: the quick-add box */
     }
     if (auto_play && ED.has_project) ed_play();
 

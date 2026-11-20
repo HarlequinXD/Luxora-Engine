@@ -200,6 +200,7 @@ void ge_redo(void) {
  * ====================================================================== */
 static float bottom_pad(void);
 static float g_forced_zoom;   /* screenshots: the zoom to show the graph at once it is framed */
+static bool g_qa_on_open;     /* screenshots: open the quick-add box once the graph is framed */
 static float SC(void) { return ui_scale(ED.ui) * GE.zoom; }
 static float sx(float gx) { return GE.canvas->x + (gx - GE.pan_x) * SC(); }
 static float sy(float gy) { return GE.canvas->y + (gy - GE.pan_y) * SC(); }
@@ -1069,8 +1070,8 @@ static void canvas_draw(UiNode *n, UiCtx *ui) {
     }
     bool map = minimap_shown();
     if (GE.hints) {
-        static const char *const lines[] = {"Right-click: add states, Sub States, comments", "Drag an event onto a state: link it", "Double-click: rename · a Sub State: open it",
-                                            "Esc: back out of a Sub State · Space: actions", "Drag a link: bend it · Drag a comment: move what's in it",
+        static const char *const lines[] = {"Right-click: add states, Sub States, comments", "Drag an event onto a state: link it (or into space: a new one)", "Double-click: rename · a Sub State: open it",
+                                            "Esc: back out of a Sub State · Tab or Space: quick add", "Drag a link: bend it · Drag a comment: move what's in it",
                                             "Middle/Alt-drag: pan · Scroll: zoom · F: frame", "Del · Ctrl+C/V/D · Ctrl+Z: undo"};
         float lh = ui_line_height(ui, UI_FONT_SMALL), room = n->cw - (map ? 180 * s : 0) - 24 * s;
         int count = (int)(sizeof lines / sizeof lines[0]);
@@ -1083,6 +1084,12 @@ static void canvas_draw(UiNode *n, UiCtx *ui) {
                 if (!vis(g, k)) continue;
                 const LxGraphState *hs = &g->states[k];
                 float hx = sx(hs->x) - 30 * s, hy = sy(hs->y) - 40 * s, hw = state_w(hs) * SC() + 60 * s, hh = state_h(hs) * SC() + 60 * s;
+                covers = n->x + 12 * s < hx + hw && n->x + 12 * s + lw > hx && ly < hy + hh && ly + lh > hy;
+            }
+            for (int k = 0; k < g->comment_count && !covers; k++) {
+                if (!comment_vis(g, k)) continue;
+                const LxGraphComment *c = &g->comments[k];
+                float hx = sx(c->x), hy = sy(c->y), hw = c->w * SC(), hh = c->h * SC();
                 covers = n->x + 12 * s < hx + hw && n->x + 12 * s + lw > hx && ly < hy + hh && ly + lh > hy;
             }
             if (!covers) ui_draw_text(ui, UI_FONT_SMALL, n->x + 12 * s, ly, lines[i], UI_RGBA(241, 230, 225, 80));
@@ -1350,6 +1357,199 @@ static void auto_layout(void) {
     lx_free(queue);
     ge_commit(false, NULL);
     ge_frame_all();
+}
+
+
+/* ======================================================================
+ *  quick add (Tab or Space at the mouse): type, Enter
+ * ====================================================================== */
+static char g_qa_text[64];
+static float g_qa_gx, g_qa_gy;
+static UiNode *g_qa_list;
+static int g_qa_link_state = -1, g_qa_link_trans = -1;   /* a link dropped in empty space: what gets linked to the new state */
+static bool g_qa_new_state;                              /* nothing selected: a new state takes the action */
+
+static bool qa_match(const char *text, const char *q) {
+    if (!q[0]) return true;
+    size_t n = strlen(q);
+    for (const char *p = text; *p; p++) {
+        size_t i = 0;
+        while (i < n && p[i] && tolower((unsigned char)p[i]) == tolower((unsigned char)q[i])) i++;
+        if (i == n) return true;
+    }
+    return false;
+}
+/* the new state is where the link was dropped, and the link leads to it */
+static int qa_new_state(LxGraphStateKind kind) {
+    LxGraph *g = ge_graph();
+    if (!g) return -1;
+    if (kind == LX_GS_STATE) add_state_at(g_qa_gx, g_qa_gy);
+    else add_kind_at(g_qa_gx, g_qa_gy, kind);
+    g = ge_graph();
+    int si = ge_sel_index();
+    if (si < 0) return -1;
+    if (g_qa_link_state >= 0 && g_qa_link_state < g->state_count && g_qa_link_trans >= 0 && g_qa_link_trans < g->states[g_qa_link_state].trans_count) {
+        LxGraphTransition *t = &g->states[g_qa_link_state].trans[g_qa_link_trans];
+        lx_strcpy(t->to, sizeof t->to, g->states[si].name);
+        t->via = false;
+        ge_commit(true, NULL);
+    }
+    g_qa_link_state = g_qa_link_trans = -1;
+    return si;
+}
+static void qa_pick(UiNode *n) {
+    int tag = (int)n->tag;
+    if (tag < 0) { qa_new_state(tag == -1 ? LX_GS_STATE : tag == -2 ? LX_GS_SUB : LX_GS_EXIT); return; }
+    const LxFsmActionDesc *d = lx_fsm_action_at(tag);
+    if (!d) return;
+    if (g_qa_new_state || g_qa_link_state >= 0) {
+        if (qa_new_state(LX_GS_STATE) < 0) return;
+    }
+    ge_add_action(d->name);
+    ge_note_recent(d->name);
+}
+static void qa_fill(void) {
+    if (!g_qa_list) return;
+    ui_clear(ED.ui, g_qa_list);
+    int shown = 0;
+    static const struct { const char *label; int tag; } EXTRA[] = {{"New State", -1}, {"New Sub State", -2}, {"New Exit", -3}};
+    for (int k = 0; k < 3; k++) {
+        if (EXTRA[k].tag == -3 && ge_scope() < 0) continue;
+        if (g_qa_text[0] && !qa_match(EXTRA[k].label, g_qa_text)) continue;
+        UiNode *it = ui_menu_item(ED.ui, g_qa_list, EXTRA[k].label, NULL, qa_pick);
+        it->icon = EXTRA[k].tag == -1 ? UI_ICON_PLUS : EXTRA[k].tag == -2 ? UI_ICON_GRAPH : UI_ICON_CLOSE;
+        it->icon_color = COL_START;
+        it->tag = EXTRA[k].tag;
+        shown++;
+    }
+    /* nothing typed yet: the actions used lately, and the favourites */
+    if (!g_qa_text[0]) {
+        const char *picks[24];
+        int np = 0;
+        for (int k = 0; k < GE.recent_count && np < 24; k++) picks[np++] = GE.recent[k];
+        for (int k = 0; k < GE.fav_count && np < 24; k++) {
+            bool dup = false;
+            for (int q = 0; q < np; q++) dup |= !strcmp(picks[q], GE.favs[k]);
+            if (!dup) picks[np++] = GE.favs[k];
+        }
+        if (np) {
+            for (int k = 0; k < np && shown < 14; k++)
+                for (int i = 0; i < lx_fsm_action_count(); i++) {
+                    const LxFsmActionDesc *d = lx_fsm_action_at(i);
+                    if (!d || strcmp(d->name, picks[k])) continue;
+                    UiNode *it = ui_menu_item(ED.ui, g_qa_list, d->name, k < GE.recent_count ? "recent" : "favourite", qa_pick);
+                    it->tag = i;
+                    shown++;
+                    break;
+                }
+            return;
+        }
+    }
+    /* names first, then categories and descriptions */
+    for (int pass = 0; pass < 2 && shown < 14; pass++)
+        for (int i = 0; i < lx_fsm_action_count() && shown < 14; i++) {
+            const LxFsmActionDesc *d = lx_fsm_action_at(i);
+            if (!d) continue;
+            bool by_name = qa_match(d->name, g_qa_text);
+            if (pass == 0 ? !by_name : by_name || !(qa_match(d->category ? d->category : "", g_qa_text))) continue;
+            if (!g_qa_text[0] && pass == 0 && shown >= 3 + 8) break;
+            UiNode *it = ui_menu_item(ED.ui, g_qa_list, d->name, d->category, qa_pick);
+            it->tag = i;
+            shown++;
+        }
+    if (!shown) { UiNode *it = ui_menu_item(ED.ui, g_qa_list, "Nothing matches", NULL, NULL); it->disabled = true; }
+}
+static void qa_changed(UiNode *n) {
+    LX_UNUSED(n);
+    if (lx_key_pressed(LX_KEY_ENTER)) {   /* Enter: the first thing listed */
+        for (UiNode *c = g_qa_list ? g_qa_list->first : NULL; c; c = c->next)
+            if (c->on_click && !c->disabled) { UiNode pick = *c; ui_close_popups(ED.ui); qa_pick(&pick); return; }
+        return;
+    }
+    qa_fill();
+}
+static void quick_add_open(float mx, float my, bool from_link) {
+    LxGraph *g = ge_graph();
+    if (!g) return;
+    ui_close_popups(ED.ui);
+    g_qa_gx = roundf(gx_of(mx) / 8) * 8;
+    g_qa_gy = roundf(gy_of(my) / 8) * 8;
+    g_qa_new_state = from_link || !GE.sel_count;
+    if (!from_link) g_qa_link_state = g_qa_link_trans = -1;
+    UiNode *p = ui_popup(ED.ui, mx, my, 300);
+    if (!p) return;
+    UiNode *head = ui_label(ED.ui, p, from_link ? "New state for this link: pick an action, or" :
+                                      g_qa_new_state ? "New state here, doing:" : "Add to the selected state:");
+    head->font = UI_FONT_SMALL;
+    head->fg = COL_DIM;
+    head->h = 18;
+    g_qa_text[0] = 0;
+    UiNode *tf = ui_textfield(ED.ui, p, g_qa_text, sizeof g_qa_text);
+    tf->h = 26;
+    tf->icon = UI_ICON_SEARCH;
+    tf->on_change = qa_changed;
+    lx_strcpy(tf->hint, sizeof tf->hint, "Type an action's name, Enter");
+    g_qa_list = ui_box(ED.ui, p, UI_COL);
+    ui_track(&g_qa_list);
+    qa_fill();
+    ui_focus(ED.ui, tf);
+}
+
+/* ---------------- align and distribute (several states selected) ---------------- */
+static void align_sel(int how) {
+    LxGraph *g = ge_graph();
+    if (!g || GE.sel_count < 2) return;
+    float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+    for (int k = 0; k < GE.sel_count; k++) {
+        if (GE.sel[k] >= g->state_count) continue;
+        const LxGraphState *st = &g->states[GE.sel[k]];
+        x0 = lx_minf(x0, st->x); y0 = lx_minf(y0, st->y);
+        x1 = lx_maxf(x1, st->x + state_w(st)); y1 = lx_maxf(y1, st->y + state_h(st));
+    }
+    if (how >= 6) {   /* distribute: equal gaps between them, in their current order */
+        int idx[GE_MAX_SEL], n = 0;
+        for (int k = 0; k < GE.sel_count; k++) if (GE.sel[k] < g->state_count) idx[n++] = GE.sel[k];
+        bool across = how == 6;
+        for (int a = 0; a < n; a++)
+            for (int b = a + 1; b < n; b++) {
+                float pa = across ? g->states[idx[a]].x : g->states[idx[a]].y, pb = across ? g->states[idx[b]].x : g->states[idx[b]].y;
+                if (pb < pa) { int t = idx[a]; idx[a] = idx[b]; idx[b] = t; }
+            }
+        float total = 0;
+        for (int a = 0; a < n; a++) total += across ? state_w(&g->states[idx[a]]) : state_h(&g->states[idx[a]]);
+        float gap = ((across ? x1 - x0 : y1 - y0) - total) / (float)(n - 1 > 0 ? n - 1 : 1), at = across ? x0 : y0;
+        for (int a = 0; a < n; a++) {
+            LxGraphState *st = &g->states[idx[a]];
+            if (across) { st->x = roundf(at); at += state_w(st) + gap; }
+            else { st->y = roundf(at); at += state_h(st) + gap; }
+        }
+    } else
+        for (int k = 0; k < GE.sel_count; k++) {
+            if (GE.sel[k] >= g->state_count) continue;
+            LxGraphState *st = &g->states[GE.sel[k]];
+            switch (how) {
+            case 0: st->x = x0; break;
+            case 1: st->x = roundf((x0 + x1) * 0.5f - state_w(st) * 0.5f); break;
+            case 2: st->x = x1 - state_w(st); break;
+            case 3: st->y = y0; break;
+            case 4: st->y = roundf((y0 + y1) * 0.5f - state_h(st) * 0.5f); break;
+            default: st->y = y1 - state_h(st); break;
+            }
+        }
+    ge_commit(false, NULL);
+}
+static void m_align_pick(UiNode *n) { align_sel((int)n->tag); }
+static void m_align(UiNode *n) {
+    float x = n->x + n->cw, y = n->y;
+    ui_close_popups(ED.ui);
+    UiNode *p = ui_popup(ED.ui, x, y, 190);
+    if (!p) return;
+    static const char *const NAMES[] = {"Left Edges", "Centres (across)", "Right Edges", "Tops", "Middles (down)", "Bottoms", "Distribute Across", "Distribute Down"};
+    for (int i = 0; i < 8; i++) {
+        if (i == 6) ui_menu_separator(ED.ui, p);
+        UiNode *it = ui_menu_item(ED.ui, p, NAMES[i], NULL, m_align_pick);
+        it->tag = i;
+    }
 }
 
 /* ======================================================================
@@ -1848,6 +2048,7 @@ static void open_context_menu(Hit h, float mx, float my) {
         LX_UNUSED(cl);
         subitem(p, "Move to Region", m_move_region);
         mitem(p, GE.sel_count > 1 ? "Group into Sub State" : "Put into a Sub State", UI_ICON_GRAPH, m_group_sub);
+        if (GE.sel_count > 1) subitem(p, "Align", m_align);
         ui_menu_separator(ED.ui, p);
         mitem(p, "Rename...", UI_ICON_NONE, m_rename)->hint[0] = 0;
         mitem(p, "Copy", UI_ICON_COPY, m_copy);
@@ -1932,9 +2133,12 @@ static void finish_link(LxGraph *g, float mx, float my) {
     LxGraphState *st = &g->states[GE.link_state];
     if (GE.link_trans >= st->trans_count) return;
     LxGraphTransition *t = &st->trans[GE.link_trans];
-    if (target >= 0) lx_strcpy(t->to, sizeof t->to, g->states[target].name);
-    else t->to[0] = 0;   /* dropped on nothing: unlinked */
-    ge_commit(true, NULL);
+    if (target >= 0) { lx_strcpy(t->to, sizeof t->to, g->states[target].name); ge_commit(true, NULL); return; }
+    if (h.kind == H_MINIMAP || h.kind == H_CRUMB) return;
+    /* dropped in empty space: make the state it should go to (Right-click > Clear Link unlinks) */
+    g_qa_link_state = GE.link_state;
+    g_qa_link_trans = GE.link_trans;
+    quick_add_open(mx, my, true);
 }
 
 static void canvas_frame(UiNode *n) {
@@ -1946,6 +2150,10 @@ static void canvas_frame(UiNode *n) {
         graph_bounds(g, &x0, &y0, &x1, &y1, false);
         frame_rect(x0, y0, x1, y1);
         if (g_forced_zoom > 0) { zoom_at(g_forced_zoom / GE.zoom, n->x + n->cw * 0.5f, n->y + n->ch * 0.5f); g_forced_zoom = 0; }
+    } else if (g && g_qa_on_open && GE.framed) {
+        g_qa_on_open = false;
+        GE.sel_count = 0;
+        quick_add_open(n->x + n->cw * 0.45f, n->y + n->ch * 0.55f, false);
     }
     bool blocked = ui_has_modal(ui) || ui_popup_open(ui);
     bool hot = !blocked && ui_is_inside(ui, n) && (ui_is_hot(ui, n) || ui_active(ui) == n);
@@ -2214,7 +2422,15 @@ bool ed_graph_keys(void) {
         if (nothing && ge_scope() >= 0) scope_up();   /* nothing to deselect: back out of the Sub State */
         else { GE.sel_count = 0; GE.sel_trans = -1; GE.sel_comment = -1; GE.insp_dirty = true; }
     }
-    if (lx_key_pressed(LX_KEY_SPACE) && !lx_mouse_down(LX_MOUSE_LEFT)) ge_open_action_browser();
+    if ((lx_key_pressed(LX_KEY_SPACE) || lx_key_pressed(LX_KEY_TAB)) && !lx_mouse_down(LX_MOUSE_LEFT)) {
+        if (shift && lx_key_pressed(LX_KEY_SPACE)) ge_open_action_browser();
+        else {
+            LxVec2 m = lx_mouse_pos();
+            bool in = GE.canvas && m.x >= GE.canvas->x && m.y >= GE.canvas->y && m.x < GE.canvas->x + GE.canvas->cw && m.y < GE.canvas->y + GE.canvas->ch;
+            if (!in && GE.canvas) m = lx_v2(GE.canvas->x + GE.canvas->cw * 0.4f, GE.canvas->y + GE.canvas->ch * 0.4f);
+            quick_add_open(m.x, m.y, false);
+        }
+    }
     return true;
 }
 
@@ -2588,7 +2804,20 @@ const char *ed_graph_stress(uint32_t seed) {
     if (!GE.canvas || GE.canvas->cw < 20) { if (ED.view_tabs) ED.view_tabs->tab_index = 1; return "show the graph view"; }
     float cx = GE.canvas->x + (float)trnd((int)GE.canvas->cw), cy = GE.canvas->y + (float)trnd((int)GE.canvas->ch);
     int si = g->state_count ? (int)trnd(g->state_count) : -1;
-    switch (trnd(29)) {
+    switch (trnd(31)) {
+    case 29: {   /* quick add: a new state doing a random action, sometimes from a link dropped in space */
+        g_qa_gx = gx_of(cx);
+        g_qa_gy = gy_of(cy);
+        g_qa_new_state = trnd(2) == 0 || !GE.sel_count;
+        g_qa_link_state = g_qa_link_trans = -1;
+        if (si >= 0 && g->states[si].trans_count && trnd(2)) { g_qa_link_state = si; g_qa_link_trans = (int)trnd(g->states[si].trans_count); }
+        UiNode tmp;
+        memset(&tmp, 0, sizeof tmp);
+        tmp.tag = trnd(5) == 0 ? -1 - (int)trnd(ge_scope() >= 0 ? 3 : 2) : (int)trnd(lx_fsm_action_count());
+        qa_pick(&tmp);
+        return "quick add";
+    }
+    case 30: m_select_all_level(); align_sel((int)trnd(8)); return "align the states";
     case 28: {   /* bend a link, or straighten it */
         if (si < 0 || !g->states[si].trans_count) return "bend (no transitions)";
         LxGraphTransition *tr = &g->states[si].trans[trnd(g->states[si].trans_count)];
@@ -2710,6 +2939,7 @@ bool ed_graph_check(char *err, size_t cap) {
 }
 
 void ed_graph_set_zoom(float z) { g_forced_zoom = z; }
+void ed_graph_quick_add_on_open(void) { g_qa_on_open = true; }
 void ed_graph_show_tab(int tab) {
     if (tab == 4) { ge_open_action_browser(); return; }
     if (GE.insp_tabs) GE.insp_tabs->tab_index = tab;
