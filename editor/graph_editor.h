@@ -12,7 +12,7 @@
 #define GE_COLORS 8
 
 typedef enum GeDrag { GE_DRAG_NONE, GE_DRAG_PAN, GE_DRAG_MOVE, GE_DRAG_LINK, GE_DRAG_BOX, GE_DRAG_COMMENT, GE_DRAG_COMMENT_SIZE,
-                      GE_DRAG_START, GE_DRAG_MINIMAP, GE_DRAG_TIMELINE } GeDrag;
+                      GE_DRAG_START, GE_DRAG_MINIMAP, GE_DRAG_TIMELINE, GE_DRAG_VIA } GeDrag;
 
 typedef struct GraphEd {
     /* widgets */

@@ -167,6 +167,7 @@ void ed_play(void);
 void ed_pause(void);
 void ed_stop(void);
 void ed_step(void);
+void ed_forget_destroyed_selection(void);
 
 /* panels */
 UiNode *ed_hierarchy_panel(UiNode *parent);

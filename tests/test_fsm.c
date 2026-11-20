@@ -379,7 +379,7 @@ static void test_fsm_nesting(void) {
         "[state]\nname = A\ntransition = GO > Combat\n"
         "[state]\nname = Combat\nkind = sub\nhistory = 1\ntransition = DONE > A\ntransition = LEAVE > A\n"
         "[action]\ntype = Float Add\nupdate = every_frame\np0 = $f\np1 = 1\n"
-        "[state]\nname = Aim\nparent = Combat\ntransition = FIRE > Shoot\ntransition = RELOAD > Reload\n"
+        "[state]\nname = Aim\nparent = Combat\ntransition = FIRE > Shoot\nvia = 120 -40\ntransition = RELOAD > Reload\n"
         "[state]\nname = Shoot\nparent = Combat\ntransition = FINISHED > Out\n"
         "[state]\nname = Out\nparent = Combat\nkind = exit\nexit_event = DONE\n"
         "[state]\nname = Reload\nparent = Combat\n[action]\ntype = Wait\np0 = 100\n"
@@ -441,6 +441,9 @@ static void test_fsm_nesting(void) {
                   !strcmp(b->states[oi].exit_event, "DONE") && lx_graph_region_count(b, ci) == 2 && lx_graph_region_count(b, -1) == 2 &&
                   !strcmp(lx_graph_region_name(b, ci, 1), "Lungs") && lx_graph_region_start(b, ci, 1) == lx_graph_state_index(b, "Breathe"),
               "Sub States, Exits and regions survive saving");
+        int ai0 = b ? lx_graph_state_index(b, "Aim") : -1;
+        CHECK(ai0 >= 0 && b->states[ai0].trans[0].via && b->states[ai0].trans[0].via_x == 120 && b->states[ai0].trans[0].via_y == -40 &&
+                  !b->states[ai0].trans[1].via, "a bent link keeps its bend, and only that one");
         if (b) {
             lx_graph_rename_state(b, ci, "Fight");
             int ai = lx_graph_state_index(b, "Aim");

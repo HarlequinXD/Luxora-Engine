@@ -782,12 +782,21 @@ void ed_stop(void) {
     ed_update_title();
 }
 
+/* the game destroyed the selected object (a graph's Destroy Self, a pickup collected): nothing is selected now */
+void ed_forget_destroyed_selection(void) {
+    if (ED.scene && ED.selected && !lx_entity_valid(ED.scene, ED.selected)) {
+        ED.selected = 0;
+        ED.inspector_dirty = true;
+    }
+}
+
 void ed_step(void) {
     if (ED.play == ED_EDIT) { ed_play(); ED.play = ED_PAUSED; }
     if (ED.play == ED_PAUSED) {
         if (ED.viewport) lx_game_ui_begin_frame(ED.viewport->x, ED.viewport->y, ED.viewport->cw, ED.viewport->ch, true);
         lx_scene_simulate(ED.scene, 1.0f / 60.0f);
         lx_audio_update(ED.scene, 1.0f / 60.0f);
+        ed_forget_destroyed_selection();
     }
 }
 
@@ -1199,6 +1208,7 @@ void ed_update(float dt) {
     }
     if (ED.play == ED_PLAYING) {
         lx_scene_simulate(ED.scene, dt);
+        ed_forget_destroyed_selection();
         /* a state with a breakpoint was entered: hold Play there so its variables can be read */
         LxFsmBreak bp;
         if (lx_fsm_breakpoint_taken(&bp)) {

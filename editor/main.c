@@ -173,6 +173,9 @@ int main(int argc, char **argv) {
         const char *tab = getenv("LUXORA_GRAPH_TAB");   /* screenshots: 0 FSM, 1 State, 2 Events, 3 Variables, 4 Action Browser */
         extern void ed_graph_show_tab(int tab);
         if (tab) ed_graph_show_tab(atoi(tab));
+        const char *zoom = getenv("LUXORA_GRAPH_ZOOM");   /* screenshots: the graph view's zoom (frames the graph first) */
+        extern void ed_graph_set_zoom(float z);
+        if (zoom) ed_graph_set_zoom((float)atof(zoom));
     }
     if (auto_play && ED.has_project) ed_play();
 
