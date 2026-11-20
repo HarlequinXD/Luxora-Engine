@@ -1381,12 +1381,10 @@ typedef struct IkFrame {
     LxVec3 *wp;
     LxQuat *wr;
     LxMat4 to_world;
-    LxMat4 to_model;
     LxQuat root_rot, root_rot_inv;
 } IkFrame;
 
 static LxVec3 to_world_p(const IkFrame *f, LxVec3 model) { return lx_mat4_point(f->to_world, model); }
-static LxVec3 to_model_p(const IkFrame *f, LxVec3 world) { return lx_mat4_point(f->to_model, world); }
 
 /* Solves one limb towards a world-space target and writes the result back into the pose. */
 /* `bend` is the way the joint should point - the character's forward, for a knee. Without one the limb
@@ -1597,7 +1595,6 @@ static void run_ik(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *d, flo
     f.wr = lx_alloc(sizeof(LxQuat) * (size_t)m->node_count);
     if (!f.wp || !f.wr) { lx_free(f.wp); lx_free(f.wr); return; }
     f.to_world = lx_entity_world_matrix(s, e);
-    f.to_model = lx_mat4_inverse(f.to_world);
     f.root_rot = lx_entity_world_rotation(s, e);
     f.root_rot_inv = lx_quat_conj(f.root_rot);
     pose_fk(st, &st->out, f.wp, f.wr);
@@ -1650,18 +1647,18 @@ static void graph_update(LxScene *s, LxEntity e, LxAnimState *st, LxEntityData *
                mixed by the weights the pose uses. The blended pose cannot say this: a blend tree
                moving from idle towards run, or a cross-fade, slides the root from where one clip
                holds it to where the other does, and that slide is not the character travelling. */
-            LxVec3 d;
+            LxVec3 moved;
             float dy;
-            motion_root_delta(st, n, prev, lr->norm, &d, &dy, 0);
+            motion_root_delta(st, n, prev, lr->norm, &moved, &dy, 0);
             if (lr->from >= 0 && lr->from < l->state_count && lr->fade_len > 0) {
                 LxVec3 fd;
                 float fdy;
                 float w = lx_clampf(lr->fade / lr->fade_len, 0, 1);
                 motion_root_delta(st, &l->states[lr->from], from_prev, lr->from_norm, &fd, &fdy, 0);
-                d = lx_add3(lx_scale3(fd, 1.0f - w), lx_scale3(d, w));
+                moved = lx_add3(lx_scale3(fd, 1.0f - w), lx_scale3(moved, w));
                 dy = fdy * (1.0f - w) + dy * w;
             }
-            st->rm_delta = d;
+            st->rm_delta = moved;
             st->rm_delta_yaw = dy;
             st->rm_delta_ok = true;
         }
@@ -1898,10 +1895,10 @@ void lx_animator_update(LxScene *s, LxEntity e, float dt) {
         if (clen > 0) {
             /* in cycles, not wrapped: the delta counts the cycles passed itself */
             float now_n = st->time / clen, prev_n = st->rm_prev_norm;
-            LxVec3 d;
+            LxVec3 moved;
             float dy;
-            clip_root_delta(st, &st->cur, prev_n, now_n, &d, &dy);
-            st->rm_delta = d;
+            clip_root_delta(st, &st->cur, prev_n, now_n, &moved, &dy);
+            st->rm_delta = moved;
             st->rm_delta_yaw = dy;
             st->rm_delta_ok = st->rm_started_clip;
             st->rm_prev_norm = now_n;

@@ -60,16 +60,6 @@ static void recent_menu(UiNode *n) {
     it->icon = UI_ICON_TRASH;
 }
 
-static bool contains_ci(const char *hay, const char *needle) {
-    if (!needle[0]) return true;
-    size_t n = strlen(needle);
-    for (const char *p = hay; *p; p++) {
-        size_t i = 0;
-        while (i < n && p[i] && tolower((unsigned char)p[i]) == tolower((unsigned char)needle[i])) i++;
-        if (i == n) return true;
-    }
-    return false;
-}
 
 /* ---- project icons: the game's icon from Build Settings, or the Luxora app icon ---- */
 static struct { char root[LX_PATH_MAX]; char icon[LX_REF_MAX]; uint32_t tex; } g_icons[ED_MAX_RECENT];
@@ -113,7 +103,7 @@ static void rebuild_list(void) {
         LxProject p;
         bool ok = lx_project_load(&p, ED.recent[i]);
         const char *name = ok ? p.name : lx_path_filename(ED.recent[i]);
-        if (!contains_ci(name, PM.search) && !contains_ci(ED.recent[i], PM.search)) continue;
+        if (!lx_str_icontains(name, PM.search) && !lx_str_icontains(ED.recent[i], PM.search)) continue;
         UiNode *row = ui_box(ui, PM.list, UI_ROW);
         row->h = 64;
         row->bg = t->panel;

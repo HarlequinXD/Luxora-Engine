@@ -21,16 +21,6 @@ static void quick_add_enter(UiNode *n);
 static void add_on_enter(UiNode *n);
 static void add_var_enter(UiNode *n);
 
-static bool lx_strcasestr_ascii(const char *hay, const char *needle) {
-    if (!needle[0]) return true;
-    size_t n = strlen(needle);
-    for (const char *p = hay; *p; p++) {
-        size_t i = 0;
-        while (i < n && p[i] && tolower((unsigned char)p[i]) == tolower((unsigned char)needle[i])) i++;
-        if (i == n) return true;
-    }
-    return false;
-}
 
 /* ======================================================================
  *  bindings: widgets edit copies here, never graph memory (which moves when the graph grows)
@@ -772,7 +762,7 @@ static void quick_add(UiNode *n) {
     const LxFsmActionDesc *best = lx_fsm_action_find(b->s);
     for (int i = 0; !best && i < lx_fsm_action_count(); i++) {
         const LxFsmActionDesc *d = lx_fsm_action_at(i);
-        if (d && lx_strcasestr_ascii(d->name, b->s)) best = d;
+        if (d && lx_str_icontains(d->name, b->s)) best = d;
     }
     if (!best) { ui_notify(ED.ui, "No action matches \"%s\"", b->s); return; }
     ge_add_action(best->name);
@@ -1549,7 +1539,7 @@ static int ab_ci_prefix(const char *s, const char *prefix) {   /* 0 when s start
 }
 static bool matches(const LxFsmActionDesc *d, const char *q) {
     if (!q[0]) return true;
-    return lx_strcasestr_ascii(d->name, q) || (d->category && lx_strcasestr_ascii(d->category, q)) || (d->description && lx_strcasestr_ascii(d->description, q));
+    return lx_str_icontains(d->name, q) || (d->category && lx_str_icontains(d->category, q)) || (d->description && lx_str_icontains(d->description, q));
 }
 static void ab_item(UiNode *list, const LxFsmActionDesc *d, int indent) {
     UiNode *it = ui_button(ED.ui, list, d->name, ab_item_click);

@@ -8,7 +8,13 @@
  *   --play                                enter play mode after opening
  *   --smoke                               scripted tour of every window and tool, then quit
  *   --build                               build the open project for this platform, then quit
- *   --show-graph <object>[/<state>]       select the object and open its State Graph (and a state)
+ *   --show-graph <object>[/<state>]       select the object and open its State Graph (and a state, inside its Sub State)
+ *
+ * Screenshot helpers for the State Graph view (environment variables, with --show-graph):
+ *   LUXORA_GRAPH_TAB=0..4      inspector tab (FSM, State, Events, Variables, Action Browser)
+ *   LUXORA_GRAPH_ZOOM=0.45     the view's zoom once the graph is framed
+ *   LUXORA_GRAPH_QUICKADD=1    open the quick-add box
+ *   LUXORA_GRAPH_FIND=text     open the Finder with a search
  */
 #include "editor.h"
 

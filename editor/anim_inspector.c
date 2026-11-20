@@ -535,33 +535,33 @@ static void build_blend_tree(UiNode *body, LxAnimGraph *g, LxAnimNode *st) {
             UiNode *del = small_btn(top, UI_ICON_TRASH, "Remove this motion", delete_child);
             del->tag = i;
             if (t->type == LX_AT_1D) {
-                UiNode *row = prow(card, "Threshold", "where on the parameter this motion sits");
-                AB *b = ab_new(AB_CHILD, F_THRESH);
-                b->child = i;
-                b->tree = st->tree;
-                num_field(row, b, c->threshold, 0.1f);
+                UiNode *trow = prow(card, "Threshold", "where on the parameter this motion sits");
+                AB *tb = ab_new(AB_CHILD, F_THRESH);
+                tb->child = i;
+                tb->tree = st->tree;
+                num_field(trow, tb, c->threshold, 0.1f);
             } else if (t->type == LX_AT_DIRECT) {
-                UiNode *row = prow(card, "Weight From", "the parameter holding this motion's weight");
-                AB *b = ab_new(AB_CHILD, F_NAME);
-                b->child = i;
-                b->tree = st->tree;
-                param_field(row, b, c->weight_param);
+                UiNode *wrow = prow(card, "Weight From", "the parameter holding this motion's weight");
+                AB *wb = ab_new(AB_CHILD, F_NAME);
+                wb->child = i;
+                wb->tree = st->tree;
+                param_field(wrow, wb, c->weight_param);
             } else {
-                UiNode *row = prow(card, "Position", "its place on the two parameters");
+                UiNode *prow_ = prow(card, "Position", "its place on the two parameters");
                 AB *bx = ab_new(AB_CHILD, F_PX);
                 bx->child = i;
                 bx->tree = st->tree;
-                num_field(row, bx, c->px, 0.1f);
+                num_field(prow_, bx, c->px, 0.1f);
                 AB *by = ab_new(AB_CHILD, F_PY);
                 by->child = i;
                 by->tree = st->tree;
-                num_field(row, by, c->py, 0.1f);
+                num_field(prow_, by, c->py, 0.1f);
             }
-            UiNode *row = prow(card, "Speed", "playback speed of this motion");
+            UiNode *srow = prow(card, "Speed", "playback speed of this motion");
             AB *sb = ab_new(AB_CHILD, F_SPEED);
             sb->child = i;
             sb->tree = st->tree;
-            num_field(row, sb, c->speed, 0.05f);
+            num_field(srow, sb, c->speed, 0.05f);
             AB *mb = ab_new(AB_CHILD, F_MIRROR);
             mb->child = i;
             mb->tree = st->tree;

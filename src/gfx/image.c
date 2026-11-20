@@ -158,7 +158,7 @@ static uint8_t *zlib_inflate_hint(const uint8_t *data, size_t size, size_t *out_
             b.p += 4;
             if (len > (size_t)(b.end - b.p)) len = (size_t)(b.end - b.p);
             out_reserve(&o, len);
-            memcpy(o.data + o.len, b.p, len);
+            if (len) memcpy(o.data + o.len, b.p, len);   /* an empty stored block: nothing (and o.data may still be NULL) */
             o.len += len;
             b.p += len;
         } else if (type == 1 || type == 2) {

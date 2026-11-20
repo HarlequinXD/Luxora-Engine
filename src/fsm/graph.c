@@ -781,16 +781,8 @@ void lx_graph_action_summary(const LxGraphAction *a, const LxFsmActionDesc *d, c
 }
 
 /* ---------------- finding things ---------------- */
-static bool has_text(const char *hay, const char *q) {
-    if (!q[0]) return false;
-    size_t n = strlen(q);
-    for (const char *p = hay; *p; p++) {
-        size_t i = 0;
-        while (i < n && p[i] && tolower((unsigned char)p[i]) == tolower((unsigned char)q[i])) i++;
-        if (i == n) return true;
-    }
-    return false;
-}
+/* (an empty query finds nothing here, where everywhere else it matches everything) */
+static bool has_text(const char *hay, const char *q) { return q[0] && lx_str_icontains(hay, q); }
 int lx_graph_find(const LxGraph *g, const char *query, unsigned kinds, LxGraphHit *out, int max) {
     if (!g || !query) return 0;
     char q[LX_FSM_NAME + 8];

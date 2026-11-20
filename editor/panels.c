@@ -99,16 +99,6 @@ static const char *drag_type_for(UiIcon icon) {
     }
 }
 
-static bool contains_ci(const char *hay, const char *needle) {
-    if (!needle || !needle[0]) return true;
-    size_t n = strlen(needle);
-    for (const char *p = hay; *p; p++) {
-        size_t i = 0;
-        while (i < n && p[i] && tolower((unsigned char)p[i]) == tolower((unsigned char)needle[i])) i++;
-        if (i == n) return true;
-    }
-    return false;
-}
 
 /* ======================================================================
  *  console log (thread safe: builds and audio log from other threads)
@@ -309,7 +299,7 @@ static uint64_t hierarchy_hash(void) {
 }
 
 static bool subtree_matches(LxEntity e) {
-    if (contains_ci(lx_entity_name(ED.scene, e), ED.hierarchy_search)) return true;
+    if (lx_str_icontains(lx_entity_name(ED.scene, e), ED.hierarchy_search)) return true;
     for (LxEntity c = lx_entity_first_child(ED.scene, e); c; c = lx_entity_next_sibling(ED.scene, c))
         if (subtree_matches(c)) return true;
     return false;
@@ -2004,7 +1994,7 @@ static void content_frame(UiNode *panel) {
     float tile = ED.content_tile;
     for (int i = 0; i < n; i++) {
         if (e[i].name[0] == '.') continue;
-        if (!contains_ci(e[i].name, ED.content_search)) continue;
+        if (!lx_str_icontains(e[i].name, ED.content_search)) continue;
         UiIcon icon = ed_icon_for_file(e[i].name, e[i].is_dir);
         char full[LX_PATH_MAX], ref[LX_REF_MAX];
         lx_path_join(full, sizeof full, ED.content_dir, e[i].name);
@@ -2170,7 +2160,7 @@ static void console_frame(UiNode *panel) {
     int start = ED.log_count > 400 ? ED.log_count - 400 : 0;
     for (int i = start; i < ED.log_count; i++) {
         const EdLogLine *l = &ED.log[(ED.log_start + i) % ED_MAX_LOG];
-        if (!ED.console_show[l->level] || !contains_ci(l->text, ED.console_filter)) continue;
+        if (!ED.console_show[l->level] || !lx_str_icontains(l->text, ED.console_filter)) continue;
         UiNode *row = ui_button(ui, g_console_list, l->text, NULL);
         row->on_double_click = console_copy;
         row->center_text = false;

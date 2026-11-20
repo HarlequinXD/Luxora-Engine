@@ -220,11 +220,11 @@ void ed_model_inspector(UiNode *body, const char *ref) {
                 lbl->font = UI_FONT_SMALL;
                 lbl->fg = t->text_dim;
                 lbl->w = 88;
-                UiNode *dd = ui_dropdown(ui, rr, (int *)ch[c].v, WHERE, 3);
-                dd->grow = 1;
-                dd->h = 22;
-                dd->on_change = imp_changed;
-                lx_strcpy(dd->tooltip, sizeof dd->tooltip, ch[c].tip);
+                UiNode *wd = ui_dropdown(ui, rr, (int *)ch[c].v, WHERE, 3);
+                wd->grow = 1;
+                wd->h = 22;
+                wd->on_change = imp_changed;
+                lx_strcpy(wd->tooltip, sizeof wd->tooltip, ch[c].tip);
             }
         }
     }

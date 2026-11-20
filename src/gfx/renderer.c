@@ -25,7 +25,6 @@
 #define PROBE_SLOTS 5            /* 0: automatic environment probe, 1..4: Reflection Probe objects */
 #define PROBE_MAX_MIPS 7
 #define MAX_UI_TEXTURES 1024
-#define SPV(name) name, sizeof(name)
 
 /* ------------------------------------------------------------------ types */
 typedef struct GpuBuffer { VkBuffer buf; VkDeviceMemory mem; VkDeviceSize size; void *mapped; } GpuBuffer;

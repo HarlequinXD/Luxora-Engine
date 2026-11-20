@@ -99,6 +99,25 @@ be tuned while the game plays.
 **Next:** root motion from the graph rather than from the clip, animation events on a state's timeline,
 and sub-state machines.
 
+## State Graph (visual scripting)
+
+A graph (`.lxgraph`, `src/fsm/graph.c`) is a flat list of states. Nesting is a property of each state:
+its `parent` (the Sub State it is inside, empty at the top) and its `region` within that parent. Exits
+are states of kind `exit`; region names and start states live in `[region]` entries. Any number of
+objects can run one graph; variables ticked *Inspector* are its inputs, overridden per object.
+
+At run time (`src/fsm/fsm.c`) each object holds one root `LxFsmRun` per graph slot. Every region that is
+playing - each region of an active Sub State, and the graph's own second region onwards - is a nested
+run under the run that started it. Nested runs share the root's variables and bound actions (an action
+is bound once per state, and a state only ever plays in one region) and keep only their place. Events
+go to the innermost runs first, then their Sub States, then the graph's global transitions; a global
+transition into a nested state walks down the playing Sub States and enters the rest of the path.
+Transitions asked for while an action is running are queued on the root and taken when it returns, and
+runs that leave are moved to the root's graveyard and freed once nothing of theirs is on the stack.
+
+The editor (`editor/graph_editor.c`) shows one level at a time (`GE.scope`), with breadcrumbs; the
+inspector, Action Browser and Finder are `graph_inspector.c` and `graph_finder.c`.
+
 ## Editor and UI toolkit
 
 The editor UI is Luxora's own retained-mode toolkit (`editor/ui.c`); no third-party UI library is used.

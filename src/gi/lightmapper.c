@@ -463,13 +463,13 @@ LxLightmapBake *lx_lightmap_prepare(LxScene *s) {
         const LxLmVolume *v = &b->vols[k];
         const LxEntityData *d = &s->entities[v->entity];
         for (int z = 0; z < v->n[2]; z++)
-            for (int y = 0; y < v->n[1]; y++)
+            for (int y2 = 0; y2 < v->n[1]; y2++)
                 for (int x2 = 0; x2 < v->n[0]; x2++) {
-                    LxVec3 local = lx_v3(((float)x2 + 0.5f) / (float)v->n[0] - 0.5f, ((float)y + 0.5f) / (float)v->n[1] - 0.5f,
+                    LxVec3 local = lx_v3(((float)x2 + 0.5f) / (float)v->n[0] - 0.5f, ((float)y2 + 0.5f) / (float)v->n[1] - 0.5f,
                                          ((float)z + 0.5f) / (float)v->n[2] - 0.5f);
                     local = lx_v3(local.x * d->bvol.size.x, local.y * d->bvol.size.y, local.z * d->bvol.size.z);
                     LxVec3 w = lx_mat4_point(d->world, local);
-                    float *o = &b->vox_pos[(size_t)(v->first + (z * v->n[1] + y) * v->n[0] + x2) * 4];
+                    float *o = &b->vox_pos[(size_t)(v->first + (z * v->n[1] + y2) * v->n[0] + x2) * 4];
                     o[0] = w.x; o[1] = w.y; o[2] = w.z; o[3] = 1;
                     scene_ext = lx_maxf(scene_ext, lx_maxf(fabsf(w.x), lx_maxf(fabsf(w.y), fabsf(w.z))));
                 }

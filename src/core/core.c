@@ -1,5 +1,6 @@
 /* Core services: logging, memory, files, paths, time. */
 #include "../lx_internal.h"
+#include <ctype.h>
 #include <stdarg.h>
 #include <time.h>
 
@@ -76,6 +77,18 @@ char *lx_strdup(const char *s) {
     memcpy(r, s, n + 1);
     return r;
 }
+bool lx_str_icontains(const char *hay, const char *needle) {
+    if (!needle || !needle[0]) return true;
+    if (!hay) return false;
+    size_t n = strlen(needle);
+    for (const char *p = hay; *p; p++) {
+        size_t i = 0;
+        while (i < n && p[i] && tolower((unsigned char)p[i]) == tolower((unsigned char)needle[i])) i++;
+        if (i == n) return true;
+    }
+    return false;
+}
+
 void lx_strcpy(char *dst, size_t cap, const char *src) {
     if (!cap) return;
     if (!src) { dst[0] = 0; return; }

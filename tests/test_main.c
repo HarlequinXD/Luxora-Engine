@@ -2913,14 +2913,14 @@ static void test_root_motion(void) {
             wa->root_motion = true;
             if (use_graph) lx_strcpy(wa->graph, sizeof wa->graph, "Walk.lxanim");
             else lx_animator_play(ws, w, "Walker.fbx#Bend", 0);
-            float back = 0, z0 = lx_entity_position(ws, w).z, last = z0;
+            float back = 0, z0 = lx_entity_position(ws, w).z, zlast = z0;
             for (int f = 0; f < 70; f++) {   /* 3.5 cycles */
                 lx_animator_update(ws, w, 0.05f);
                 float z = lx_entity_position(ws, w).z;
-                if (z - last < back) back = z - last;
-                last = z;
+                if (z - zlast < back) back = z - zlast;
+                zlast = z;
             }
-            float went = last - z0;
+            float went = zlast - z0;
             CHECK(back > -1e-3f && went > 3.0f && went < 3.6f, "%s: a looping walk only goes forwards (worst step %.3f, %.2f m in 3.5 cycles)",
                   use_graph ? "through a graph" : "playing the clip", back, went);
             lx_scene_destroy(ws);
@@ -2963,15 +2963,15 @@ static void test_root_motion(void) {
                 ea->play_on_start = false;
                 lx_strcpy(ea->graph, sizeof ea->graph, "Ease.lxanim");
                 LxEntity rootb = lx_entity_find(es, "Root");
-                float prev = 0, biggest = 0, last = 0;
+                float prev = 0, biggest = 0, ylast = 0;
                 for (int f = 0; f < 60; f++) {
                     lx_animator_set_float(es, em, "Speed", f < 20 ? 0.0f : 1.0f);
                     lx_animator_update(es, em, 1.0f / 60);
                     float y = lx_entity_world_position(es, rootb).y;
                     if (f > 0) biggest = lx_maxf(biggest, fabsf(y - prev));
-                    prev = last = y;
+                    prev = ylast = y;
                 }
-                CHECK(biggest < 0.1f && last > 0.45f, "a blend tree eases to a new Speed instead of jumping (biggest frame %.3f m, ends at %.3f)", biggest, last);
+                CHECK(biggest < 0.1f && ylast > 0.45f, "a blend tree eases to a new Speed instead of jumping (biggest frame %.3f m, ends at %.3f)", biggest, ylast);
             }
             lx_scene_destroy(es);
             lx_anim_graphs_clear();

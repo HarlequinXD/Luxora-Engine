@@ -1502,8 +1502,8 @@ static bool char_can_step(CharCtx *k, LxVec3 feet, LxVec3 n, const Body *b) {
     Manifold m;
     collide(k->w, &cap, b, &m);
     for (int c = 0; c < m.count; c++) {
-        LxVec3 n = scl(m.n[c], -1.0f);
-        if (m.sep[c] < -0.002f && (n.y < k->cos_slope || m.p[c].y > top)) return false;   /* still against its side, or its top is higher */
+        LxVec3 cn = scl(m.n[c], -1.0f);
+        if (m.sep[c] < -0.002f && (cn.y < k->cos_slope || m.p[c].y > top)) return false;   /* still against its side, or its top is higher */
     }
     return true;
 }

@@ -511,8 +511,8 @@ static void build_geometry(Ctx *c, Obj *model, Obj *geo, int node_index, Obj **m
     char (*bone_names)[64] = NULL;
     LxMat4 *inv_bind = NULL;
     LxMat4 mesh_world = lx_mat4_identity();
-    for (int n = node_index; n >= 0; n = c->m->nodes[n].parent) {
-        const ModelNode *mn = &c->m->nodes[n];
+    for (int ni = node_index; ni >= 0; ni = c->m->nodes[ni].parent) {
+        const ModelNode *mn = &c->m->nodes[ni];
         mesh_world = lx_mat4_mul(lx_mat4_trs(mn->pos, mn->rot, mn->scale), mesh_world);
     }
     for (int i = 0; i < c->nconn; i++) {
@@ -1063,8 +1063,8 @@ bool lx_model_import_save(const char *model_path, const LxModelImport *imp) {
     LxStrBuf sb = {0};
     static const char *rigs[] = {"none", "generic", "humanoid"};
     static const char *lmuv[] = {"auto", "generate", "own"};
-    lx_sb_printf(&sb, "# Luxora model import settings\nversion = 2\nscale = %g\nimport_materials = %d\nimport_animations = %d\ncalculate_normals = %d\n"
-                      "smoothing_angle = %g\nlightmap_uvs = %s\nrig = %s\n",
+    lx_sb_printf(&sb, "# Luxora model import settings\nversion = %d\nscale = %g\nimport_materials = %d\nimport_animations = %d\ncalculate_normals = %d\n"
+                      "smoothing_angle = %g\nlightmap_uvs = %s\nrig = %s\n", LX_IMPORT_VERSION,
                  imp->scale, imp->import_materials, imp->import_animations, imp->calculate_normals, imp->smoothing_angle,
                  lmuv[imp->lightmap_uvs < 0 || imp->lightmap_uvs > 2 ? 0 : imp->lightmap_uvs], rigs[imp->rig < 0 || imp->rig > 2 ? 1 : imp->rig]);
     for (int b = 0; b < LX_HB_COUNT; b++)

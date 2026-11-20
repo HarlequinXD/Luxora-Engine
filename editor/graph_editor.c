@@ -1369,16 +1369,6 @@ static UiNode *g_qa_list;
 static int g_qa_link_state = -1, g_qa_link_trans = -1;   /* a link dropped in empty space: what gets linked to the new state */
 static bool g_qa_new_state;                              /* nothing selected: a new state takes the action */
 
-static bool qa_match(const char *text, const char *q) {
-    if (!q[0]) return true;
-    size_t n = strlen(q);
-    for (const char *p = text; *p; p++) {
-        size_t i = 0;
-        while (i < n && p[i] && tolower((unsigned char)p[i]) == tolower((unsigned char)q[i])) i++;
-        if (i == n) return true;
-    }
-    return false;
-}
 /* the new state is where the link was dropped, and the link leads to it */
 static int qa_new_state(LxGraphStateKind kind) {
     LxGraph *g = ge_graph();
@@ -1415,7 +1405,7 @@ static void qa_fill(void) {
     static const struct { const char *label; int tag; } EXTRA[] = {{"New State", -1}, {"New Sub State", -2}, {"New Exit", -3}};
     for (int k = 0; k < 3; k++) {
         if (EXTRA[k].tag == -3 && ge_scope() < 0) continue;
-        if (g_qa_text[0] && !qa_match(EXTRA[k].label, g_qa_text)) continue;
+        if (g_qa_text[0] && !lx_str_icontains(EXTRA[k].label, g_qa_text)) continue;
         UiNode *it = ui_menu_item(ED.ui, g_qa_list, EXTRA[k].label, NULL, qa_pick);
         it->icon = EXTRA[k].tag == -1 ? UI_ICON_PLUS : EXTRA[k].tag == -2 ? UI_ICON_GRAPH : UI_ICON_CLOSE;
         it->icon_color = COL_START;
@@ -1450,8 +1440,8 @@ static void qa_fill(void) {
         for (int i = 0; i < lx_fsm_action_count() && shown < 14; i++) {
             const LxFsmActionDesc *d = lx_fsm_action_at(i);
             if (!d) continue;
-            bool by_name = qa_match(d->name, g_qa_text);
-            if (pass == 0 ? !by_name : by_name || !(qa_match(d->category ? d->category : "", g_qa_text))) continue;
+            bool by_name = lx_str_icontains(d->name, g_qa_text);
+            if (pass == 0 ? !by_name : by_name || !(lx_str_icontains(d->category ? d->category : "", g_qa_text))) continue;
             if (!g_qa_text[0] && pass == 0 && shown >= 3 + 8) break;
             UiNode *it = ui_menu_item(ED.ui, g_qa_list, d->name, d->category, qa_pick);
             it->tag = i;

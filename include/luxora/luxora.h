@@ -42,6 +42,7 @@ void *lx_realloc(void *p, size_t size);
 void lx_free(void *p);
 char *lx_strdup(const char *s);
 void lx_strcpy(char *dst, size_t cap, const char *src);
+bool lx_str_icontains(const char *hay, const char *needle);   /* ASCII case ignored; an empty needle is in everything */
 
 /* Files and directories (UTF-8 paths, '/' separators accepted everywhere) */
 typedef struct LxDirEntry { char name[256]; bool is_dir; uint64_t size; } LxDirEntry;
