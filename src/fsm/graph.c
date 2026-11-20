@@ -1,4 +1,5 @@
 /* State Graph assets (.lxgraph): the data model, its text format, and editing helpers. */
+#include <ctype.h>
 #include "../lx_internal.h"
 #include <stdio.h>
 
@@ -777,6 +778,76 @@ void lx_graph_action_summary(const LxGraphAction *a, const LxFsmActionDesc *d, c
         out[n++] = *p;
     }
     out[n] = 0;
+}
+
+/* ---------------- finding things ---------------- */
+static bool has_text(const char *hay, const char *q) {
+    if (!q[0]) return false;
+    size_t n = strlen(q);
+    for (const char *p = hay; *p; p++) {
+        size_t i = 0;
+        while (i < n && p[i] && tolower((unsigned char)p[i]) == tolower((unsigned char)q[i])) i++;
+        if (i == n) return true;
+    }
+    return false;
+}
+int lx_graph_find(const LxGraph *g, const char *query, unsigned kinds, LxGraphHit *out, int max) {
+    if (!g || !query) return 0;
+    char q[LX_FSM_NAME + 8];
+    lx_strcpy(q, sizeof q, query);
+    bool exact_event = !strncmp(q, "event:", 6);
+    const char *ev = exact_event ? q + 6 : q;
+    while (*ev == ' ') ev++;
+    if (!ev[0]) return 0;
+    int n = 0;
+#define HIT(K, S, A, ...) do { if (n < max) { out[n].kind = (K); out[n].state = (S); out[n].action = (A); snprintf(out[n].what, sizeof out[n].what, __VA_ARGS__); } n++; } while (0)
+#define EV_MATCH(name) (exact_event ? !strcmp((name), ev) : has_text((name), ev))
+    for (int i = 0; i < g->state_count; i++) {
+        const LxGraphState *st = &g->states[i];
+        if (!exact_event && (kinds & LX_GF_STATE) && (has_text(st->name, q) || has_text(st->description, q)))
+            HIT(LX_GF_STATE, i, -1, "%s%s%s%s", st->kind == LX_GS_SUB ? "Sub State " : st->kind == LX_GS_EXIT ? "Exit " : "State ", st->name,
+                st->parent[0] ? "  (in " : "", st->parent[0] ? st->parent : "");
+        if (n <= max && n > 0 && out[n - 1].kind == LX_GF_STATE && out[n - 1].state == i && st->parent[0]) {
+            size_t l = strlen(out[n - 1].what);
+            if (l + 1 < sizeof out[n - 1].what) { out[n - 1].what[l] = ')'; out[n - 1].what[l + 1] = 0; }
+        }
+        /* received: its transitions */
+        if (kinds & LX_GF_EVENT_RECEIVED)
+            for (int t = 0; t < st->trans_count; t++)
+                if (EV_MATCH(st->trans[t].event)) HIT(LX_GF_EVENT_RECEIVED, i, -1, "%s: on %s go to %s", st->name, st->trans[t].event, st->trans[t].to[0] ? st->trans[t].to : "(not linked)");
+        /* sent: an Exit */
+        if ((kinds & LX_GF_EVENT_SENT) && st->kind == LX_GS_EXIT && EV_MATCH(lx_graph_exit_event(st)))
+            HIT(LX_GF_EVENT_SENT, i, -1, "%s (Exit) sends %s to %s", st->name, lx_graph_exit_event(st), st->parent);
+        for (int a = 0; a < st->action_count; a++) {
+            const LxGraphAction *ac = &st->actions[a];
+            const LxFsmActionDesc *d = lx_fsm_action_find(ac->type);
+            char sum[160];
+            lx_graph_action_summary(ac, d, sum, sizeof sum);
+            if (!exact_event && (kinds & LX_GF_ACTION) && (has_text(ac->type, q) || has_text(sum, q)))
+                HIT(LX_GF_ACTION, i, a, "%s > %s: %s", st->name, ac->type, sum);
+            for (int k = 0; k < LX_FSM_MAX_PARAMS; k++) {
+                const LxGraphParam *p = &ac->p[k];
+                const LxFsmParamDesc *pd = d && d->params[k].name ? &d->params[k] : NULL;
+                if (!exact_event && (kinds & LX_GF_VARIABLE) && p->is_var && has_text(p->value, q))
+                    HIT(LX_GF_VARIABLE, i, a, "%s > %s uses %s (%s)", st->name, ac->type, p->value, pd ? pd->name : "?");
+                if ((kinds & LX_GF_EVENT_SENT) && pd && pd->type == LX_FSM_EVENT && !p->is_var && p->value[0] && EV_MATCH(p->value))
+                    HIT(LX_GF_EVENT_SENT, i, a, "%s > %s sends %s", st->name, ac->type, p->value);
+            }
+        }
+    }
+    if (kinds & LX_GF_EVENT_RECEIVED)
+        for (int t = 0; t < g->global_count; t++)
+            if (EV_MATCH(g->globals[t].event)) HIT(LX_GF_EVENT_RECEIVED, lx_graph_state_index(g, g->globals[t].to), -1, "Any state: on %s go to %s (global)", g->globals[t].event, g->globals[t].to);
+    if (!exact_event && (kinds & LX_GF_VARIABLE))
+        for (int v = 0; v < g->var_count; v++)
+            if (has_text(g->vars[v].name, q)) HIT(LX_GF_VARIABLE, -1, -1, "Variable %s (%s, starts at %s)", g->vars[v].name, lx_fsm_type_name(g->vars[v].type), g->vars[v].value);
+    if (!exact_event && (kinds & LX_GF_COMMENT))
+        for (int c = 0; c < g->comment_count; c++)
+            if (has_text(g->comments[c].text, q))   /* action -2: the note is inside that Sub State (open it rather than select it) */
+                HIT(LX_GF_COMMENT, g->comments[c].parent[0] ? lx_graph_state_index(g, g->comments[c].parent) : -1, -2, "Note: %.150s", g->comments[c].text);
+#undef HIT
+#undef EV_MATCH
+    return n;
 }
 
 int lx_graph_problems(const LxGraph *g, char (*out)[160], int max) {

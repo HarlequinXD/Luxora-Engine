@@ -456,6 +456,21 @@ static void test_fsm_nesting(void) {
             lx_graph_free(b);
         }
         lx_free(t);
+        /* the Finder: text anywhere, and exactly where an event is sent and received */
+        LxGraphHit hits[32];
+        int nh = lx_graph_find(g, "event:LEAVE", LX_GF_ALL, hits, 32);
+        int sent = 0, recv = 0;
+        for (int k = 0; k < nh && k < 32; k++) { sent += hits[k].kind == LX_GF_EVENT_SENT; recv += hits[k].kind == LX_GF_EVENT_RECEIVED; }
+        CHECK(sent == 1 && recv == 1, "Finder: LEAVE is sent once (Signal's Send Event) and received once (Combat) (%d, %d)", sent, recv);
+        nh = lx_graph_find(g, "event:DONE", LX_GF_ALL, hits, 32);
+        sent = 0;
+        for (int k = 0; k < nh && k < 32; k++) sent += hits[k].kind == LX_GF_EVENT_SENT && hits[k].state == lx_graph_state_index(g, "Out");
+        CHECK(sent == 1, "Finder: an Exit counts as sending its event");
+        nh = lx_graph_find(g, "reload", LX_GF_STATE, hits, 32);
+        CHECK(nh == 1 && hits[0].state == lx_graph_state_index(g, "Reload") && strstr(hits[0].what, "(in Combat)"),
+              "Finder: states by name, any case, saying which Sub State they're in (%d: %s)", nh, nh ? hits[0].what : "");
+        nh = lx_graph_find(g, "f2", LX_GF_VARIABLE, hits, 32);   /* (this text declares no variables: only the use) */
+        CHECK(nh == 1 && hits[0].state == lx_graph_state_index(g, "Radio") && hits[0].action == 0, "Finder: the action that uses a variable (%d)", nh);
         /* a transition that crosses into another Sub State is a problem */
         LxGraphState *a = lx_graph_find_state(g, "A");
         LxGraphTransition *x = lx_graph_add_transition(g, a, "FIRE");

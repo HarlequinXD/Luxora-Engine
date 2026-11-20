@@ -152,6 +152,20 @@ void lx_graph_remove_region(LxGraph *g, int parent, int index);   /* its states 
 int lx_graph_depth(const LxGraph *g, int state);
 const char *lx_graph_exit_event(const LxGraphState *st);           /* FINISHED unless it names one */
 
+/* searching a graph (the editor's Finder). A query is text to look for, anywhere (not case sensitive), or
+ * "event:NAME" for exactly where that event is sent and received. */
+typedef enum {
+    LX_GF_STATE = 1, LX_GF_ACTION = 2, LX_GF_VARIABLE = 4, LX_GF_EVENT_SENT = 8, LX_GF_EVENT_RECEIVED = 16, LX_GF_COMMENT = 32,
+    LX_GF_ALL = 63
+} LxGraphFindKind;
+typedef struct LxGraphHit {
+    LxGraphFindKind kind;
+    int state;            /* -1: the graph's (a variable, a global transition, a comment) */
+    int action;           /* -1: not an action */
+    char what[192];       /* "Chase > Wait: wait 1.0s, then FINISHED" */
+} LxGraphHit;
+int lx_graph_find(const LxGraph *g, const char *query, unsigned kinds, LxGraphHit *out, int max);   /* how many; the first max are written */
+
 /* problems: unconnected transitions, unknown actions, empty required parameters... (count, text lines) */
 int lx_graph_problems(const LxGraph *g, char (*out)[160], int max);   /* how many there are; the first max are written */
 

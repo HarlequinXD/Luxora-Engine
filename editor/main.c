@@ -178,6 +178,8 @@ int main(int argc, char **argv) {
         if (zoom) ed_graph_set_zoom((float)atof(zoom));
         extern void ed_graph_quick_add_on_open(void);
         if (getenv("LUXORA_GRAPH_QUICKADD")) ed_graph_quick_add_on_open();   /* screenshots: the quick-add box */
+        extern void ge_finder_open(const char *query);
+        if (getenv("LUXORA_GRAPH_FIND")) ge_finder_open(getenv("LUXORA_GRAPH_FIND"));   /* screenshots: the Finder */
     }
     if (auto_play && ED.has_project) ed_play();
 

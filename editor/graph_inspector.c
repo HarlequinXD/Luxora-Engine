@@ -1050,6 +1050,11 @@ static void add_row(UiNode *body, const char *hint_text, void (*cb)(UiNode *)) {
     UiNode *bt = ui_button(ED.ui, row, "Add", cb);
     bt->w = 56; bt->h = 24; bt->user = b;
 }
+static void find_event(UiNode *n) {
+    char q[LX_FSM_NAME + 8];
+    snprintf(q, sizeof q, "event:%s", n->path);
+    ge_finder_open(q);
+}
 static void build_events_tab(UiNode *body) {
     UiCtx *ui = ED.ui;
     LxGraph *g = ge_graph();
@@ -1075,6 +1080,8 @@ static void build_events_tab(UiNode *body) {
         cb->user = b;
         cb->on_change = event_global_changed;
         lx_strcpy(cb->tooltip, sizeof cb->tooltip, "Other graphs and scripts may send it (it's listed for them)");
+        UiNode *fw = small_btn(row, UI_ICON_SEARCH, "Where is it sent and received? (every graph in the project)", find_event);
+        lx_strcpy(fw->path, sizeof fw->path, g->events[i].name);
         UiNode *x = small_btn(row, UI_ICON_TRASH, "Delete the event and its transitions", remove_event);
         x->tag = i;
     }
@@ -1086,6 +1093,8 @@ static void build_events_tab(UiNode *body) {
         row->h = 22;
         row->cross_align = UI_ALIGN_CENTER;
         label(row, gl->events[i].name, UI_FONT_BODY, COL_TEXT)->grow = 1;
+        UiNode *fw = small_btn(row, UI_ICON_SEARCH, "Where is it sent and received?", find_event);
+        lx_strcpy(fw->path, sizeof fw->path, gl->events[i].name);
         UiNode *x = small_btn(row, UI_ICON_TRASH, "Delete", remove_gevent);
         x->tag = i;
     }
@@ -1620,7 +1629,7 @@ static void ab_frame(UiNode *n) {
 static void ab_search_enter(UiNode *n) { LX_UNUSED(n); if (enter_pressed() && GE.ab_sel[0]) ge_add_action(GE.ab_sel); }
 static void ab_closed(UiNode *win) { LX_UNUSED(win); GE.ab_win = NULL; GE.ab_list = NULL; GE.ab_details = NULL; }
 
-static void load_all_graphs(void) {
+void ge_load_all_graphs(void) {
     /* so "Used in" can list every graph in the project */
     static uint64_t last;
     uint64_t now = (uint64_t)lx_time();
@@ -1652,7 +1661,7 @@ static void load_all_graphs(void) {
 void ge_open_action_browser(void) {
     if (GE.ab_win) { ui_window_front(ED.ui, GE.ab_win); return; }
     UiCtx *ui = ED.ui;
-    load_all_graphs();
+    ge_load_all_graphs();
     float s = ui_scale(ui);
     float x = GE.canvas ? GE.canvas->x + GE.canvas->cw - 400 * s : 200, y = GE.canvas ? GE.canvas->y + 20 * s : 120;
     UiNode *body = ui_window(ui, "Action Browser", lx_maxf(10, x), y, 390, 640);

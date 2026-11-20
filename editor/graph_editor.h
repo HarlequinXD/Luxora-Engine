@@ -89,7 +89,12 @@ void ge_add_action(const char *type);          /* to the selected state */
 void ge_frame_all(void);
 void ge_new_graph_for(LxEntity e);             /* creates Graphs/<name>.lxgraph and adds the component */
 
+/* graph_finder.c */
+void ge_finder_open(const char *query);        /* NULL keeps the last search */
+void ge_finder_toggle(void);
+
 /* graph_inspector.c */
+void ge_load_all_graphs(void);                 /* every .lxgraph in the project, into memory */
 UiNode *ge_inspector(UiNode *parent);
 void ge_inspector_frame(void);
 void ge_action_browser_toggle(void);

@@ -2409,6 +2409,11 @@ bool ed_graph_keys(void) {
         }
         if (lx_key_pressed(LX_KEY_D)) { m_duplicate(NULL); return true; }
         if (lx_key_pressed(LX_KEY_A)) { m_select_all(NULL); return true; }
+        if (lx_key_pressed(LX_KEY_F)) {   /* find: what's selected, to start with */
+            LxGraphState *fs = ge_sel_state();
+            ge_finder_open(fs ? fs->name : NULL);
+            return true;
+        }
         return false;   /* Ctrl+S, Ctrl+P... stay with the editor */
     }
     if (!g) return true;
@@ -2527,6 +2532,7 @@ static void tb_lock(UiNode *b) {
     GE.locked = !GE.locked;
     b->selected = GE.locked;
 }
+static void tb_find(UiNode *b) { LX_UNUSED(b); ge_finder_open(NULL); }
 static void tb_frame(UiNode *b) { LX_UNUSED(b); GE.sel_count = 0; ge_frame_all(); }
 static void tb_zoom(UiNode *b) { LX_UNUSED(b); GE.zoom = 1; }
 static void tb_minimap(UiNode *b) { GE.minimap = !GE.minimap; b->selected = GE.minimap; ge_prefs_save(); }
@@ -2673,6 +2679,7 @@ UiNode *ed_graph_panel(UiNode *parent) {
     GE.state_lbl = ui_label(ui, tb, "");
     GE.state_lbl->font = UI_FONT_BOLD;
     GE.state_lbl->grow = 1;
+    tbtn(tb, "Find", UI_ICON_SEARCH, "Find states, actions, variables and events in every graph (Ctrl+F)", tb_find)->w = 64;
     tbtn(tb, "Frame", UI_ICON_FOCUS, "Fit the graph in the view (F)", tb_frame)->w = 70;
     UiNode *mm = tbtn(tb, "Minimap", UI_ICON_TILES, NULL, tb_minimap);
     mm->w = 84;
