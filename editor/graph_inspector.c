@@ -917,6 +917,35 @@ static void problem_click(UiNode *n) {
     int i = lx_graph_state_index(g, n->path);
     if (i >= 0) { ge_select_state(i, false); ge_frame_all(); }
 }
+static void used_by_click(UiNode *n) {
+    LxEntity e = (LxEntity)((uint64_t)n->tag >> 8);
+    int slot = (int)(n->tag & 0xff);
+    if (ED.scene && lx_entity_valid(ED.scene, e)) ed_graph_edit(e, slot);
+}
+/* prefabs whose text names this graph (a prefab's objects keep their components in its file) */
+static int used_in_prefabs(const char *ref, UiNode *body) {
+    if (!ref[0] || !ED.has_project) return 0;
+    char dir[LX_PATH_MAX];
+    lx_path_join(dir, sizeof dir, ED.project.assets, "Prefabs");
+    LxDirEntry *e;
+    int n = lx_dir_list(dir, &e), found = 0;
+    char line[600] = "";
+    size_t len = 0;
+    for (int i = 0; i < n && found < 30; i++) {
+        if (e[i].is_dir || !strstr(e[i].name, ".lxprefab")) continue;
+        char full[LX_PATH_MAX];
+        lx_path_join(full, sizeof full, dir, e[i].name);
+        char *text = lx_file_read(full, NULL);
+        if (text && strstr(text, ref)) {
+            len += (size_t)snprintf(line + len, len < sizeof line ? sizeof line - len : 0, "%s%s", found ? ", " : "Prefabs: ", e[i].name);
+            found++;
+        }
+        lx_free(text);
+    }
+    lx_free(e);
+    if (found) hint(body, line);
+    return found;
+}
 static void build_fsm_tab(UiNode *body) {
     UiCtx *ui = ED.ui;
     LxGraph *g = ge_graph();
@@ -951,6 +980,46 @@ static void build_fsm_tab(UiNode *body) {
     snprintf(stats, sizeof stats, "%d states · %d actions · %d transitions · %d global transitions · %d events · %d variables", g->state_count, actions, trans,
              g->global_count, g->event_count, g->var_count);
     hint(body, stats);
+    /* one graph, many objects: what each can set, and who uses it */
+    heading(body, "Inputs");
+    int inputs = 0;
+    for (int i = 0; i < g->var_count; i++) {
+        if (!g->vars[i].inspector) continue;
+        char t[200];
+        snprintf(t, sizeof t, "%s  (%s, default %s)%s%s", g->vars[i].name, lx_fsm_type_name(g->vars[i].type), g->vars[i].value,
+                 g->vars[i].tooltip[0] ? "  -  " : "", g->vars[i].tooltip);
+        UiNode *il = label(body, t, UI_FONT_SMALL, COL_VAR_TEXT);
+        il->icon = UI_ICON_INSPECTOR;
+        il->icon_color = COL_VAR_TEXT;
+        inputs++;
+    }
+    if (!inputs) hint(body, "None yet. Tick Inspector on a variable (Variables tab) and every object using this graph can set its own value - "
+                            "one Enemy graph for a slow guard and a fast scout.");
+    heading(body, "Used By");
+    int users = 0;
+    for (int i = 0; ED.scene && i < lx_scene_entity_count(ED.scene) && users < 40; i++) {
+        LxEntity e = lx_scene_entity_at(ED.scene, i);
+        LxStateGraph *sg = lx_get_state_graph(ED.scene, e);
+        for (int k = 0; sg && k < sg->count; k++) {
+            if (strcmp(sg->slots[k].graph, GE.ref)) continue;
+            char t[200];
+            snprintf(t, sizeof t, "%s%s", lx_entity_name(ED.scene, e), sg->slots[k].override_count ? "" : "  (all defaults)");
+            if (sg->slots[k].override_count)
+                snprintf(t, sizeof t, "%s  (%d input%s set)", lx_entity_name(ED.scene, e), sg->slots[k].override_count, sg->slots[k].override_count == 1 ? "" : "s");
+            UiNode *ub = ui_button(ui, body, t, used_by_click);
+            ub->icon = UI_ICON_ENTITY;
+            ub->icon_color = COL_DIM;
+            ub->bg = 0;
+            ub->center_text = false;
+            ub->font = UI_FONT_SMALL;
+            ub->h = 22;
+            ub->tag = (int64_t)(((uint64_t)e << 8) | (uint64_t)k);
+            if (e == GE.obj && k == GE.slot) ub->fg = COL_RUN;
+            users++;
+        }
+    }
+    int prefabs = used_in_prefabs(GE.ref, body);
+    if (!users && !prefabs) hint(body, "No object in this scene or prefab uses it yet: drop the .lxgraph on an object, or pick it in its State Graph component.");
     heading(body, "Problems");
     char probs[32][160];
     int np = lx_graph_problems(g, probs, 32);
@@ -971,13 +1040,15 @@ static void build_fsm_tab(UiNode *body) {
     if (run) {
         heading(body, "Running");
         char t[200];
-        snprintf(t, sizeof t, "State: %s  (%.1f s)", run->state >= 0 && run->state < g->state_count ? g->states[run->state].name : "-", (double)run->state_time);
+        char where[200];
+        ge_run_path(run, where, sizeof where);
+        snprintf(t, sizeof t, "State: %s  (%.1f s)", where[0] ? where : "-", (double)run->state_time);
         label(body, t, UI_FONT_BODY, COL_RUN);
         if (run->last_event[0]) { snprintf(t, sizeof t, "Last event: %s", run->last_event); label(body, t, UI_FONT_SMALL, COL_DIM); }
         heading(body, "History");
         for (int i = run->history_count - 1; i >= 0 && i >= run->history_count - 12; i--) {
             const char *sn = run->history[i].state >= 0 && run->history[i].state < g->state_count ? g->states[run->history[i].state].name : "?";
-            snprintf(t, sizeof t, "%s  ‹  %s", sn, run->history[i].event[0] ? run->history[i].event : "START");
+            snprintf(t, sizeof t, "%s   <-  %s", sn, run->history[i].event[0] ? run->history[i].event : "START");
             label(body, t, UI_FONT_SMALL, i == run->history_count - 1 ? COL_TEXT : COL_DIM);
         }
     } else if (ED.play != ED_EDIT) hint(body, "Playing: select an object that runs this graph to see it live.");

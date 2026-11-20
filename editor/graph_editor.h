@@ -81,6 +81,7 @@ void ge_commit(bool structural, const void *key);   /* after any change: undo sn
 void ge_undo(void);
 void ge_redo(void);
 LxFsmRun *ge_run(void);                        /* the running copy in play mode, or NULL */
+void ge_run_path(const LxFsmRun *run, char *path, size_t cap);   /* "Combat  >  Reload" */
 int ge_scope(void);                            /* the Sub State being viewed, -1 = the graph */
 void ge_enter_scope(int state);                /* look inside a Sub State (-1: back to the graph) */
 uint32_t ge_state_color(int c);

@@ -2596,6 +2596,20 @@ static void sync_target(void) {
     if (GE.obj && !lx_entity_valid(ED.scene, GE.obj)) set_target("", 0, 0);
 }
 
+/* the playing state, and inside each playing Sub State its first region's state: "Combat  >  Reload" */
+void ge_run_path(const LxFsmRun *run, char *path, size_t cap) {
+    path[0] = 0;
+    if (!run || !run->graph) return;
+    const LxGraph *g = run->graph;
+    size_t len = 0;
+    for (const LxFsmRun *r = run; r && r->state >= 0 && r->state < g->state_count && len + 2 < cap;) {
+        len += (size_t)snprintf(path + len, cap - len, "%s%s", len ? "  >  " : "", g->states[r->state].name);
+        const LxFsmRun *next = NULL;
+        for (int k = 0; k < r->kid_count && !next; k++) if (r->kids[k]->scope == r->state && r->kids[k]->region == 0) next = r->kids[k];
+        r = next;
+    }
+}
+
 static void panel_frame(UiNode *n) {
     LX_UNUSED(n);
     if (g_save_pending && !lx_mouse_down(LX_MOUSE_LEFT)) flush_save();
@@ -2620,15 +2634,8 @@ static void panel_frame(UiNode *n) {
     if (GE.state_lbl) {
         LxFsmRun *run = ge_run();
         char path[256] = "";
-        if (run && g) {   /* where it is, all the way in: Combat › Reload */
-            size_t len = 0;
-            for (LxFsmRun *r = run; r && r->state >= 0 && r->state < g->state_count && len + 2 < sizeof path;) {
-                len += (size_t)snprintf(path + len, sizeof path - len, "%s%s", len ? "  >  " : "", g->states[r->state].name);
-                LxFsmRun *next = NULL;
-                for (int k = 0; k < r->kid_count && !next; k++) if (r->kids[k]->scope == r->state && r->kids[k]->region == 0) next = r->kids[k];
-                r = next;
-            }
-        } else if (ge_sel_state()) lx_strcpy(path, sizeof path, ge_sel_state()->name);
+        if (run && g) ge_run_path(run, path, sizeof path);   /* where it is, all the way in: Combat > Reload */
+        else if (ge_sel_state()) lx_strcpy(path, sizeof path, ge_sel_state()->name);
         ui_set_text(GE.state_lbl, "%s", path);
         GE.state_lbl->fg = run ? UI_HEX(0xffb03a) : COL_TEXT;
     }
