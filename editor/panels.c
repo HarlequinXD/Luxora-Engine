@@ -1490,10 +1490,107 @@ void ed_bake_update(void) {
 }
 static void env_changed(UiNode *n) { LX_UNUSED(n); ed_mark_changed(); }
 
+/* ---- the Day-night sky, clouds and weather ---- */
+static bool g_open_sky = true, g_open_clouds = true, g_open_weather = true;
+static UiNode *g_sky_clock;
+static void sky_mode_changed(UiNode *n) {
+    LX_UNUSED(n);
+    LxEnvironment *e = lx_scene_environment(ED.scene);
+    LX_UNUSED(e);
+    ed_mark_changed();
+    g_lighting_gen = ~0u;   /* other settings now */
+}
+static void weather_field_changed(UiNode *n) {
+    LX_UNUSED(n);
+    LxEnvironment *e = lx_scene_environment(ED.scene);
+    if (e) e->weather = LX_WEATHER_CUSTOM;
+    ed_mark_changed();
+}
+static void weather_preset_changed(UiNode *n) {
+    LX_UNUSED(n);
+    LxEnvironment *e = lx_scene_environment(ED.scene);
+    if (e && e->weather >= 0 && e->weather < LX_WEATHER_CUSTOM) lx_sky_weather_preset((LxWeather)e->weather, e);
+    ed_mark_changed();
+}
+static void sky_clock_text(char *out, size_t cap, float hour) {
+    int m = (int)(hour * 60.0f + 0.5f) % (24 * 60);
+    snprintf(out, cap, "%02d:%02d", m / 60, m % 60);
+}
+static UiNode *sky_slider(UiNode *sec, const char *label, float *v, float lo, float hi, const char *tip, void (*cb)(UiNode *)) {
+    UiNode *n = slider_row(sec, label, v, lo, hi);
+    n->on_change = cb ? cb : env_changed;
+    if (tip) lx_strcpy(n->tooltip, sizeof n->tooltip, tip);
+    return n;
+}
+static void sky_sections(UiNode *body, LxEnvironment *env) {
+    UiCtx *ui = ED.ui;
+    UiNode *sec = ed_section(body, UI_ICON_SUN, "Time of Day (scene)", &g_open_sky, NULL);
+    {
+        UiNode *row = ed_prop_row(sec, "Clock");
+        g_sky_clock = ui_label(ui, row, "");
+        ui_track(&g_sky_clock);
+    }
+    sky_slider(sec, "Time of Day", &env->time_of_day, 0, 24, "Hours: 6 is about sunrise, 12 noon, 18 about sunset.", NULL);
+    UiNode *dl = float_row(sec, "Day Length", &env->day_length, 1, 0, 1440);
+    dl->on_change = env_changed;
+    lx_strcpy(dl->tooltip, sizeof dl->tooltip, "Real minutes a whole day takes while playing (24 = a day in 24 minutes). 0 stops the clock.");
+    sky_slider(sec, "Latitude", &env->latitude, -90, 90, "How far from the equator: how high the sun climbs and how long days and nights are.", NULL);
+    sky_slider(sec, "Day of Year", &env->day_of_year, 1, 365, "The season: 172 is midsummer in the north, 355 midwinter.", NULL);
+    sky_slider(sec, "Sun Heading", &env->sun_heading, -180, 180, "Turns the sun's path around the scene. At 0 it rises along +X.", NULL);
+    sky_slider(sec, "Sun Intensity", &env->sun_intensity, 0, 10, "Sunlight above the air. The air turns it orange and dims it near the horizon.", NULL);
+    sky_slider(sec, "Moon Intensity", &env->moon_intensity, 0, 2, "Moonlight when the moon is full. Raise it for brighter nights.", NULL);
+    sky_slider(sec, "Moon Phase", &env->moon_phase, 0, 1, "0 new moon, 0.5 full moon. The moon rises later as the phase grows.", NULL);
+    sky_slider(sec, "Stars", &env->star_intensity, 0, 3, NULL, NULL);
+    sky_slider(sec, "Haze", &env->haze, 0.5f, 12, "1 is crystal clear air; more makes a whiter sky and a bigger glow around the sun.", NULL);
+    UiNode *note = ui_label(ui, sec, "Drives the first directional light: the sun, the moon at night.");
+    note->font = UI_FONT_SMALL;
+    note->fg = ui_theme(ui)->text_dim;
+
+    sec = ed_section(body, UI_ICON_GLOBE, "Clouds (scene)", &g_open_clouds, NULL);
+    sky_slider(sec, "Coverage", &env->cloud_coverage, 0, 1, "How much of the sky is cloud.", weather_field_changed);
+    sky_slider(sec, "Density", &env->cloud_density, 0, 1, "Thin and bright .. thick, dark and grey underneath.", weather_field_changed);
+    {
+        static const char *TYPES[] = {"Cumulus", "Stratus", "Storm"};
+        UiNode *tr = ed_prop_row(sec, "Type");
+        UiNode *td = ui_dropdown(ui, tr, &env->cloud_type, TYPES, 3);
+        td->grow = 1;
+        td->on_change = weather_field_changed;
+        lx_strcpy(td->tooltip, sizeof td->tooltip, "Cumulus: heaped fair-weather clouds. Stratus: a flat grey layer. Storm: tall towering thunderclouds.");
+    }
+    UiNode *ch = float_row(sec, "Height (m)", &env->cloud_height, 50, 100, 20000);
+    ch->on_change = env_changed;
+    UiNode *ct = float_row(sec, "Thickness (m)", &env->cloud_thickness, 50, 50, 15000);
+    ct->on_change = env_changed;
+    sky_slider(sec, "Wind Direction", &env->wind_direction, -180, 180, "Degrees: where the wind blows towards (0 = +X).", NULL);
+    sky_slider(sec, "Wind Speed", &env->wind_speed, 0, 40, "Metres per second: clouds drift, rain and snow slant.", weather_field_changed);
+
+    sec = ed_section(body, UI_ICON_LAYERS, "Weather (scene)", &g_open_weather, NULL);
+    {
+        static const char *W[] = {"Clear", "Cloudy", "Rain", "Storm", "Snow", "Fog", "Custom"};
+        UiNode *wr = ed_prop_row(sec, "Weather");
+        UiNode *wd = ui_dropdown(ui, wr, &env->weather, W, LX_WEATHER_COUNT);
+        wd->grow = 1;
+        wd->on_change = weather_preset_changed;
+        lx_strcpy(wd->tooltip, sizeof wd->tooltip, "A preset for the clouds, rain, snow, lightning, mist and wind. While playing the weather changes over the Blend Time.");
+    }
+    sky_slider(sec, "Rain", &env->rain, 0, 1, NULL, weather_field_changed);
+    sky_slider(sec, "Snow", &env->snow, 0, 1, NULL, weather_field_changed);
+    sky_slider(sec, "Lightning", &env->lightning, 0, 1, "How often lightning strikes (only under thick enough cloud). Thunder follows as late as sound would.", weather_field_changed);
+    sky_slider(sec, "Mist", &env->mist, 0, 1, "Weather fog, on top of the Fog Density.", weather_field_changed);
+    UiNode *bt = float_row(sec, "Blend Time", &env->weather_blend, 1, 0, 3600);
+    bt->on_change = env_changed;
+    lx_strcpy(bt->tooltip, sizeof bt->tooltip, "Seconds the weather takes to change while playing (the Set Weather action can choose its own).");
+}
+
 static void lighting_frame(UiNode *body) {
     g_lighting_body = body;
     ui_track(&g_lighting_body);
     bake_ui_sync();
+    if (g_sky_clock && ED.scene) {
+        char t[16];
+        sky_clock_text(t, sizeof t, lx_scene_environment(ED.scene)->time_of_day);
+        ui_set_text(g_sky_clock, "%s%s", t, lx_sky_is_day(ED.scene) ? "  (day)" : "  (night)");
+    }
     if (g_lighting_gen == ED.scene_gen && g_lighting_scene == ED.scene && body->first) return;
     g_lighting_scene = ED.scene;
     g_lighting_gen = ED.scene_gen;
@@ -1505,15 +1602,30 @@ static void lighting_frame(UiNode *body) {
     g_quality = g->quality_preset;
     g_shadow_res_idx = g->shadow_resolution >= 4096 ? 3 : g->shadow_resolution >= 2048 ? 2 : g->shadow_resolution >= 1024 ? 1 : 0;
     UiNode *sec = ed_section(body, UI_ICON_GLOBE, "Environment (scene)", &g_open_env, NULL);
-    color_row(sec, "Sky Zenith", &env->sky_zenith.x, 1)->on_change = env_changed;
-    color_row(sec, "Sky Horizon", &env->sky_horizon.x, 1)->on_change = env_changed;
-    color_row(sec, "Ground", &env->ground_color.x, 1)->on_change = env_changed;
+    g_sky_clock = NULL;
+    {
+        static const char *MODES[] = {"Gradient", "Day-night"};
+        UiNode *mr = ed_prop_row(sec, "Sky Mode");
+        UiNode *md = ui_dropdown(ui, mr, &env->sky_mode, MODES, 2);
+        md->grow = 1;
+        md->on_change = sky_mode_changed;
+        lx_strcpy(md->tooltip, sizeof md->tooltip, "Gradient: the colours below. Day-night: a real sky with sun, moon, stars, clouds and weather that follow the clock.");
+    }
+    bool dn = env->sky_mode == LX_SKY_DAY_NIGHT;
+    if (!dn) {
+        color_row(sec, "Sky Zenith", &env->sky_zenith.x, 1)->on_change = env_changed;
+        color_row(sec, "Sky Horizon", &env->sky_horizon.x, 1)->on_change = env_changed;
+    }
+    UiNode *grnd = color_row(sec, "Ground", &env->ground_color.x, 1);
+    grnd->on_change = env_changed;
+    if (dn) lx_strcpy(grnd->tooltip, sizeof grnd->tooltip, "The colour of the land in the distance, below the horizon.");
     slider_row(sec, "Sky Light", &env->ambient_intensity, 0, 3)->on_change = env_changed;
     slider_row(sec, "Exposure", &env->exposure, 0.1f, 4)->on_change = env_changed;
-    color_row(sec, "Fog Color", &env->fog_color.x, 1)->on_change = env_changed;
+    if (!dn) color_row(sec, "Fog Color", &env->fog_color.x, 1)->on_change = env_changed;
     UiNode *fog = float_row(sec, "Fog Density", &env->fog_density, 0.001f, 0, 1);
     fog->precision = 4;
     fog->on_change = env_changed;
+    if (dn) sky_sections(body, env);
 
     sec = ed_section(body, UI_ICON_BULB, "Baked Lighting (scene)", &g_open_bake, NULL);
     {

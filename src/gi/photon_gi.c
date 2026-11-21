@@ -60,6 +60,8 @@ static struct {
     LxAabb scene_bounds;
     LxGiVolume volume;
     int grid_setting;
+    LxVec3 dn_dir_last;                 /* Day-night: the sun's direction last frame (a slow drift is a small change) */
+    float dn_env_last[7];
 } G;
 
 void lx_gi_init(void) { memset(&G, 0, sizeof G); }
@@ -293,20 +295,39 @@ static void gather_emitters(LxScene *s) {
     }
     /* lighting signature: any change restarts the fast-adapt phase of accumulation */
     uint64_t h = 1469598103934665603ull ^ (uint64_t)G.emitter_count, tint = 1469598103934665603ull;
+    bool dn = s->env.sky_mode == LX_SKY_DAY_NIGHT;
+    bool dn_sun_done = false;
     for (int i = 0; i < G.emitter_count; i++) {
         const Emitter *e = &G.emitters[i];
         float f[8] = {(float)e->kind, e->pos.x, e->pos.y, e->pos.z, e->dir.x, e->dir.y, e->dir.z, e->cos_cone};
+        if (dn && e->kind == LX_LIGHT_DIRECTIONAL && !dn_sun_done) {
+            /* the Day-night sun creeps across the sky: a small change, unless it jumped (the clock was set) */
+            dn_sun_done = true;
+            bool jumped = lx_dot3(e->dir, G.dn_dir_last) < 0.9995f;
+            G.dn_dir_last = e->dir;
+            if (!jumped) { tint = hash_floats(tint, f, 8); f[1] = f[2] = f[3] = f[4] = f[5] = f[6] = 0; }
+        }
         h = hash_floats(h, f, 8);
         float c[3] = {e->color.x, e->color.y, e->color.z};   /* a flickering or fading light: a small change */
         tint = hash_floats(tint, c, 3);
     }
+    LxEnvironment env_eff;
+    lx_env_effective(s, &env_eff);
+    const LxEnvironment *ev = &env_eff;
+    float env[7] = {ev->sky_zenith.x, ev->sky_zenith.y, ev->sky_zenith.z, ev->sky_horizon.x, ev->sky_horizon.y,
+                    ev->sky_horizon.z, ev->ambient_intensity};
+    if (dn) {   /* the sky's colour drifts with the clock: small changes, unless it changed a lot at once */
+        bool big = false;
+        for (int k = 0; k < 7; k++)
+            if (fabsf(env[k] - G.dn_env_last[k]) > 0.15f * fabsf(G.dn_env_last[k]) + 0.002f) big = true;
+        memcpy(G.dn_env_last, env, sizeof env);
+        if (!big) { tint = hash_floats(tint, env, 7); memset(env, 0, sizeof env); }
+    }
     G.soft_hash = (G.moving_hash ^ tint) * 1099511628211ull;
-    float env[7] = {s->env.sky_zenith.x, s->env.sky_zenith.y, s->env.sky_zenith.z, s->env.sky_horizon.x, s->env.sky_horizon.y,
-                    s->env.sky_horizon.z, s->env.ambient_intensity};
     G.light_hash = hash_floats(h, env, 7);
 
     /* sky: a horizontal emitting plane above the scene radiating downward, L = sky radiance */
-    LxVec3 sky = lx_scale3(lx_lerp3(s->env.sky_horizon, s->env.sky_zenith, 0.5f), s->env.ambient_intensity);
+    LxVec3 sky = lx_scale3(lx_lerp3(ev->sky_horizon, ev->sky_zenith, 0.5f), ev->ambient_intensity);
     if (luminance(sky) > 0) {
         Emitter e;
         memset(&e, 0, sizeof e);

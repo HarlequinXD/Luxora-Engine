@@ -1303,6 +1303,57 @@ static void test_fsm_action_library(void) {
     }
     sem_end();
 
+    /* the Day-night sky */
+    sem_begin(ONE("[action]\ntype = Set Time of Day\np0 = 15.5\np1 = 0\n"
+                  "[action]\ntype = Get Time of Day\np0 = $f\np1 = $b\np2 = $v\np3 = $i\n"));
+    lx_scene_environment(g_ss)->sky_mode = LX_SKY_DAY_NIGHT;
+    sem_run(2, DT);
+    CHECK(NEAR(sv("f"), 15.5f, 1e-4f) && sv("b") == 1 && svv("v").y > 0.2f && svv("v").x < 0 && lx_scene_environment(g_ss)->day_length == 0,
+          "Set Time of Day, then Get Time of Day: an afternoon sun in the west (%g)", sv("f"));
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Set Weather\np0 = 3\np1 = 0\n"));
+    lx_scene_environment(g_ss)->sky_mode = LX_SKY_DAY_NIGHT;
+    sem_run(2, DT);
+    CHECK(lx_sky_weather(g_ss) == LX_WEATHER_STORM && g_ss->sky.rain > 0.99f && lx_sky_wetness(g_ss) > 0.9f,
+          "Set Weather with no blend time: a storm at once");
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = Set Rain and Snow\np1 = 0.5\n[action]\ntype = Set Clouds\np0 = 0.9\np2 = 1\n"));
+    {
+        LxEnvironment *e = lx_scene_environment(g_ss);
+        e->sky_mode = LX_SKY_DAY_NIGHT;
+        e->rain = 0.3f;
+        sem_run(2, DT);
+        CHECK(NEAR(e->snow, 0.5f, 1e-5f) && NEAR(e->rain, 0.3f, 1e-5f) && NEAR(e->cloud_coverage, 0.9f, 1e-5f) &&
+              e->cloud_type == LX_CLOUDS_STRATUS && e->weather == LX_WEATHER_CUSTOM, "Set Rain and Snow / Set Clouds change only what's given");
+    }
+    sem_end();
+
+    sem_begin(ONE("[action]\ntype = At Time of Day\np0 = 20\np1 = YES\n"));
+    {
+        LxEnvironment *e = lx_scene_environment(g_ss);
+        e->sky_mode = LX_SKY_DAY_NIGHT;
+        e->day_length = 1;   /* an hour every 2.5 seconds */
+        lx_sky_set_time(g_ss, 19.9f);
+        sem_run(5, DT);
+        CHECK(!strcmp(sst(), "A"), "At Time of Day waits for the hour");
+        sem_run(60, DT);
+        CHECK(!strcmp(sst(), "Yes"), "At Time of Day fires when the clock passes 20:00 (%s, %.2f)", sst(), e->time_of_day);
+    }
+    sem_end();
+
+    sem_begin("[event]\nname = SUNSET\n[state]\nname = A\ntransition = SUNSET > Yes\n[state]\nname = Yes\n");
+    {
+        LxEnvironment *e = lx_scene_environment(g_ss);
+        e->sky_mode = LX_SKY_DAY_NIGHT;
+        e->day_length = 1;
+        lx_sky_set_time(g_ss, 19.0f);
+        sem_run(300, DT);
+        CHECK(!strcmp(sst(), "Yes"), "the sky sends SUNSET to state graphs (%s at %.2f)", sst(), e->time_of_day);
+    }
+    sem_end();
+
     sem_begin(ONE("[action]\ntype = Get Screen Info\np0 = $i\np1 = $i2\np2 = $f\n"));
     in_step();
     in_step();

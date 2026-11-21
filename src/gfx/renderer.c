@@ -32,7 +32,7 @@ typedef struct GpuImage {
     VkImage img;
     VkDeviceMemory mem;
     VkImageView view;      /* full view (array/3D as appropriate) */
-    VkImageView layer_views[MAX_CASCADES];
+    VkImageView layer_views[MAX_CASCADES + 1];   /* cascades, then the precipitation map */
     VkFormat fmt;
     uint32_t w, h, d, layers, mips;
 } GpuImage;
@@ -93,6 +93,10 @@ typedef struct SceneUBO {
     float bvol_rows[LX_MAX_BAKE_VOLUMES][3][4];   /* Baked Lighting Volumes: world -> 0..1 box (3 rows of an affine map) */
     float bvol_info[LX_MAX_BAKE_VOLUMES][4];      /* z offset, nx, ny, nz (texels) */
     float bvol_params[4];                         /* volumes in use, one layer's depth, the sun's shadowmask channel (-1 none) */
+    /* Day-night sky and weather (see scene_common.glsl) */
+    float sky_params[4], sky_sun[4], sky_moon[4], sky_misc[4], sky_pole[4];
+    float cloud_a[4], cloud_b[4], cloud_c[4], weather_a[4], weather_b[4], bolt[4], bolt_b[4];
+    LxMat4 precip_vp;
 } SceneUBO;
 _Static_assert(sizeof(SceneUBO) <= 4096, "SceneUBO must fit its 4 KB slot");
 
@@ -162,7 +166,7 @@ static struct {
     VkSampler linear_repeat, linear_clamp, shadow_sampler, point_clamp, cube_sampler;
     VkFormat gnormal_format, gspec_format;
     /* pipelines */
-    VkPipeline pbr, shadow, sky, grid, outline, tonemap_ldr, tonemap_swap, ui;
+    VkPipeline pbr, shadow, sky, grid, outline, tonemap_ldr, tonemap_swap, ui, precip;
     VkPipeline pbr_mrt, sky_mrt, pbr_probe, probe_filter, ssr_trace, ssr_composite;
     /* reflection probes */
     ProbeSlot probes[PROBE_SLOTS];
@@ -209,7 +213,7 @@ static struct {
     /* settings & stats */
     LxGraphicsSettings settings;
     LxRenderStats stats;
-    DrawList main_list, shadow_lists[MAX_CASCADES];
+    DrawList main_list, shadow_lists[MAX_CASCADES], precip_list;
     char screenshot_path[LX_PATH_MAX];
     int validation_errors;
     double start_time;
@@ -368,7 +372,7 @@ static bool image_create(GpuImage *im, const ImageDesc *d) {
     vi.subresourceRange.layerCount = ci.arrayLayers;
     vkCreateImageView(R.device, &vi, NULL, &im->view);
     if (d->layer_views) {
-        for (uint32_t l = 0; l < ci.arrayLayers && l < MAX_CASCADES; l++) {
+        for (uint32_t l = 0; l < ci.arrayLayers && l < MAX_CASCADES + 1; l++) {
             vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
             vi.subresourceRange.baseArrayLayer = l;
             vi.subresourceRange.layerCount = 1;
@@ -382,7 +386,7 @@ static bool image_create(GpuImage *im, const ImageDesc *d) {
 
 static void image_destroy(GpuImage *im) {
     if (!im->img) return;
-    for (int l = 0; l < MAX_CASCADES; l++)
+    for (int l = 0; l < MAX_CASCADES + 1; l++)
         if (im->layer_views[l]) vkDestroyImageView(R.device, im->layer_views[l], NULL);
     vkDestroyImageView(R.device, im->view, NULL);
     vkDestroyImage(R.device, im->img, NULL);
@@ -893,15 +897,16 @@ static bool create_swapchain(void) {
 }
 
 /* ------------------------------------------------------------------ resources */
+/* one layer per cascade, and one more: the precipitation map (the area around the camera seen from straight above) */
 static void create_shadow_map(int res, int layers) {
     image_destroy(&R.shadow_map);
-    ImageDesc d = {(uint32_t)res, (uint32_t)res, 1, (uint32_t)layers, 1, R.depth_format,
+    ImageDesc d = {(uint32_t)res, (uint32_t)res, 1, (uint32_t)layers + 1, 1, R.depth_format,
                    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_DEPTH_BIT,
                    VK_IMAGE_VIEW_TYPE_2D_ARRAY, true};
     image_create(&R.shadow_map, &d);
     VkCommandBuffer cmd = one_shot_begin();
     image_barrier(cmd, R.shadow_map.img, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, 0, 1, (uint32_t)layers);
+                  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, 0, 1, (uint32_t)layers + 1);
     one_shot_end(cmd);
     R.shadow_res = res;
     R.shadow_layers = layers;
@@ -1553,6 +1558,7 @@ void lx_renderer_lightmap_trace(LxLightmapBake *b, int first, int count, uint32_
     pc.counts[0] = vox ? first - b->texel_count : first; pc.counts[1] = count; pc.counts[2] = b->light_count; pc.counts[3] = b->bounces;
     pc.sample[0] = sample;
     pc.sample[1] = vox ? 1u : 0u;
+    pc.sample[2] = b->sky_separate ? 1u : 0u;
     VkCommandBuffer cmd = one_shot_begin();
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, R.lm_pipe);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, R.lm_pl, 0, 1, &R.lm_set, 0, NULL);
@@ -2007,13 +2013,21 @@ static void create_static_resources(void) {
     R.shadow = pipeline_create(&p);
 
     memset(&p, 0, sizeof p);
-    p.vs = lx_spv_fullscreen_vert; p.vs_size = sizeof lx_spv_fullscreen_vert;
+    p.vs = lx_spv_sky_vert; p.vs_size = sizeof lx_spv_sky_vert;   /* at the far plane: only where no geometry is */
     p.fs = lx_spv_sky_frag; p.fs_size = sizeof lx_spv_sky_frag;
     p.layout = R.scene_only_layout; p.color = R.hdr_format; p.depth = R.depth_format;
+    p.depth_test = true; p.compare = VK_COMPARE_OP_LESS_OR_EQUAL;
     R.sky = pipeline_create(&p);
     p.fs = lx_spv_sky_mrt_frag; p.fs_size = sizeof lx_spv_sky_mrt_frag;
     p.color_count = 3;   /* writes "no reflection" into the SSR targets */
     R.sky_mrt = pipeline_create(&p);
+
+    memset(&p, 0, sizeof p);
+    p.vs = lx_spv_precip_vert; p.vs_size = sizeof lx_spv_precip_vert;   /* rain and snow */
+    p.fs = lx_spv_precip_frag; p.fs_size = sizeof lx_spv_precip_frag;
+    p.layout = R.scene_only_layout; p.color = R.hdr_format; p.depth = R.depth_format;
+    p.depth_test = true; p.blend = true; p.compare = VK_COMPARE_OP_LESS_OR_EQUAL;
+    R.precip = pipeline_create(&p);
 
     memset(&p, 0, sizeof p);
     p.vs = lx_spv_grid_vert; p.vs_size = sizeof lx_spv_grid_vert;
@@ -2145,7 +2159,7 @@ void lx_renderer_shutdown(void) {
     image_destroy(&R.flat_normal);
     probes_destroy();
     image_destroy(&R.dummy_cube);
-    VkPipeline pipes[] = {R.pbr, R.shadow, R.sky, R.grid, R.outline, R.tonemap_ldr, R.tonemap_swap, R.ui,
+    VkPipeline pipes[] = {R.pbr, R.shadow, R.sky, R.grid, R.outline, R.tonemap_ldr, R.tonemap_swap, R.ui, R.precip,
                           R.pbr_mrt, R.sky_mrt, R.pbr_probe, R.probe_filter, R.ssr_trace, R.ssr_composite};
     for (size_t i = 0; i < sizeof pipes / sizeof pipes[0]; i++) if (pipes[i]) vkDestroyPipeline(R.device, pipes[i], NULL);
     VkPipelineLayout layouts[] = {R.pbr_layout, R.shadow_layout, R.scene_only_layout, R.outline_layout, R.tonemap_layout, R.ui_layout,
@@ -2166,6 +2180,7 @@ void lx_renderer_shutdown(void) {
     for (int i = 0; i < LOCAL_SHADOW_LIGHTS; i++) { lx_free(R.local_lists[i].batches); lx_free(R.local_lists[i].inst); lx_free(R.local_lists[i].item_batch); }
     for (int i = 0; i < MAX_CASCADES; i++) { lx_free(R.shadow_lists[i].batches); lx_free(R.shadow_lists[i].inst); lx_free(R.shadow_lists[i].item_batch); }
     lx_free(R.main_list.batches); lx_free(R.main_list.inst); lx_free(R.main_list.item_batch);
+    lx_free(R.precip_list.batches); lx_free(R.precip_list.inst); lx_free(R.precip_list.item_batch);
     lx_free(R.probe_list.batches); lx_free(R.probe_list.inst); lx_free(R.probe_list.item_batch);
     lx_gi_shutdown();
     memset(&R, 0, sizeof R);
@@ -2858,15 +2873,27 @@ static bool entity_hidden(LxScene *s, const LxEntityData *d) {
  * Probes only re-capture when this changes, so a static scene costs nothing after the first capture. */
 static uint64_t scene_look_hash(LxScene *s) {
     uint64_t h = 1469598103934665603ull;
-    const LxEnvironment *e = &s->env;
+    LxEnvironment eff;
+    lx_env_effective(s, &eff);
+    const LxEnvironment *e = &eff;
+    bool dn = s->env.sky_mode == LX_SKY_DAY_NIGHT;
     float env[14] = {e->sky_zenith.x, e->sky_zenith.y, e->sky_zenith.z, e->sky_horizon.x, e->sky_horizon.y, e->sky_horizon.z,
                      e->ground_color.x, e->ground_color.y, e->ground_color.z, e->ambient_intensity, e->exposure, e->fog_density,
                      e->fog_color.x, e->fog_color.y};
+    if (dn) for (int i = 0; i < 14; i++) env[i] = roundf(logf(1e-4f + fabsf(env[i])) * 25.0f);   /* a moving sky: only clear changes count */
     h = fnv(h, env, sizeof env);
     for (int i = 1; i < s->count; i++) {
         LxEntityData *d = &s->entities[i];
         if (!d->alive || !d->active || !(d->comps & (LX_COMP_MESH | LX_COMP_LIGHT)) || entity_hidden(s, d)) continue;
         h = fnv(h, &i, sizeof i);
+        if (dn && (d->comps & LX_COMP_LIGHT) && d->light.type == LX_LIGHT_DIRECTIONAL) {
+            /* the Day-night sun moves all the time: re-capture once it has moved a couple of degrees or changed colour */
+            LxVec3 f = lx_norm3(lx_mat4_dir(d->world, lx_v3(0, 0, 1)));
+            float q[7] = {roundf(f.x * 30), roundf(f.y * 30), roundf(f.z * 30), roundf(logf(1e-3f + d->light.intensity) * 20),
+                          roundf(d->light.color.x * 20), roundf(d->light.color.y * 20), roundf(d->light.color.z * 20)};
+            h = fnv(h, q, sizeof q);
+            continue;
+        }
         h = fnv(h, d->world.m, 64);
         if (d->comps & LX_COMP_MESH) {
             const LxMesh *mesh = entity_mesh(d);
@@ -3152,6 +3179,40 @@ static void probes_update(LxScene *s, VkCommandBuffer cmd, FrameData *fr, const 
     R.probe_rr = (R.probe_rr + 1) % PROBE_SLOTS;
 }
 
+/* the Day-night sky, clouds and weather for the shaders (zeros: the Gradient sky) */
+static void sky_fill_ubo(LxScene *s, const LxGraphicsSettings *gs, const LxRenderView *view, SceneUBO *u) {
+    const LxEnvironment *e = &s->env;
+    if (e->sky_mode != LX_SKY_DAY_NIGHT) return;
+    const LxSkyEval *v = lx_sky_eval(s);
+    float ph = e->moon_phase - floorf(e->moon_phase);
+    float lit = 0.5f - 0.5f * cosf(2.0f * LX_PI * ph);
+    u->sky_params[0] = 1.0f; u->sky_params[1] = lx_maxf(0.0f, e->sun_intensity); u->sky_params[2] = v->haze; u->sky_params[3] = e->star_intensity;
+    u->sky_sun[0] = v->sun_dir.x; u->sky_sun[1] = v->sun_dir.y; u->sky_sun[2] = v->sun_dir.z;
+    u->sky_sun[3] = lx_clampf(view->eye.y, 0.0f, 50000.0f) + 60.0f;
+    u->sky_moon[0] = v->moon_dir.x; u->sky_moon[1] = v->moon_dir.y; u->sky_moon[2] = v->moon_dir.z;
+    u->sky_moon[3] = lx_maxf(0.0f, e->moon_intensity) * lit;
+    u->sky_misc[0] = ph; u->sky_misc[1] = v->night; u->sky_misc[2] = v->flash;
+    u->sky_misc[3] = (e->time_of_day - 12.0f) * 15.0f * LX_DEG2RAD;   /* the stars turn once a day */
+    {   /* the celestial pole: due north, as high as the latitude */
+        float la = lx_clampf(e->latitude, -89.9f, 89.9f) * LX_DEG2RAD, hd = e->sun_heading * LX_DEG2RAD;
+        float x = 0.0f, z = -cosf(la), y = sinf(la);   /* north is -Z before the heading turns it */
+        u->sky_pole[0] = x * cosf(hd) - z * sinf(hd); u->sky_pole[1] = y; u->sky_pole[2] = x * sinf(hd) + z * cosf(hd);
+    }
+    /* clouds: steps by quality (ultra 48 .. low 10) */
+    static const int STEPS[4] = {10, 18, 28, 44}, LSTEPS[4] = {2, 3, 4, 6};
+    int q = gs->quality_preset < 0 ? 0 : gs->quality_preset > 3 ? 3 : gs->quality_preset;
+    u->cloud_a[0] = v->coverage; u->cloud_a[1] = v->density; u->cloud_a[2] = v->ctype;
+    u->cloud_a[3] = v->coverage > 0.001f ? (float)STEPS[q] : 0.0f;
+    u->cloud_b[0] = lx_maxf(e->cloud_height, 50.0f); u->cloud_b[1] = lx_maxf(e->cloud_thickness, 50.0f);
+    u->cloud_b[2] = v->wind_offset[0]; u->cloud_b[3] = v->wind_offset[1];
+    u->cloud_c[0] = (float)LSTEPS[q]; u->cloud_c[1] = v->cloud_shade;
+    u->weather_a[0] = v->rain; u->weather_a[1] = v->snow; u->weather_a[2] = v->wetness; u->weather_a[3] = v->snow_cover;
+    float wa = v->wind_dir * LX_DEG2RAD;
+    u->weather_b[0] = cosf(wa) * v->wind_speed; u->weather_b[1] = sinf(wa) * v->wind_speed; u->weather_b[2] = v->mist;
+    u->bolt[0] = v->bolt_dir.x; u->bolt[1] = v->bolt_dir.y; u->bolt[2] = v->bolt_dir.z; u->bolt[3] = v->bolt_age;
+    u->bolt_b[0] = v->bolt_seed; u->bolt_b[1] = s->sky.bolt_dist;
+}
+
 void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *target) {
     if (s) lx_scene_update_skins(s);   /* skinned meshes follow their bones */
     if (!R.frame_active || !s) return;
@@ -3185,6 +3246,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
         if (local_shadow_size(gs->shadow_resolution) != R.local_shadow_res) create_local_shadow(local_shadow_size(gs->shadow_resolution));
         write_scene_sets();
     }
+    if (!R.preview) lx_sky_prepare(s);   /* Day-night: places the sun light before anything reads it */
     lx_scene_update_transforms(s);
     if (!R.preview) lightmaps_sync(s, fr);
 
@@ -3249,7 +3311,10 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     ubo.camera_pos[3] = (float)(lx_time() - R.start_time);
     ubo.sun_dir[0] = sun_dir.x; ubo.sun_dir[1] = sun_dir.y; ubo.sun_dir[2] = sun_dir.z;
     ubo.sun_dir[3] = (sun_shadows && ubo.sun_color[3] > 0.5f) ? 1.0f : 0.0f;
-    const LxEnvironment *env = &s->env;
+    LxEnvironment env_eff;
+    lx_env_effective(s, &env_eff);
+    const LxEnvironment *env = &env_eff;
+    sky_fill_ubo(s, gs, view, &ubo);
     ubo.sky_zenith[0] = env->sky_zenith.x; ubo.sky_zenith[1] = env->sky_zenith.y; ubo.sky_zenith[2] = env->sky_zenith.z;
     ubo.sky_zenith[3] = env->ambient_intensity;
     ubo.sky_horizon[0] = env->sky_horizon.x; ubo.sky_horizon[1] = env->sky_horizon.y; ubo.sky_horizon[2] = env->sky_horizon.z;
@@ -3272,6 +3337,27 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     if (!gi_on || !R.gi_gpu) for (int l = 0; l < LX_GI_CASCADES; l++) ubo.gi_casc[l][3] = 0;
     ubo.gi_casc_res[0] = R.gc_res;
     ubo.counts[0] = nl; ubo.counts[1] = cascades; ubo.counts[2] = R.shadow_res;
+    /* rain and snow: how many drops and flakes, and the map that keeps them (and wetness, and snow) off what has a roof */
+    int precip_drops = 0, precip_flakes = 0;
+    bool precip_map = false;
+    LxMat4 precip_vp = lx_mat4_identity();
+    if (!R.preview && ubo.sky_params[0] > 0.5f) {
+        static const float SCALE[4] = {0.35f, 0.6f, 1.0f, 1.4f};
+        float q = SCALE[gs->quality_preset < 0 ? 0 : gs->quality_preset > 3 ? 3 : gs->quality_preset];
+        if (ubo.weather_a[0] > 0.003f) precip_drops = (int)((1500.0f + 9000.0f * ubo.weather_a[0]) * q);
+        if (ubo.weather_a[1] > 0.003f) precip_flakes = (int)((1200.0f + 7000.0f * ubo.weather_a[1]) * q);
+        precip_map = precip_drops || precip_flakes || ubo.weather_a[2] > 0.002f || ubo.weather_a[3] > 0.002f;
+        if (precip_map) {   /* 80 m around the eye, looking straight down, snapped so it doesn't swim */
+            const float HALF = 40.0f, SNAP = 2.0f;
+            LxVec3 c = lx_v3(floorf(view->eye.x / SNAP) * SNAP, view->eye.y, floorf(view->eye.z / SNAP) * SNAP);
+            LxVec3 top = lx_v3(c.x, c.y + 150.0f, c.z);
+            precip_vp = lx_mat4_mul(lx_mat4_ortho(-HALF, HALF, -HALF, HALF, 0.1f, 400.0f), lx_mat4_look_at(top, c, lx_v3(0, 0, -1)));
+        }
+    }
+    ubo.precip_vp = precip_vp;
+    ubo.counts[3] = R.shadow_layers;
+    ubo.weather_b[3] = precip_map ? 1.0f : 0.0f;
+    ubo.cloud_c[2] = (float)precip_drops; ubo.cloud_c[3] = (float)precip_flakes;
     /* point and spot shadows: the shadow-casting lights nearest the camera whose reach is in view get atlas tiles */
     int local_n = 0, local_light[LOCAL_SHADOW_LIGHTS];
     LxMat4 local_vp[LOCAL_SHADOW_LIGHTS][6];
@@ -3347,6 +3433,8 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     LxFrustum cfr[MAX_CASCADES];
     for (int c = 0; c < cascades; c++) { cfr[c] = lx_frustum_from_matrix(cvp[c]); dl_reset(&R.shadow_lists[c]); }
     dl_reset(&R.main_list);
+    dl_reset(&R.precip_list);
+    LxFrustum pfr = lx_frustum_from_matrix(precip_vp);
     for (int k = 0; k < local_n; k++) dl_reset(&R.local_lists[k]);
     float proj_scale = view->proj.m[5] * 0.5f; /* screen-height fraction per unit at distance 1 */
     LxVec4 white = lx_v4(1, 1, 1, 1);
@@ -3371,6 +3459,8 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
                 LxMesh *dm = lm[3] >= 0 ? lx_mesh_lightmap_variant(mesh, lx_mat4_scale_of(&d->world)) : mesh;   /* stretched: its own unwrap */
                 dl_add_lm(&R.main_list, dm, pick_lod(dm, radius * proj_scale / dist), mat, d->world.m, white, lm);
             } else R.stats.instances_culled++;
+            if (precip_map && lx_frustum_test_sphere(&pfr, c, radius))   /* roofs: everything solid counts */
+                dl_add(&R.precip_list, mesh, mesh->lod_count > 1 ? 1 : 0, mat, d->world.m, white);
             if (d->mesh.cast_shadows) {
                 for (int k = 0; k < cascades; k++)
                     if (lx_frustum_test_sphere(&cfr[k], c, radius))
@@ -3413,12 +3503,14 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     bool ok = dl_upload(&R.main_list, fr);
     for (int c = 0; c < cascades; c++) ok = dl_upload(&R.shadow_lists[c], fr) && ok;
     for (int k = 0; k < local_n; k++) ok = dl_upload(&R.local_lists[k], fr) && ok;
+    if (precip_map) ok = dl_upload(&R.precip_list, fr) && ok;
     R.stats.cull_ms = (float)((lx_time() - t_cull) * 1000.0);
     if (!ok) {
         /* instance stream full: draw nothing extra this frame, buffer grows next frame */
         dl_reset(&R.main_list);
         for (int c = 0; c < cascades; c++) dl_reset(&R.shadow_lists[c]);
         for (int k = 0; k < local_n; k++) dl_reset(&R.local_lists[k]);
+        dl_reset(&R.precip_list);
     }
 
     /* ---- shadow pass ---- */
@@ -3453,6 +3545,37 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                       VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, 0, 1,
                       (uint32_t)R.shadow_layers);
+    }
+
+    /* ---- the precipitation map: the shadow map's last layer, from straight above ---- */
+    if (precip_map) {
+        uint32_t layer = (uint32_t)R.shadow_layers;
+        image_barrier_layers(cmd, R.shadow_map.img, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                             VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT, 0, 1, layer, 1);
+        VkRenderingAttachmentInfo da = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+        da.imageView = R.shadow_map.layer_views[layer];
+        da.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        da.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        da.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        da.clearValue.depthStencil.depth = 1.0f;
+        VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO};
+        ri.renderArea.extent.width = (uint32_t)R.shadow_res;
+        ri.renderArea.extent.height = (uint32_t)R.shadow_res;
+        ri.layerCount = 1;
+        ri.pDepthAttachment = &da;
+        vkCmdBeginRendering(cmd, &ri);
+        VkViewport vp = {0, 0, (float)R.shadow_res, (float)R.shadow_res, 0, 1};
+        VkRect2D sc = {{0, 0}, {(uint32_t)R.shadow_res, (uint32_t)R.shadow_res}};
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        vkCmdSetScissor(cmd, 0, 1, &sc);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.shadow);
+        vkCmdPushConstants(cmd, R.shadow_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 64, precip_vp.m);
+        draw_batches(cmd, &R.precip_list, fr->inst.buf, false, VK_NULL_HANDLE, 0);
+        vkCmdEndRendering(cmd);
+        image_barrier_layers(cmd, R.shadow_map.img, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                             VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, 0, 1, layer, 1);
     }
 
     /* ---- point / spot light shadows: one pass over the atlas, a viewport per tile ---- */
@@ -3500,7 +3623,8 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
 
     /* ---- main HDR pass ---- */
     bool ssr = gs->ssr_enabled && view->proj.m[15] < 0.5f;              /* perspective views only */
-    bool post = ssr || view->highlight || view->draw_grid;
+    bool precip = precip_drops + precip_flakes > 0;
+    bool post = ssr || view->highlight || view->draw_grid || precip;
     if (ssr) {
         GpuImage *g[2] = {&rt->gnormal, &rt->gspec};
         for (int i = 0; i < 2; i++)
@@ -3552,12 +3676,13 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     VkRect2D sc = {{0, 0}, {(uint32_t)rt->iw, (uint32_t)rt->ih}};
     vkCmdSetViewport(cmd, 0, 1, &vp);
     vkCmdSetScissor(cmd, 0, 1, &sc);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ssr ? R.sky_mrt : R.sky);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.scene_only_layout, 0, 1, &fr->scene_set, 1, &ubo_off);
-    vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ssr ? R.pbr_mrt : R.pbr);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.pbr_layout, 2, 1, &R.probe_set, 0, NULL);
     draw_batches(cmd, &R.main_list, fr->inst.buf, true, fr->scene_set, ubo_off);
+    /* the sky last, at the far plane: its pixels are the ones nothing covered */
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ssr ? R.sky_mrt : R.sky);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.scene_only_layout, 0, 1, &fr->scene_set, 1, &ubo_off);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdEndRendering(cmd);
 
     if (post) {
@@ -3635,6 +3760,11 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.ssr_pipe_layout, 0, 3, csets, 1, &ubo_off);
             vkCmdPushConstants(cmd, R.ssr_pipe_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, ssr_pc);
             vkCmdDraw(cmd, 3, 1, 0, 0);
+        }
+        if (precip) {   /* rain and snow, depth-tested against the scene, blended over it */
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.precip);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.scene_only_layout, 0, 1, &fr->scene_set, 1, &ubo_off);
+            vkCmdDraw(cmd, 6, (uint32_t)(precip_drops + precip_flakes), 0, 0);
         }
         if (view->highlight) {
             LxEntityData *d = lx_entity_data(s, view->highlight);

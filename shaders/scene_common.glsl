@@ -26,7 +26,7 @@ layout(set = 0, binding = 0, std140) uniform SceneUBO {
     vec4 gi_origin;       // w = GI enabled
     vec4 gi_cell;         // xyz cell size
     vec4 gi_res;          // xyz resolution
-    ivec4 counts;         // x lights, y cascades, z shadow map size
+    ivec4 counts;         // x lights, y cascades, z shadow map size, w the precipitation map's layer in u_shadow
     vec4 probe_pos[LX_PROBE_SLOTS];  // xyz capture point, w intensity (0 = slot not in use)
     vec4 probe_min[LX_PROBE_SLOTS];  // xyz influence box min, w blend distance
     vec4 probe_max[LX_PROBE_SLOTS];  // xyz influence box max, w 1 = box projection
@@ -38,6 +38,20 @@ layout(set = 0, binding = 0, std140) uniform SceneUBO {
     vec4 bvol_rows[24];   // Baked Lighting Volumes: per volume 3 rows mapping world -> 0..1 inside its box
     vec4 bvol_info[8];    // per volume: z offset, nx, ny, nz (voxels)
     vec4 bvol_params;     // x volumes in use, y one layer's depth, z the sun's shadowmask channel (-1 none)
+    // Day-night sky and weather (src/scene/sky.c)
+    vec4 sky_params;      // x 1 = Day-night sky, y sunlight above the air, z haze, w stars
+    vec4 sky_sun;         // xyz towards the sun, w the eye's height in the air (m)
+    vec4 sky_moon;        // xyz towards the moon, w moonlight above the air (its phase included)
+    vec4 sky_misc;        // x moon phase 0..1, y night 0..1, z lightning flash, w sidereal angle (radians, the stars turn)
+    vec4 sky_pole;        // xyz the celestial pole (the stars turn around it)
+    vec4 cloud_a;         // x coverage, y density, z type (0 cumulus, 1 stratus, 2 storm), w march steps (0 = no clouds)
+    vec4 cloud_b;         // x base height, y thickness, zw wind drift (m)
+    vec4 cloud_c;         // x light steps, y average shade (0..1), zw -
+    vec4 weather_a;       // x rain, y snow, z wetness, w snow cover
+    vec4 weather_b;       // xy wind (m/s, world x z), z mist, w 1 = the precipitation map is drawn
+    vec4 bolt;            // xyz towards the last lightning bolt, w seconds since it struck
+    vec4 bolt_b;          // x its shape seed, y distance (m)
+    mat4 precip_vp;       // looking straight down on the area around the eye: what keeps rain and snow off
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2DArrayShadow u_shadow;
@@ -91,4 +105,139 @@ vec3 lx_sky_glossy(vec3 r, float rough) {
         sum += lx_sky_radiance(normalize(r + (t * cos(ang) + b * sin(ang)) * rad));
     }
     return sum / float(N + 1);
+}
+
+
+/* ======================================================================================
+ *  Day-night sky: the same atmosphere as src/scene/sky.c (keep them in step)
+ * ====================================================================================== */
+const float LX_RG = 6360e3, LX_RT = 6460e3, LX_HR = 8000.0, LX_HM = 1200.0, LX_MIE_S = 3.996e-6, LX_MIE_G = 0.8;
+const float LX_MS_BOOST = 0.35, LX_SKY_GAIN = 1.8, LX_SPI = 3.14159265;
+const vec3 LX_BR = vec3(5.802e-6, 13.558e-6, 33.1e-6);
+const vec3 LX_BO = vec3(0.650e-6, 1.881e-6, 0.085e-6) * 1.875;
+bool lx_day_night() { return u.sky_params.x > 0.5; }
+
+float lx_chapman(float X, float h, float mu) {
+    float c = sqrt(X + h);
+    if (mu >= 0.0) return c / (c * mu + 1.0) * exp(-h);
+    float x0 = sqrt(max(0.0, 1.0 - mu * mu)) * (X + h);
+    if (x0 < X) return 1e9;
+    return 2.0 * sqrt(x0) * exp(X - x0) - c / (1.0 - c * mu) * exp(-h);
+}
+vec3 lx_sun_trans(float h, float mu, float haze) {
+    float r = LX_HR * lx_chapman(LX_RG / LX_HR, h / LX_HR, mu), m = LX_HM * lx_chapman(LX_RG / LX_HM, h / LX_HM, mu);
+    return exp(-(LX_BR + LX_BO) * r - LX_MIE_S * haze * 1.11 * m);
+}
+/* light scattered towards the eye along d by the air, from one light (s: towards it, E: its strength);
+   trans: how much of what lies behind (the sun's disc, space) gets through */
+vec3 lx_atmosphere(vec3 d, vec3 s, float E, float haze, float height, int N, out vec3 trans) {
+    float r0 = LX_RG + max(height, 1.0);
+    float b = r0 * d.y;
+    float t_top = -b + sqrt(max(0.0, b * b - (r0 * r0 - LX_RT * LX_RT)));
+    float dg = b * b - (r0 * r0 - LX_RG * LX_RG);
+    bool ground = d.y < 0.0 && dg > 0.0;
+    float L = ground ? -b - sqrt(dg) : t_top;
+    float mu = dot(d, s);
+    float pr = 3.0 / (16.0 * LX_SPI) * (1.0 + mu * mu) + LX_MS_BOOST / (4.0 * LX_SPI);
+    float g2 = LX_MIE_G * LX_MIE_G;
+    float pm = 3.0 / (8.0 * LX_SPI) * (1.0 - g2) * (1.0 + mu * mu) / ((2.0 + g2) * pow(1.0 + g2 - 2.0 * LX_MIE_G * mu, 1.5)) + LX_MS_BOOST / (4.0 * LX_SPI);
+    float bms = LX_MIE_S * haze, bme = bms * 1.11;
+    float odr = 0.0, odm = 0.0;
+    vec3 S = vec3(0.0);
+    for (int i = 0; i < N; i++) {
+        float a0 = float(i) / float(N), a1 = float(i + 1) / float(N);
+        float t0 = L * a0 * a0, t1 = L * a1 * a1, dt = t1 - t0, t = 0.5 * (t0 + t1);
+        vec3 p = vec3(d.x * t, r0 + d.y * t, d.z * t);
+        float r = length(p), h = max(r - LX_RG, 0.0);
+        float mus = dot(p / r, s);
+        float rr = exp(-h / LX_HR), rm = exp(-h / LX_HM);
+        float cr = odr + rr * dt * 0.5, cm = odm + rm * dt * 0.5;
+        odr += rr * dt;
+        odm += rm * dt;
+        float sr = LX_HR * lx_chapman(LX_RG / LX_HR, h / LX_HR, mus), sm = LX_HM * lx_chapman(LX_RG / LX_HM, h / LX_HM, mus);
+        vec3 T = exp(-(LX_BR + LX_BO) * (cr + sr) - bme * (cm + sm));
+        S += T * (LX_BR * rr * pr + bms * rm * pm) * dt;
+    }
+    trans = exp(-(LX_BR + LX_BO) * odr - bme * odm);
+    return S * E * LX_SKY_GAIN;   /* trans: through the air to space, or to the ground when d points below the horizon */
+}
+
+/* ---- noise for clouds, stars and rain ---- */
+float lx_hash12(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+float lx_hash13(vec3 p3) { p3 = fract(p3 * 0.1031); p3 += dot(p3, p3.zyx + 31.32); return fract((p3.x + p3.y) * p3.z); }
+float lx_vnoise2(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(lx_hash12(i), lx_hash12(i + vec2(1, 0)), f.x), mix(lx_hash12(i + vec2(0, 1)), lx_hash12(i + vec2(1, 1)), f.x), f.y);
+}
+float lx_vnoise3(vec3 p) {
+    vec3 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = mix(mix(lx_hash13(i), lx_hash13(i + vec3(1, 0, 0)), f.x), mix(lx_hash13(i + vec3(0, 1, 0)), lx_hash13(i + vec3(1, 1, 0)), f.x), f.y);
+    float b = mix(mix(lx_hash13(i + vec3(0, 0, 1)), lx_hash13(i + vec3(1, 0, 1)), f.x), mix(lx_hash13(i + vec3(0, 1, 1)), lx_hash13(i + vec3(1, 1, 1)), f.x), f.y);
+    return mix(a, b, f.z);
+}
+/* gradient noise (smooth, round features; value noise on a grid looks blocky when seen at a slant), 0..1 */
+vec2 lx_grad2(vec2 i) { float a = lx_hash12(i) * 6.2831853; return vec2(cos(a), sin(a)); }
+float lx_gnoise2(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    vec2 w = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float a = dot(lx_grad2(i), f), b = dot(lx_grad2(i + vec2(1, 0)), f - vec2(1, 0));
+    float c = dot(lx_grad2(i + vec2(0, 1)), f - vec2(0, 1)), d = dot(lx_grad2(i + vec2(1, 1)), f - vec2(1, 1));
+    return mix(mix(a, b, w.x), mix(c, d, w.x), w.y) * 1.2 + 0.5;
+}
+/* each octave turned ~37 degrees from the last, so no grid lines up between them */
+float lx_fbm2(vec2 p) {
+    const mat2 ROT = mat2(0.8, 0.6, -0.6, 0.8) * 2.03;
+    float v = 0.0, a = 0.5;
+    for (int i = 0; i < 4; i++) { v += a * lx_gnoise2(p); p = ROT * p + vec2(17.1, 9.7); a *= 0.5; }
+    return v / 0.9375;
+}
+
+/* ---- clouds: a slab of air from base to base + thickness ---- */
+/* where clouds are, seen from above (0..1): the coverage map every cloud sample and the cloud shadows share */
+float lx_cloud_map(vec2 xz) {
+    float type = u.cloud_a.z;
+    float scale = mix(5200.0, 16000.0, clamp(type, 0.0, 1.0)) * mix(1.0, 1.6, clamp(type - 1.0, 0.0, 1.0));
+    vec2 p = (xz + u.cloud_b.zw) / scale;
+    p += (vec2(lx_gnoise2(p * 0.9 + 3.1), lx_gnoise2(p * 0.9 + 11.7)) - 0.5) * 0.25;   // a gentle warp: billows, not blobs
+    float n = lx_fbm2(p);   // mean 0.5, spread about 0.16
+    float cov = u.cloud_a.x;
+    float edge = mix(0.12, 0.3, clamp(type, 0.0, 1.0));
+    float thr = 0.5 + (0.5 - cov) * 0.52;   // so about `coverage` of the sky is cloud
+    return smoothstep(thr - edge * 0.5, thr + edge, n) * smoothstep(0.0, 0.05, cov);
+}
+/* the cloud's shape over its height, 0..1 through the slab */
+float lx_cloud_profile(float h, float type) {
+    float cumulus = smoothstep(0.0, 0.08, h) * smoothstep(1.0, 0.35, h);
+    float stratus = smoothstep(0.0, 0.1, h) * smoothstep(0.45, 0.2, h);
+    float storm = smoothstep(0.0, 0.05, h) * smoothstep(1.0, 0.85, h);
+    return type < 1.0 ? mix(cumulus, stratus, type) : mix(stratus, storm, type - 1.0);
+}
+float lx_cloud_density(vec3 p, float h, bool detail) {
+    float m = lx_cloud_map(p.xz);
+    if (m <= 0.001) return 0.0;
+    float type = u.cloud_a.z;
+    float prof = lx_cloud_profile(h, type);
+    /* cumulus: taller where the map is thicker (heaped tops) */
+    float heap = type < 1.0 ? smoothstep(0.0, 1.0, m * (1.2 - h * 0.6)) : m;
+    float d = prof * heap;
+    if (detail && d > 0.0) {
+        vec3 q = (p + vec3(u.cloud_b.z, 0.0, u.cloud_b.w) * 0.3) / 900.0;
+        const mat3 R3 = mat3(0.00, 0.80, 0.60, -0.80, 0.36, -0.48, -0.60, -0.48, 0.64);   // turns each octave off the grid
+        vec3 q2 = R3 * q * 2.7, q3 = R3 * q2 * 2.63;
+        float n = lx_vnoise3(q) * 0.62 + lx_vnoise3(q2) * 0.28 + lx_vnoise3(q3) * 0.10;
+        d = clamp(d - (1.0 - n) * mix(0.55, 0.25, clamp(type, 0.0, 1.0)) * (1.0 - h * 0.3), 0.0, 1.0);
+    }
+    return d * mix(0.4, 1.6, u.cloud_a.y);
+}
+/* sunlight that gets through the clouds to the ground at p (1 clear sky), against the average the sun light already carries */
+float lx_cloud_shadow(vec3 p, vec3 to_light) {
+    if (!lx_day_night() || u.cloud_a.x <= 0.001 || to_light.y < 0.02) return 1.0;
+    float mid = u.cloud_b.x + u.cloud_b.y * 0.3;
+    vec3 c = p + to_light * ((mid - p.y) / to_light.y);
+    float d = lx_cloud_map(c.xz) * lx_cloud_profile(0.3, u.cloud_a.z) * mix(0.4, 1.6, u.cloud_a.y);
+    float t = exp(-d * u.cloud_b.y * 0.0035);
+    float avg = max(1.0 - u.cloud_c.y, 0.03);
+    return clamp(t / avg, 0.0, 1.6);
 }

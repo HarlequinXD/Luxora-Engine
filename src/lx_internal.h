@@ -333,6 +333,47 @@ typedef struct LxEntityData {
     int16_t vol_index;        /* Baked Lighting Volume: its baked probes (vol<i>.lxlv), -1 = not baked */
 } LxEntityData;
 
+/* ---------- Day-night sky and weather (src/scene/sky.c) ---------- */
+typedef struct LxSkyEval {
+    bool day_night;                /* the scene uses the Day-night sky */
+    LxVec3 sun_dir, moon_dir;      /* towards them */
+    LxVec3 sun_light, moon_light;  /* light arriving at the ground (colour * intensity), clouds included */
+    LxVec3 zenith, horizon, ground;/* sky radiance overhead, at the horizon, from below: what the Gradient sky would be */
+    LxVec3 fog;
+    float ambient, fog_density, exposure_scale;
+    float night;                   /* 0 day .. 1 night (the sun well below the horizon) */
+    /* the weather as it is now (blending towards the scene's settings) */
+    float coverage, density, ctype, rain, snow, lightning, mist, haze, wind_speed, wind_dir;
+    float wetness, snow_cover;
+    float cloud_shade;             /* how much sunlight the clouds take on average (0..1) */
+    float wind_offset[2];          /* how far the clouds have drifted (m) */
+    float flash;                   /* lightning: brightness of the flash now */
+    LxVec3 bolt_dir;               /* towards the last bolt */
+    float bolt_seed, bolt_age;     /* its shape; seconds since it struck (big = none) */
+} LxSkyEval;
+typedef struct LxSkyLive {
+    bool started;                  /* the live weather has been set from the targets */
+    float coverage, density, ctype, rain, snow, lightning, mist, haze, wind_speed;
+    float wetness, snow_cover;
+    float wind_offset[2];
+    float flash_t, bolt_age, bolt_seed, bolt_dist;
+    LxVec3 bolt_dir;
+    float next_strike;             /* seconds until the next lightning */
+    float thunder_in;              /* seconds until its thunder (<0 none) */
+    float thunder_vol;
+    float last_hour;               /* for the SUNRISE / SUNSET ... events */
+    float last_sun_y;
+    uint32_t rng;
+    uint64_t eval_hash;
+    LxSkyEval eval;
+} LxSkyLive;
+void lx_sky_prepare(LxScene *s);                       /* before rendering: evaluates the sky, drives the sun light */
+void lx_sky_simulate(LxScene *s, float dt);            /* while playing: the clock, weather blending, lightning, events */
+const LxSkyEval *lx_sky_eval(LxScene *s);
+void lx_env_effective(LxScene *s, LxEnvironment *out); /* the environment with the Day-night sky's colours filled in */
+LxVec3 lx_sky_atmosphere(LxVec3 dir, LxVec3 to_sun, float sun_irr, float haze, float height, LxVec3 ground_albedo, LxVec3 *transmittance);
+LxSound *lx_sky_builtin_sound(const char *name);       /* "thunder" */
+
 struct LxScene {
     char name[LX_NAME_MAX];
     LxEntityData *entities; /* slot 0 reserved */
@@ -356,6 +397,7 @@ struct LxScene {
     int lightmap_count;
     int volume_count;                /* baked volumes in the same folder (vol0.lxlv ...) */
     uint32_t lightmap_version;       /* runtime: changes when lightmaps are baked or cleared */
+    LxSkyLive sky;                   /* runtime: the Day-night sky and weather as they are now */
 };
 
 /* gameplay (src/scene/gameplay.c) */
@@ -502,7 +544,7 @@ typedef struct LxLmLight {
 #define LX_MAX_BAKE_VOLUMES 8
 typedef struct LxLmVolume { int entity; int n[3]; int first; } LxLmVolume;
 typedef struct LxLmTile { int entity, atlas, x, y, size; } LxLmTile;
-#define LX_LM_ACC 12
+#define LX_LM_ACC 16
 typedef struct LxLightmapBake {
     LxBakeSettings set;
     int bounces;
@@ -511,13 +553,14 @@ typedef struct LxLightmapBake {
     int light_count, light_cap;
     LxVec3 sky_zenith, sky_horizon, ground;
     float ambient, eps;
+    bool sky_separate;        /* Day-night: texels keep how much sky they see (the shader lights it with the sky of the moment) */
     int atlas_size, atlas_count;
     LxLmTile *tiles;
     int tile_count;
     int texel_count;          /* atlas_count * atlas_size^2 */
     float *texels;            /* 12 per texel: position, valid; normal, texel size (m); face normal, 0 */
     int *owner;               /* tile of each texel, -1 = none */
-    float *accum;             /* LX_LM_ACC per texel: irradiance sum rgb, samples; direction sum xyz, back-face hits; open (AO), direct rgb (Baked lights straight on) */
+    float *accum;             /* LX_LM_ACC per texel: irradiance sum rgb, samples; direction sum xyz, back-face hits; open (AO), direct rgb (Baked lights straight on); sky seen (x pi), -, -, - */
     float *color, *dir;       /* resolved: RGBA per texel */
     /* Baked Lighting Volumes: 3D textures of light, traced after the texels (work items texel_count + voxel) */
     LxLmVolume *vols;

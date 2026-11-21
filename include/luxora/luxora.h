@@ -442,12 +442,50 @@ typedef struct LxCharacterController {
     LxVec3 velocity;        /* live: world velocity of the last move */
 } LxCharacterController;
 
+typedef enum LxSkyMode {
+    LX_SKY_GRADIENT,    /* the zenith / horizon / ground colours below */
+    LX_SKY_DAY_NIGHT    /* a physically based atmosphere, sun, moon, stars and clouds that follow the time of day */
+} LxSkyMode;
+typedef enum LxWeather {
+    LX_WEATHER_CLEAR, LX_WEATHER_CLOUDY, LX_WEATHER_RAIN, LX_WEATHER_STORM, LX_WEATHER_SNOW, LX_WEATHER_FOG,
+    LX_WEATHER_CUSTOM,  /* settings edited by hand */
+    LX_WEATHER_COUNT
+} LxWeather;
+typedef enum LxCloudType { LX_CLOUDS_CUMULUS, LX_CLOUDS_STRATUS, LX_CLOUDS_STORM } LxCloudType;
+
 typedef struct LxEnvironment {
-    LxVec3 sky_zenith, sky_horizon, ground_color;
+    LxVec3 sky_zenith, sky_horizon, ground_color;   /* Gradient sky; Day-night uses the ground as its albedo */
     float ambient_intensity;
     float exposure;
-    LxVec3 fog_color;
+    LxVec3 fog_color;                               /* Day-night: the sky's horizon colour instead */
     float fog_density;
+    /* ---- Day-night (sky_mode = LX_SKY_DAY_NIGHT). The scene's first directional light becomes the sun
+     * (the moon at night): its angle, colour and brightness follow the clock. ---- */
+    int sky_mode;           /* LxSkyMode */
+    float time_of_day;      /* hours, 0..24 (12 = noon) */
+    float day_length;       /* real minutes for a whole day while playing; 0 = the clock stands still */
+    float latitude;         /* degrees: how high the sun climbs and how long days are (-90..90) */
+    float day_of_year;      /* 1..365: the season */
+    float sun_heading;      /* degrees: turns the sun's path around the scene (0 = it rises along +X) */
+    float sun_intensity;    /* sunlight at noon */
+    float moon_intensity;   /* moonlight when the moon is full */
+    float moon_phase;       /* 0 new .. 0.5 full .. 1 */
+    float star_intensity;
+    float haze;             /* 1 crystal clear .. 10 thick haze */
+    /* clouds */
+    float cloud_coverage;   /* 0..1 of the sky */
+    float cloud_density;    /* 0..1: thin and bright .. thick and dark */
+    int cloud_type;         /* LxCloudType */
+    float cloud_height;     /* metres to the cloud base */
+    float cloud_thickness;  /* metres */
+    float wind_direction;   /* degrees, where the wind blows towards (0 = +X) */
+    float wind_speed;       /* m/s: clouds drift and rain slants */
+    /* weather: a preset sets the values below, which then change over weather_blend seconds */
+    int weather;            /* LxWeather */
+    float rain, snow;       /* 0..1 */
+    float lightning;        /* 0..1: how often lightning strikes */
+    float mist;             /* 0..1: weather fog on top of fog_density */
+    float weather_blend;    /* seconds the weather takes to change while playing */
 } LxEnvironment;
 
 typedef struct LxScene LxScene;
@@ -1435,6 +1473,20 @@ int lx_globals_load(const char *slot);
 void lx_date_time(int out[7]);                            /* year, month, day, hour, minute, second, weekday (0 = Sunday) */
 void lx_format_time(char *out, size_t cap, float seconds, int style);   /* 0 "m:ss", 1 "h:mm:ss", 2 "m:ss.cc" */
 void lx_day_night_apply(LxScene *s, LxEntity sun, float hour);           /* sun angle and colour, sky, ambient for 0..24 */
+
+/* Day-night sky and weather (Lighting panel: Sky Mode = Day-night). The clock runs while playing when the
+ * day length is above 0. State graphs receive SUNRISE, SUNSET, NOON, MIDNIGHT and LIGHTNING events. */
+void lx_sky_set_time(LxScene *s, float hour);              /* jumps the clock (0..24) */
+float lx_sky_time(const LxScene *s);
+bool lx_sky_is_day(const LxScene *s);                      /* the sun is above the horizon */
+LxVec3 lx_sky_sun_direction(const LxScene *s);             /* towards the sun */
+LxVec3 lx_sky_moon_direction(const LxScene *s);
+void lx_sky_set_weather(LxScene *s, LxWeather w, float blend_seconds);   /* applies a preset; < 0 = the scene's blend time */
+LxWeather lx_sky_weather(const LxScene *s);
+void lx_sky_weather_preset(LxWeather w, LxEnvironment *e); /* writes a preset's values into e */
+const char *lx_weather_name(LxWeather w);
+float lx_sky_wetness(const LxScene *s);                    /* 0..1: how wet the ground is now */
+void lx_sky_strike_lightning(LxScene *s);                  /* a flash and thunder now, somewhere in view */
 
 /* music (one track at a time, crossfaded) and scene changes behind a fade */
 void lx_music_play(LxScene *s, const char *clip, float volume, float fade_seconds);

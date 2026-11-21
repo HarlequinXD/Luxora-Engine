@@ -1187,6 +1187,154 @@ static LxLightmapBake *lm_bake_cpu(LxScene *s) {
     return b;
 }
 
+
+/* ---- Day-night sky and weather ---- */
+static LxEntity first_dir_light(LxScene *s) {
+    for (int i = 1; i < s->count; i++) {
+        LxEntityData *d = &s->entities[i];
+        if (d->alive && (d->comps & LX_COMP_LIGHT) && d->light.type == LX_LIGHT_DIRECTIONAL)
+            return lx_entity_make((uint32_t)i, d->generation & ((1u << (32 - LX_INDEX_BITS)) - 1u));
+    }
+    return 0;
+}
+static float sky_lum(LxVec3 c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; }
+static void test_sky(void) {
+    printf("day-night sky and weather\n");
+    LxScene *s = lx_scene_create_default("Sky");
+    LxEnvironment *e = lx_scene_environment(s);
+    CHECK(e->sky_mode == LX_SKY_GRADIENT && e->weather == LX_WEATHER_CLEAR, "new scenes keep the gradient sky");
+    LxEnvironment eff;
+    lx_env_effective(s, &eff);
+    CHECK(!memcmp(&eff.sky_zenith, &e->sky_zenith, sizeof eff.sky_zenith), "gradient: the effective sky is the scene's");
+    e->sky_mode = LX_SKY_DAY_NIGHT;
+    e->latitude = 35; e->day_of_year = 172; e->sun_heading = 0;
+
+    /* where the sun is: east in the morning, high at noon, gone at midnight; lower in winter */
+    lx_sky_set_time(s, 7);
+    LxVec3 morning = lx_sky_sun_direction(s);
+    CHECK(morning.x > 0.5f && morning.y > 0, "the morning sun is in the east, up (%.2f %.2f %.2f)", morning.x, morning.y, morning.z);
+    lx_sky_set_time(s, 12);
+    LxVec3 noon = lx_sky_sun_direction(s);
+    CHECK(noon.y > 0.95f && lx_sky_is_day(s), "midsummer noon at 35 degrees: nearly overhead (%.3f)", noon.y);
+    CHECK(noon.z > 0, "northern latitudes: the noon sun is to the south (+Z) (%.3f)", noon.z);
+    lx_sky_set_time(s, 0);
+    CHECK(lx_sky_sun_direction(s).y < -0.3f && !lx_sky_is_day(s), "midnight: the sun is below the horizon");
+    e->day_of_year = 355;
+    lx_sky_set_time(s, 12);
+    CHECK(lx_sky_sun_direction(s).y < noon.y - 0.2f, "midwinter noon is lower (%.2f)", lx_sky_sun_direction(s).y);
+    e->day_of_year = 172;
+    lx_sky_set_time(s, 17);
+    CHECK(lx_sky_sun_direction(s).x < -0.5f, "the afternoon sun is in the west");
+
+    /* the light: bright white at noon, dimmer and redder low in the sky, the moon at night */
+    lx_sky_set_time(s, 12);
+    lx_sky_prepare(s);
+    const LxSkyEval *v = lx_sky_eval(s);
+    LxVec3 noon_light = v->sun_light, noon_zen = v->zenith;
+    CHECK(sky_lum(noon_light) > 2.0f && noon_light.z / noon_light.x > 0.7f, "noon sunlight is bright and white (%.2f %.2f %.2f)",
+          noon_light.x, noon_light.y, noon_light.z);
+    CHECK(noon_zen.z > noon_zen.x * 1.5f, "the noon sky is blue (%.3f %.3f %.3f)", noon_zen.x, noon_zen.y, noon_zen.z);
+    LxEntity sun = first_dir_light(s);
+    lx_scene_update_transforms(s);
+    LxVec3 fwd = lx_norm3(lx_mat4_dir(lx_entity_data(s, sun)->world, lx_v3(0, 0, 1)));
+    CHECK(lx_dot3(fwd, lx_neg3(v->sun_dir)) > 0.999f, "the directional light shines from the sun");
+    CHECK(lx_get_light(s, sun)->mode == LX_LIGHT_REALTIME, "a moving sun is real-time");
+    lx_sky_set_time(s, 18.9f);
+    lx_sky_prepare(s);
+    LxVec3 low = v->sun_light;
+    CHECK(sky_lum(low) < sky_lum(noon_light) * 0.8f && low.x / lx_maxf(low.z, 1e-4f) > noon_light.x / noon_light.z * 1.5f,
+          "near sunset the light is dimmer and redder (%.2f %.2f %.2f)", low.x, low.y, low.z);
+    lx_sky_set_time(s, 0.5f);
+    e->moon_phase = 0.5f;
+    lx_sky_prepare(s);
+    CHECK(sky_lum(v->zenith) < sky_lum(noon_zen) * 0.15f && v->night > 0.9f, "night: the sky is dark (%.4f)", sky_lum(v->zenith));
+    CHECK(sky_lum(v->moon_light) > 0.05f && v->moon_dir.y > 0.3f, "a full moon is up at midnight and gives light (%.3f)", sky_lum(v->moon_light));
+    lx_scene_update_transforms(s);
+    fwd = lx_norm3(lx_mat4_dir(lx_entity_data(s, sun)->world, lx_v3(0, 0, 1)));
+    CHECK(lx_dot3(fwd, lx_neg3(v->moon_dir)) > 0.999f && lx_get_light(s, sun)->intensity > 0.05f, "at night the light is the moon");
+    lx_env_effective(s, &eff);
+    CHECK(!memcmp(&eff.sky_zenith, &v->zenith, sizeof eff.sky_zenith) && eff.ambient_intensity > 0, "Day-night: everything reads the sky's colours");
+
+    /* clouds take sunlight; a preset sets everything */
+    lx_sky_set_time(s, 12);
+    lx_sky_set_weather(s, LX_WEATHER_STORM, 0);
+    lx_sky_prepare(s);
+    CHECK(e->weather == LX_WEATHER_STORM && e->rain > 0.9f && e->lightning > 0 && e->cloud_type == LX_CLOUDS_STORM, "the Storm preset");
+    CHECK(sky_lum(v->sun_light) < sky_lum(noon_light) * 0.2f, "storm clouds take most of the sunlight (%.3f)", sky_lum(v->sun_light));
+    CHECK(v->wetness > 0.9f && v->fog_density > e->fog_density, "rain: wet ground and mist straight away while editing");
+
+    /* playing: the weather blends, the ground dries slowly, the clock runs */
+    lx_sky_set_weather(s, LX_WEATHER_CLEAR, 0);
+    s->simulating = true;
+    s->sky.started = false;
+    lx_sky_prepare(s);
+    lx_sky_set_weather(s, LX_WEATHER_RAIN, 10);
+    for (int i = 0; i < 50; i++) lx_sky_simulate(s, 0.1f);   /* 5 s of 10 */
+    float half = s->sky.coverage;
+    CHECK(half > 0.3f && half < 0.8f, "halfway through a 10 s change the clouds are halfway (%.2f)", half);
+    for (int i = 0; i < 60; i++) lx_sky_simulate(s, 0.1f);
+    CHECK(fabsf(s->sky.coverage - e->cloud_coverage) < 1e-4f && fabsf(s->sky.rain - e->rain) < 1e-4f, "after the blend time the weather has arrived");
+    float wet_after = s->sky.wetness;
+    CHECK(wet_after > 0.05f && wet_after < 0.9f, "the ground is getting wet, not soaked at once (%.2f)", wet_after);
+    float t0 = e->time_of_day;
+    e->day_length = 24;   /* 24 real minutes a day: an hour a minute */
+    for (int i = 0; i < 60; i++) lx_sky_simulate(s, 1.0f);
+    CHECK(fabsf(e->time_of_day - (t0 + 1.0f)) < 0.01f, "a minute of play moves the clock an hour (%.3f -> %.3f)", t0, e->time_of_day);
+    lx_sky_strike_lightning(s);
+    lx_sky_prepare(s);
+    CHECK(v->flash > 0.5f && s->sky.thunder_in > 0, "lightning: a flash now, thunder later (%.2f s)", s->sky.thunder_in);
+    s->simulating = false;
+
+    /* saved and loaded */
+    e->time_of_day = 19.25f; e->latitude = -33.9f; e->cloud_height = 2200; e->wind_direction = -45; e->moon_phase = 0.3f;
+    e->weather = LX_WEATHER_CUSTOM; e->snow = 0.4f; e->weather_blend = 7;
+    char *text = lx_scene_serialize(s);
+    LxScene *c = lx_scene_deserialize(text);
+    lx_free(text);
+    const LxEnvironment *ce = lx_scene_environment(c);
+    CHECK(ce->sky_mode == LX_SKY_DAY_NIGHT && NEAR(ce->time_of_day, 19.25f, 1e-4f) && NEAR(ce->latitude, -33.9f, 1e-4f) &&
+          NEAR(ce->cloud_height, 2200, 1e-3f) && NEAR(ce->wind_direction, -45, 1e-4f) && NEAR(ce->moon_phase, 0.3f, 1e-4f) &&
+          ce->weather == LX_WEATHER_CUSTOM && NEAR(ce->snow, 0.4f, 1e-4f) && NEAR(ce->weather_blend, 7, 1e-4f) &&
+          ce->cloud_type == e->cloud_type && NEAR(ce->rain, e->rain, 1e-4f),
+          "the sky and weather survive saving");
+    lx_scene_destroy(c);
+    CHECK(lx_sky_builtin_sound("thunder") && lx_sky_builtin_sound("thunder")->frame_count > 22050 * 4, "thunder is made in code");
+    CHECK(lx_asset_sound("builtin:thunder") == lx_sky_builtin_sound("thunder"), "...and found as builtin:thunder");
+    lx_scene_destroy(s);
+
+    /* lightmaps in Day-night: they keep how much sky each texel sees, for the sky of the moment */
+    LxScene *b = lx_scene_create("Sky bake");
+    b->bake.texels_per_unit = 2;
+    b->bake.samples = 96;
+    b->bake.bounces = 1;
+    b->bake.ao_intensity = 0;
+    b->env.sky_mode = LX_SKY_DAY_NIGHT;
+    LxEntity floor = lx_spawn_primitive(b, LX_PRIM_CUBE, "Floor", lx_v3(0, -0.5f, 0));
+    lx_entity_set_scale(b, floor, lx_v3(20, 1, 20));
+    LxEntity roof = lx_spawn_primitive(b, LX_PRIM_CUBE, "Roof", lx_v3(0, 1.2f, 0));
+    lx_entity_set_scale(b, roof, lx_v3(4, 0.2f, 4));
+    LxLightmapBake *bk = lm_bake_cpu(b);
+    CHECK(bk && bk->sky_separate, "a Day-night bake keeps the sky apart");
+    if (bk) {
+        float open = 0, under = 0, any_rgb = 0;
+        int no = 0, nu = 0;
+        for (int i = 0; i < bk->texel_count; i++) {
+            const float *t = &bk->texels[(size_t)i * 12];
+            if (t[3] <= 0 || t[9] < 0.9f || fabsf(t[1]) > 0.01f) continue;
+            float a = bk->color[i * 4 + 3];
+            any_rgb = lx_maxf(any_rgb, bk->color[i * 4 + 1]);
+            if (fabsf(t[0]) > 6 && fabsf(t[2]) > 6) { open += -a; no++; }
+            else if (fabsf(t[0]) < 0.5f && fabsf(t[2]) < 0.5f) { under += -a; nu++; }
+        }
+        open /= lx_maxf((float)no, 1); under /= lx_maxf((float)nu, 1);
+        printf("  sky seen: open floor %.3f, under the roof %.3f\n", open, under);
+        CHECK(no > 4 && nu > 0 && open > 0.85f && under < open * 0.6f, "open floor sees the sky, under the roof much less (%.2f, %.2f)", open, under);
+        CHECK(any_rgb < 1e-4f, "with no baked lights the colour holds no sky of its own (%.5f)", any_rgb);
+        lx_lightmap_bake_free(bk);
+    }
+    lx_scene_destroy(b);
+}
+
 static void test_lightmapper(void) {
     printf("baked lighting\n");
     LxScene *s = lx_scene_create("Bake");
@@ -3378,6 +3526,7 @@ int main(void) {
     test_gi_headroom();
     test_lightmap_uvs();
     test_lightmapper();
+    test_sky();
     test_bake_volumes();
     test_gi_sky_calibration();
     test_acoustics();

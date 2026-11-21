@@ -149,11 +149,15 @@ static void trace_texel(const LxLightmapBake *b, int texel, uint32_t sample, flo
     if (dn <= 0) d = lx_norm3(lx_sub3(d, lx_scale3(ng, 2.0f * dn - 1e-3f)));   /* keep it above the surface */
     LxVec3 first_dir = d, T = lx_v3(LX_PI, LX_PI, LX_PI), o = x;
     LxVec3 path = lx_v3(0, 0, 0);
-    float back = 0;
+    float back = 0, sky_seen = 0;
     for (int k = 0;; k++) {
         LxHit h;
         LxRay ray = {o, d};
-        if (!lx_bvh_intersect(&b->bvh, ray, 1e30f, &h)) { path = lx_add3(path, lx_mul3(T, sky_at(b, d))); break; }
+        if (!lx_bvh_intersect(&b->bvh, ray, 1e30f, &h)) {
+            if (b->sky_separate) sky_seen += lum3(T) * (d.y >= 0 ? 1.0f : 0.3f);   /* a sky of radiance 1 (the ground below 0.3) */
+            else path = lx_add3(path, lx_mul3(T, sky_at(b, d)));
+            break;
+        }
         LxVec3 hn = b->bvh.normals[h.tri];
         if (lx_dot3(hn, d) > 0) { if (k == 0) back = 1; break; }   /* the back of a surface: inside geometry */
         const LxTriMaterial *m = &b->bvh.materials[b->bvh.mat_index[h.tri]];
@@ -185,6 +189,7 @@ static void trace_texel(const LxLightmapBake *b, int texel, uint32_t sample, flo
     acc[4] += D.x; acc[5] += D.y; acc[6] += D.z; acc[7] += back;
     acc[8] += open;
     acc[9] += E.x - path.x; acc[10] += E.y - path.y; acc[11] += E.z - path.z;   /* Baked lights straight on (AO leaves it alone) */
+    acc[12] += sky_seen;
 }
 
 /* uniform direction on the sphere */
@@ -507,10 +512,13 @@ LxLightmapBake *lx_lightmap_prepare(LxScene *s) {
         }
         LX_VEC_PUSH(b->lights, b->light_count, b->light_cap, L);
     }
-    b->sky_zenith = s->env.sky_zenith;
-    b->sky_horizon = s->env.sky_horizon;
-    b->ground = s->env.ground_color;
-    b->ambient = s->env.ambient_intensity;
+    LxEnvironment env;
+    lx_env_effective(s, &env);   /* Day-night: lighting volumes take the sky as it is now */
+    b->sky_zenith = env.sky_zenith;
+    b->sky_horizon = env.sky_horizon;
+    b->ground = env.ground_color;
+    b->ambient = env.ambient_intensity;
+    b->sky_separate = s->env.sky_mode == LX_SKY_DAY_NIGHT;
     return b;
 }
 
@@ -542,7 +550,7 @@ void lx_lightmap_resolve(LxLightmapBake *b) {
         /* (on the sky and bounced light: the light of Baked lights shining straight on has its own exact shadows) */
         float ao = b->set.ao_radius > 0 ? 1.0f - ao_k * (1.0f - a[8] * inv) : 1.0f;
         for (int c = 0; c < 3; c++) b->color[i * 4 + c] = (a[9 + c] + (a[c] - a[9 + c]) * ao) * inv;
-        b->color[i * 4 + 3] = 1;
+        b->color[i * 4 + 3] = a[12] * inv / LX_PI * ao;   /* sky seen, 0..1 (only used when the sky is kept apart) */
         float l = lum3(lx_v3(a[0], a[1], a[2]));
         LxVec3 dv = l > 1e-8f ? lx_scale3(lx_v3(a[4], a[5], a[6]), 1.0f / l) : lx_v3(0, 0, 0);
         if (lx_len3(dv) > 1) dv = lx_norm3(dv);
@@ -563,7 +571,7 @@ void lx_lightmap_resolve(LxLightmapBake *b) {
                     float tm = lx_maxf(ti[7], 1e-4f);
                     float li = lum3(lx_v3(b->color[i * 4], b->color[i * 4 + 1], b->color[i * 4 + 2]));
                     LxVec3 sum = lx_v3(0, 0, 0);
-                    float ws = 0;
+                    float ws = 0, sky_sum = 0;
                     for (int dy = -R; dy <= R; dy++)
                         for (int dx = -R; dx <= R; dx++) {
                             int xx = x + dx, yy = y + dy;
@@ -580,9 +588,10 @@ void lx_lightmap_resolve(LxLightmapBake *b) {
                             float rel = fabsf(lj - li) / (lx_maxf(li, lj) + 1e-3f);   /* keeps shadow edges */
                             float w = expf(-(float)(dx * dx + dy * dy) / 4.5f) * powf(nd, 16.0f) * expf(-plane * plane * 4.0f) * expf(-rel * rel * 6.0f);
                             sum = lx_add3(sum, lx_scale3(cj, w));
+                            sky_sum += b->color[j * 4 + 3] * w;
                             ws += w;
                         }
-                    if (ws > 0) { out[i * 4] = sum.x / ws; out[i * 4 + 1] = sum.y / ws; out[i * 4 + 2] = sum.z / ws; }
+                    if (ws > 0) { out[i * 4] = sum.x / ws; out[i * 4 + 1] = sum.y / ws; out[i * 4 + 2] = sum.z / ws; out[i * 4 + 3] = sky_sum / ws; }
                 }
         lx_free(b->color);
         b->color = out;
@@ -637,7 +646,8 @@ void lx_lightmap_resolve(LxLightmapBake *b) {
         float w = lx_dot3(dv, lx_v3(ti[4], ti[5], ti[6])) * 0.5f + 0.5f;
         b->dir[i * 4] = dv.x * 0.5f + 0.5f; b->dir[i * 4 + 1] = dv.y * 0.5f + 0.5f; b->dir[i * 4 + 2] = dv.z * 0.5f + 0.5f;
         b->dir[i * 4 + 3] = lx_clampf(w, 0.0f, 1.0f);
-        b->color[i * 4 + 3] = 1;
+        /* alpha: 1 = the sky is in the colour; below 0 = minus the sky this texel sees (Day-night: lit by the sky of the moment) */
+        b->color[i * 4 + 3] = b->sky_separate ? -lx_clampf(b->color[i * 4 + 3], 0.0f, 1.0f) - 1e-3f : 1.0f;
     }
     /* volumes: average; voxels inside geometry take their neighbours' light, ring by ring */
     lx_free(b->vox_out);
