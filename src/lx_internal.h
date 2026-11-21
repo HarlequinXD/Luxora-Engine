@@ -360,7 +360,9 @@ typedef struct LxSkyLive {
     LxVec3 bolt_dir;
     float next_strike;             /* seconds until the next lightning */
     float thunder_in;              /* seconds until its thunder (<0 none) */
-    float thunder_vol;
+ float thunder_vol;
+    int last_thunder;              /* the last thunder variant played */
+    bool raining;                  /* the rain sound may be playing */
     float last_hour;               /* for the SUNRISE / SUNSET ... events */
     float last_sun_y;
     uint32_t rng;
@@ -372,7 +374,10 @@ void lx_sky_simulate(LxScene *s, float dt);            /* while playing: the clo
 const LxSkyEval *lx_sky_eval(LxScene *s);
 void lx_env_effective(LxScene *s, LxEnvironment *out); /* the environment with the Day-night sky's colours filled in */
 LxVec3 lx_sky_atmosphere(LxVec3 dir, LxVec3 to_sun, float sun_irr, float haze, float height, LxVec3 ground_albedo, LxVec3 *transmittance);
-LxSound *lx_sky_builtin_sound(const char *name);       /* "thunder" */
+LxSound *lx_sky_builtin_sound(const char *name);       /* "thunder", "thunder0".."thunder7", "rain_light", "rain_heavy" */
+void lx_sky_stop(LxScene *s);                          /* play stopped: silence the rain */
+void lx_audio_ambient(int slot, LxSound *snd, float volume);   /* a looping non-positional sound per slot (0..3); volume 0 stops it */
+void lx_audio_play_oneshot_sound(LxSound *snd, LxVec3 pos, float volume);
 
 struct LxScene {
     char name[LX_NAME_MAX];

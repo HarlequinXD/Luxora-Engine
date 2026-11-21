@@ -1300,6 +1300,27 @@ static void test_sky(void) {
     lx_scene_destroy(c);
     CHECK(lx_sky_builtin_sound("thunder") && lx_sky_builtin_sound("thunder")->frame_count > 22050 * 4, "thunder is made in code");
     CHECK(lx_asset_sound("builtin:thunder") == lx_sky_builtin_sound("thunder"), "...and found as builtin:thunder");
+    {   /* eight different thunder claps; rain loops that join without a click */
+        int distinct = 0;
+        for (int a = 0; a < 8; a++)
+            for (int b = a + 1; b < 8; b++) {
+                char na[16], nb[16];
+                snprintf(na, sizeof na, "thunder%d", a);
+                snprintf(nb, sizeof nb, "thunder%d", b);
+                LxSound *x = lx_sky_builtin_sound(na);
+                LxSound *y = lx_sky_builtin_sound(nb);
+                distinct += x && y && x != y && (x->frame_count != y->frame_count || memcmp(x->samples, y->samples, 4000) != 0);
+            }
+        CHECK(distinct == 28, "eight different thunder claps (%d of 28 pairs differ)", distinct);
+        for (int k = 0; k < 2; k++) {
+            LxSound *r = lx_sky_builtin_sound(k ? "rain_heavy" : "rain_light");
+            CHECK(r && r->frame_count >= 22050 * 30, "a long rain loop (%s)", k ? "heavy" : "light");
+            if (!r) continue;
+            float peak = 0, step = 0, jump = fabsf(r->samples[r->frame_count - 1] - r->samples[0]);
+            for (int i = 1; i < r->frame_count; i++) { peak = lx_maxf(peak, fabsf(r->samples[i])); step = lx_maxf(step, fabsf(r->samples[i] - r->samples[i - 1])); }
+            CHECK(peak > 0.1f && jump <= step, "the rain loop joins end to start like any other sample (%.3f, steps up to %.3f)", jump, step);
+        }
+    }
     lx_scene_destroy(s);
 
     /* lightmaps in Day-night: they keep how much sky each texel sees, for the sky of the moment */

@@ -13,7 +13,10 @@
  * arrives as late as sound would.
  */
 #include "../lx_internal.h"
+#include <ctype.h>
 #include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ------------------------------------------------------------------ the atmosphere (keep in step with lx_atmosphere in scene_common.glsl) */
@@ -342,10 +345,12 @@ void lx_sky_strike_lightning(LxScene *s) {
 }
 
 void lx_sky_simulate(LxScene *s, float dt) {
-    if (!s || s->env.sky_mode != LX_SKY_DAY_NIGHT || dt <= 0) return;
+    if (!s || dt <= 0) return;
+    if (s->env.sky_mode != LX_SKY_DAY_NIGHT) { if (s->sky.raining) { lx_sky_stop(s); s->sky.raining = false; } return; }
     LxEnvironment *e = &s->env;
     live_init(s);
     LxSkyLive *L = &s->sky;
+    L->raining = true;
     /* the clock */
     if (e->day_length > 0) e->time_of_day = wrap24(e->time_of_day + dt * 24.0f / (e->day_length * 60.0f));
     float hour = e->time_of_day, sy = sun_dir_at(e, hour).y;
@@ -394,10 +399,22 @@ void lx_sky_simulate(LxScene *s, float dt) {
         if (L->thunder_in < 0) {   /* thunder: from the bolt's direction, close enough to the listener to be heard */
             LxEntity le = lx_scene_listener(s);
             LxVec3 at = le ? lx_entity_world_position(s, le) : lx_v3(0, 0, 0);
-            lx_audio_play_oneshot("builtin:thunder", lx_madd3(at, lx_norm3(lx_v3(L->bolt_dir.x, 0.25f, L->bolt_dir.z)), 30.0f),
-                                  L->thunder_vol);
+            /* a different clap each time: close strikes crack, far ones rumble; never the same one twice running */
+            int first = L->bolt_dist < 2500.0f ? 0 : 4, v = first + (int)(rnd(L) * 4.0f) % 4;
+            if (v == L->last_thunder) v = first + (v - first + 1 + (int)(rnd(L) * 3.0f)) % 4;
+            L->last_thunder = v;
+            char ref[32];
+            snprintf(ref, sizeof ref, "builtin:thunder%d", v);
+            lx_audio_play_oneshot(ref, lx_madd3(at, lx_norm3(lx_v3(L->bolt_dir.x, 0.25f, L->bolt_dir.z)), 30.0f),
+                                  L->thunder_vol * (0.85f + 0.3f * rnd(L)));
         }
     }
+    /* the sound of rain: a light loop and a heavy one, mixed by how hard it rains */
+    float rr = L->rain;
+    float light = rr > 0.01f ? lx_minf(1.0f, rr * 3.0f) * (1.0f - 0.55f * smooth01(0.4f, 1.0f, rr)) * 0.6f : 0.0f;
+    float heavy = smooth01(0.3f, 1.0f, rr) * 0.85f;
+    lx_audio_ambient(0, light > 0.001f ? lx_sky_builtin_sound("rain_light") : NULL, light);
+    lx_audio_ambient(1, heavy > 0.001f ? lx_sky_builtin_sound("rain_heavy") : NULL, heavy);
 }
 
 /* ------------------------------------------------------------------ the API */
@@ -423,36 +440,164 @@ float lx_sky_wetness(const LxScene *s) {
     return s->sky.started ? s->sky.wetness : lx_minf(1.0f, s->env.rain * 1.4f);
 }
 
-/* ------------------------------------------------------------------ thunder, made here */
-static LxSound *g_thunder;
-LxSound *lx_sky_builtin_sound(const char *name) {
-    if (!name || strcmp(name, "thunder") != 0) return NULL;
-    if (g_thunder) return g_thunder;
-    /* brown noise, low-passed; a crack at the start, then a rumble that swells and rolls away */
-    const int rate = 22050, n = rate * 6;
+/* ------------------------------------------------------------------ rain and thunder, made here */
+typedef struct SynthRng { uint32_t s; } SynthRng;
+static float srnd(SynthRng *r) { r->s = r->s * 1664525u + 1013904223u; return (float)(r->s >> 8) * (1.0f / 16777216.0f); }
+static float snoise(SynthRng *r) { return srnd(r) * 2.0f - 1.0f; }
+static LxSound *synth_new(const char *ref, int frames) {
     LxSound *snd = lx_calloc(1, sizeof *snd);
-    snd->samples = lx_calloc((size_t)n, sizeof(float));
-    snd->frame_count = n;
-    snd->sample_rate = rate;
-    lx_strcpy(snd->ref, sizeof snd->ref, "builtin:thunder");
-    uint32_t r = 12345u;
-    float brown = 0, lp = 0, lp2 = 0, peak = 0;
-    for (int i = 0; i < n; i++) {
-        r = r * 1664525u + 1013904223u;
-        float white = (float)(r >> 8) * (2.0f / 16777216.0f) - 1.0f;
-        brown = lx_clampf(brown * 0.995f + white * 0.06f, -1.0f, 1.0f);
-        lp += (brown - lp) * 0.08f;
-        lp2 += (lp - lp2) * 0.15f;
-        float t = (float)i / (float)rate;
-        float crack = expf(-t * 18.0f) * white * 0.5f;
-        float swell = (0.55f + 0.45f * sinf(t * 2.3f + 1.0f) * sinf(t * 0.9f)) * expf(-t * 0.55f);
-        float attack = lx_minf(1.0f, t * 6.0f);
-        float v = crack + lp2 * 3.5f * swell * attack;
-        if (t > 5.0f) v *= (6.0f - t);   /* fade out cleanly */
-        snd->samples[i] = v;
-        peak = lx_maxf(peak, fabsf(v));
-    }
-    if (peak > 0) for (int i = 0; i < n; i++) snd->samples[i] *= 0.9f / peak;
-    g_thunder = snd;
+    snd->samples = lx_calloc((size_t)frames, sizeof(float));
+    snd->frame_count = frames;
+    snd->sample_rate = 22050;
+    lx_strcpy(snd->ref, sizeof snd->ref, ref);
     return snd;
+}
+static void normalize(float *x, int n, float to) {
+    float peak = 0;
+    for (int i = 0; i < n; i++) peak = lx_maxf(peak, fabsf(x[i]));
+    if (peak > 0) for (int i = 0; i < n; i++) x[i] *= to / peak;
+}
+/* a decaying ring added at sample `at`: a raindrop's tick or a drip's plink (damped resonator, pitch rising like a bubble) */
+static void add_drop(float *buf, int n, int at, float freq, float tau_s, float amp, float rise) {
+    const float rate = 22050.0f;
+    int len = (int)(tau_s * rate * 5.0f);
+    float y1 = 0, y2 = 0, r = expf(-1.0f / (tau_s * rate));
+    for (int k = 0; k < len && at + k < n; k++) {
+        float f = freq * (1.0f + rise * (float)k / rate);
+        float c = 2.0f * cosf(2.0f * LX_PI * f / rate) * r;
+        float x = k == 0 ? amp : 0.0f;
+        float y = x + c * y1 - r * r * y2;
+        y2 = y1; y1 = y;
+        buf[at + k] += y;
+    }
+}
+
+/* Rain: a 40 s loop, different everywhere in it, joined end to start with a crossfade. A hiss of countless tiny
+ * impacts (band-limited noise that swells and settles at its own slow random pace), hundreds of distinct ticks a
+ * second, drips that plink nearby now and then, and in heavy rain a low roar underneath. */
+static LxSound *make_rain(bool heavy) {
+    const int rate = 22050, n = rate * 40, X = rate * 2;
+    LxSound *snd = synth_new(heavy ? "builtin:rain_heavy" : "builtin:rain_light", n);
+    float *buf = lx_calloc((size_t)(n + X), sizeof(float));
+    SynthRng r = {heavy ? 0xbeefu : 0x5eedu};
+    /* slow swells: three LFOs at unrelated rates, so the pattern never lines up within the loop */
+    float lf[3], lp[3];
+    for (int k = 0; k < 3; k++) { lf[k] = 0.03f + srnd(&r) * 0.2f; lp[k] = srnd(&r) * 6.28f; }
+    float hp = 0, lp1 = 0, lp2 = 0, prev = 0, brown = 0, roar = 0;
+    float hp_k = heavy ? 0.85f : 0.9f, lp_k = heavy ? 0.55f : 0.7f;
+    for (int i = 0; i < n + X; i++) {
+        float t = (float)i / rate;
+        float w = snoise(&r);
+        hp = hp_k * (hp + w - prev);   /* high-pass: no rumble in the hiss */
+        prev = w;
+        lp1 += (hp - lp1) * lp_k;
+        lp2 += (lp1 - lp2) * lp_k;
+        float env = 0.72f;
+        for (int k = 0; k < 3; k++) env += 0.1f * sinf(t * lf[k] * 6.2831853f + lp[k]);
+        float v = lp2 * env * (heavy ? 0.5f : 0.32f);
+        if (heavy) {
+            brown = lx_clampf(brown * 0.997f + w * 0.03f, -1, 1);
+            roar += (brown - roar) * 0.05f;
+            v += roar * 1.6f * env;
+        }
+        buf[i] = v;
+    }
+    /* ticks: many small impacts, most of them faint */
+    int ticks = (heavy ? 900 : 260) * (n + X) / rate;
+    for (int k = 0; k < ticks; k++) {
+        int at = (int)(srnd(&r) * (float)(n + X));
+        float a = powf(srnd(&r), 3.0f) * (heavy ? 0.35f : 0.45f);
+        add_drop(buf, n + X, at, 1800.0f + srnd(&r) * 5200.0f, 0.0008f + srnd(&r) * 0.002f, a, 0.0f);
+    }
+    /* drips close by: lower, longer, the pitch rising a little (a bubble) */
+    int drips = (heavy ? 6 : 4) * (n + X) / rate;
+    for (int k = 0; k < drips; k++) {
+        int at = (int)(srnd(&r) * (float)(n + X));
+        add_drop(buf, n + X, at, 650.0f + srnd(&r) * 1400.0f, 0.004f + srnd(&r) * 0.008f, (0.15f + srnd(&r) * 0.35f), 6.0f + srnd(&r) * 20.0f);
+    }
+    /* loop: the extra 2 s fade into the start */
+    for (int i = 0; i < X; i++) {
+        float a = (float)i / (float)X;
+        buf[i] = buf[i] * sqrtf(a) + buf[n + i] * sqrtf(1.0f - a);
+    }
+    memcpy(snd->samples, buf, sizeof(float) * (size_t)n);
+    lx_free(buf);
+    normalize(snd->samples, n, 0.8f);
+    return snd;
+}
+
+/* Thunder: eight different claps. 0-3 are close: a sharp crack (a few tearing sub-cracks) and a boom that rolls on.
+ * 4-7 are far: no crack, a slow low rumble that swells several times as the sound arrives from different parts of the
+ * bolt. Each has its own number, timing and size of swells, length and darkness. */
+static LxSound *make_thunder(int variant) {
+    const int rate = 22050;
+    SynthRng r = {0x7e57u + (uint32_t)variant * 7919u};
+    bool near = variant < 4;
+    float dur = near ? 5.0f + srnd(&r) * 2.5f : 7.0f + srnd(&r) * 3.5f;
+    int n = (int)(dur * (float)rate);
+    char ref[32];
+    snprintf(ref, sizeof ref, "builtin:thunder%d", variant);
+    LxSound *snd = synth_new(ref, n);
+    /* the swells */
+    int K = 3 + (int)(srnd(&r) * 4.0f);
+    float st[8], sa[8], sw[8];
+    for (int k = 0; k < K; k++) {
+        st[k] = (near ? 0.15f : 0.6f) + srnd(&r) * dur * 0.6f;
+        sa[k] = 0.35f + srnd(&r) * 0.65f;
+        sw[k] = 0.25f + srnd(&r) * (near ? 0.8f : 1.4f);
+    }
+    if (near) { st[0] = 0.05f; sa[0] = 1.0f; sw[0] = 0.35f; }   /* the boom right after the crack */
+    /* the crack */
+    int cracks = near ? 2 + (int)(srnd(&r) * 3.0f) : 0;
+    float ct[5], ca[5];
+    for (int k = 0; k < cracks; k++) { ct[k] = srnd(&r) * 0.25f; ca[k] = 0.4f + srnd(&r) * 0.6f; }
+    float brown = 0, l1 = 0, l2 = 0, hpv = 0, prev = 0;
+    float k1 = near ? 0.10f + srnd(&r) * 0.05f : 0.035f + srnd(&r) * 0.03f;   /* darker when far */
+    for (int i = 0; i < n; i++) {
+        float t = (float)i / (float)rate;
+        float w = snoise(&r);
+        brown = lx_clampf(brown * 0.996f + w * 0.05f, -1, 1);
+        l1 += (brown - l1) * k1;
+        l2 += (l1 - l2) * (k1 * 1.5f);
+        float env = 0;
+        for (int k = 0; k < K; k++) { float d = (t - st[k]) / sw[k]; env += sa[k] * expf(-d * d); }
+        env += 0.25f * expf(-t / (dur * 0.35f));   /* the long tail */
+        float attack = lx_minf(1.0f, t * (near ? 30.0f : 2.0f));
+        float v = l2 * 5.0f * env * attack;
+        if (cracks) {
+            hpv = 0.7f * (hpv + w - prev);   /* bright noise for the crack */
+            prev = w;
+            for (int k = 0; k < cracks; k++)
+                if (t >= ct[k]) v += hpv * ca[k] * expf(-(t - ct[k]) * 28.0f) * 0.9f;
+        }
+        if (t > dur - 0.8f) v *= (dur - t) / 0.8f;
+        snd->samples[i] = v;
+    }
+    normalize(snd->samples, n, 0.9f);
+    return snd;
+}
+
+#define THUNDERS 8
+static LxSound *g_thunder[THUNDERS], *g_rain[2];
+LxSound *lx_sky_builtin_sound(const char *name) {
+    if (!name) return NULL;
+    if (!strcmp(name, "thunder")) name = "thunder0";
+    if (!strncmp(name, "thunder", 7)) {
+        int v = atoi(name + 7);
+        if (v < 0 || v >= THUNDERS || !isdigit((unsigned char)name[7])) return NULL;
+        if (!g_thunder[v]) g_thunder[v] = make_thunder(v);
+        return g_thunder[v];
+    }
+    if (!strcmp(name, "rain_light") || !strcmp(name, "rain_heavy")) {
+        int k = name[5] == 'h';
+        if (!g_rain[k]) g_rain[k] = make_rain(k == 1);
+        return g_rain[k];
+    }
+    return NULL;
+}
+
+void lx_sky_stop(LxScene *s) {
+    LX_UNUSED(s);
+    lx_audio_ambient(0, NULL, 0);
+    lx_audio_ambient(1, NULL, 0);
 }

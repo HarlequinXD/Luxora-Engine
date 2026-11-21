@@ -3179,6 +3179,17 @@ static void probes_update(LxScene *s, VkCommandBuffer cmd, FrameData *fr, const 
     R.probe_rr = (R.probe_rr + 1) % PROBE_SLOTS;
 }
 
+/* Characters, animated models, physics objects (and whatever they carry) don't keep rain and snow off the ground:
+ * the precipitation map would leave a dry outline under them that stays where they stood a moment ago. */
+static bool moves_about(LxScene *s, const LxEntityData *d) {
+    const uint32_t MOVING = LX_COMP_RIGIDBODY | LX_COMP_CHARACTER | LX_COMP_ANIMATOR | LX_COMP_STATE_GRAPH | LX_COMP_BEHAVIOUR;
+    for (int depth = 0; d && depth < 64; depth++) {
+        if (d->skin || (d->comps & MOVING)) return true;
+        d = d->parent ? lx_entity_data(s, d->parent) : NULL;
+    }
+    return false;
+}
+
 /* the Day-night sky, clouds and weather for the shaders (zeros: the Gradient sky) */
 static void sky_fill_ubo(LxScene *s, const LxGraphicsSettings *gs, const LxRenderView *view, SceneUBO *u) {
     const LxEnvironment *e = &s->env;
@@ -3459,7 +3470,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
                 LxMesh *dm = lm[3] >= 0 ? lx_mesh_lightmap_variant(mesh, lx_mat4_scale_of(&d->world)) : mesh;   /* stretched: its own unwrap */
                 dl_add_lm(&R.main_list, dm, pick_lod(dm, radius * proj_scale / dist), mat, d->world.m, white, lm);
             } else R.stats.instances_culled++;
-            if (precip_map && lx_frustum_test_sphere(&pfr, c, radius))   /* roofs: everything solid counts */
+            if (precip_map && lx_frustum_test_sphere(&pfr, c, radius) && !moves_about(s, d))   /* roofs: what stays put */
                 dl_add(&R.precip_list, mesh, mesh->lod_count > 1 ? 1 : 0, mat, d->world.m, white);
             if (d->mesh.cast_shadows) {
                 for (int k = 0; k < cascades; k++)

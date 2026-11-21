@@ -58,7 +58,8 @@ float dn_hg(float c, float g) { float g2 = g * g; return (1.0 - g2) / (4.0 * LX_
 vec4 dn_clouds(vec3 d, float jitter) {
     int N = int(u.cloud_a.w + 0.5);
     if (N <= 0 || u.cloud_a.x <= 0.001 || d.y <= 0.0) return vec4(0.0, 0.0, 0.0, 1.0);
-    float base = u.cloud_b.x, thick = u.cloud_b.y;
+    float base = u.cloud_b.x, slab = u.cloud_b.y;
+    float thick = slab * lx_cloud_top(1.0, u.cloud_a.z);   // as high as any cloud of this type reaches: samples go where clouds are
     float hc = u.camera_pos.y;
     if (hc > base) return vec4(0.0, 0.0, 0.0, 1.0);   // above the cloud base: the slab isn't drawn
     float r0 = LX_RG + max(hc, 0.0);
@@ -89,7 +90,7 @@ vec4 dn_clouds(vec3 d, float jitter) {
     for (int i = 0; i < N; i++) {
         float t = t0 + (float(i) + jitter) * dt;
         float alt = sqrt(r0 * r0 + 2.0 * r0 * t * d.y + t * t) - LX_RG;
-        float h = clamp((alt - base) / thick, 0.0, 1.0);
+        float h = clamp((alt - base) / slab, 0.0, 1.0);
         vec3 p = vec3(u.camera_pos.x + d.x * t, alt, u.camera_pos.z + d.z * t);
         float dens = lx_cloud_density(p, h, true);
         if (dens <= 0.002) continue;
@@ -99,13 +100,14 @@ vec4 dn_clouds(vec3 d, float jitter) {
         float od = 0.0;
         for (int k = 0; k < LS; k++) {
             vec3 q = p + ldir * (lstep * (float(k) + 0.5));
-            float hq = clamp((q.y - base) / thick, 0.0, 1.0);
+            float hq = clamp((q.y - base) / slab, 0.0, 1.0);
             od += lx_cloud_density(q, hq, false) * 0.004 * lstep;
         }
         float tl = max(exp(-od), exp(-od * 0.25) * 0.7);   // light scattered many times reaches deeper
         float powder = 1.0 - exp(-sigma * 2.0 * thick * 0.25);
-        vec3 S = lcol * phase * tl * mix(0.6, 1.0, powder) + amb * mix(0.35, 1.0, h);
-        if (flash > 0.0) S += vec3(0.8, 0.85, 1.0) * flash * 6.0 * pow(max(dot(normalize(vec3(d.x, 0.0, d.z)), flash_dir), 0.0), 6.0) * (1.0 - h);
+        float hy = clamp(h * slab / thick, 0.0, 1.0);   // how far up the clouds: bases are darker, tops catch the sky
+        vec3 S = lcol * phase * tl * mix(0.6, 1.0, powder) + amb * mix(0.3, 1.0, hy);
+        if (flash > 0.0) S += vec3(0.8, 0.85, 1.0) * flash * 6.0 * pow(max(dot(normalize(vec3(d.x, 0.0, d.z)), flash_dir), 0.0), 6.0) * (1.0 - hy);
         float a = 1.0 - exp(-sigma * dt);
         Lsum += T * S * a;
         T *= 1.0 - a;

@@ -288,6 +288,8 @@ void lx_scene_stop_simulation(LxScene *s) {
     lx_physics_world_free(s);
     lx_gameplay_free(s);
     lx_fsm_scene_stop(s);
+    lx_sky_stop(s);   /* the rain's sound */
+    s->sky.raining = false;
     lx_scene_animation_begin(s);
     lx_time_set_scale(1.0f);
     s->simulating = false;

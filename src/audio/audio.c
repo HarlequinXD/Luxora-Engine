@@ -498,8 +498,10 @@ void lx_audio_stop_all(void) {
 
 void lx_audio_play_oneshot(const char *clip, LxVec3 pos, float volume) {
     if (!AU.initialised) return;
-    LxSound *snd = lx_asset_sound(clip);
-    if (!snd) return;
+    lx_audio_play_oneshot_sound(lx_asset_sound(clip), pos, volume);
+}
+void lx_audio_play_oneshot_sound(LxSound *snd, LxVec3 pos, float volume) {
+    if (!AU.initialised || !snd) return;
     lx_mutex_lock(AU.lock);
     Voice *v = alloc_voice();
     if (v) {
@@ -518,6 +520,36 @@ int lx_audio_playing_count(void) {
     for (int i = 0; i < MAX_VOICES; i++) n += AU.voices[i].active && !AU.voices[i].stopping;
     lx_mutex_unlock(AU.lock);
     return n;
+}
+
+/* ---------------- ambient loops (rain): a few looping, non-positional sounds whose volume is set every frame ---------------- */
+#define AMBIENT_SLOTS 4
+static int g_amb_voice[AMBIENT_SLOTS] = {-1, -1, -1, -1};
+static uint32_t g_amb_serial[AMBIENT_SLOTS];
+
+void lx_audio_ambient(int slot, LxSound *snd, float volume) {
+    if (!AU.initialised || slot < 0 || slot >= AMBIENT_SLOTS) return;
+    lx_mutex_lock(AU.lock);
+    Voice *v = g_amb_voice[slot] >= 0 ? &AU.voices[g_amb_voice[slot]] : NULL;
+    bool mine = v && v->active && !v->stopping && v->serial == g_amb_serial[slot];
+    if (volume <= 0.001f || !snd) {
+        if (mine) v->stopping = true;   /* short fade, no click */
+        g_amb_voice[slot] = -1;
+    } else if (mine && v->sound == snd) {
+        v->volume += (volume - v->volume) * 0.1f;   /* eased: no zipper noise as rain picks up */
+    } else {
+        if (mine) v->stopping = true;
+        Voice *n = alloc_voice();
+        if (n) {
+            start_voice(n, snd, volume, true, false, LX_BUS_AMBIENT);
+            n->entity = 0;
+            n->scene = NULL;
+            n->cursor = (double)(((uint32_t)n->serial * 2654435761u) % (uint32_t)(snd->frame_count > 0 ? snd->frame_count : 1));   /* start anywhere in the loop */
+            g_amb_voice[slot] = (int)(n - AU.voices);
+            g_amb_serial[slot] = n->serial;
+        } else g_amb_voice[slot] = -1;
+    }
+    lx_mutex_unlock(AU.lock);
 }
 
 /* ---------------- preview channel ---------------- */

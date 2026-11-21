@@ -207,37 +207,45 @@ float lx_cloud_map(vec2 xz) {
     float thr = 0.5 + (0.5 - cov) * 0.52;   // so about `coverage` of the sky is cloud
     return smoothstep(thr - edge * 0.5, thr + edge, n) * smoothstep(0.0, 0.05, cov);
 }
-/* the cloud's shape over its height, 0..1 through the slab */
-float lx_cloud_profile(float h, float type) {
-    float cumulus = smoothstep(0.0, 0.08, h) * smoothstep(1.0, 0.35, h);
-    float stratus = smoothstep(0.0, 0.1, h) * smoothstep(0.45, 0.2, h);
-    float storm = smoothstep(0.0, 0.05, h) * smoothstep(1.0, 0.85, h);
+/* How high a column of cloud rises (a fraction of the slab), from how much cloud the map puts there. Clouds are
+   wider than they are tall: thin edges stay low, thick middles heap up, so every cloud is a dome on a flat base. */
+float lx_cloud_top(float m, float type) {
+    float cumulus = 0.10 + 0.50 * m * m;   // fair weather: low, wide domes; the thickest heap a little higher
+    float stratus = 0.08 + 0.14 * m;       // a flat layer
+    float storm = 0.30 + 0.70 * m;         // towers
     return type < 1.0 ? mix(cumulus, stratus, type) : mix(stratus, storm, type - 1.0);
 }
 float lx_cloud_density(vec3 p, float h, bool detail) {
     float m = lx_cloud_map(p.xz);
     if (m <= 0.001) return 0.0;
     float type = u.cloud_a.z;
-    float prof = lx_cloud_profile(h, type);
-    /* cumulus: taller where the map is thicker (heaped tops) */
-    float heap = type < 1.0 ? smoothstep(0.0, 1.0, m * (1.2 - h * 0.6)) : m;
-    float d = prof * heap;
-    if (detail && d > 0.0) {
-        vec3 q = (p + vec3(u.cloud_b.z, 0.0, u.cloud_b.w) * 0.3) / 900.0;
-        const mat3 R3 = mat3(0.00, 0.80, 0.60, -0.80, 0.36, -0.48, -0.60, -0.48, 0.64);   // turns each octave off the grid
-        vec3 q2 = R3 * q * 2.7, q3 = R3 * q2 * 2.63;
-        float n = lx_vnoise3(q) * 0.62 + lx_vnoise3(q2) * 0.28 + lx_vnoise3(q3) * 0.10;
-        d = clamp(d - (1.0 - n) * mix(0.55, 0.25, clamp(type, 0.0, 1.0)) * (1.0 - h * 0.3), 0.0, 1.0);
+    float top = lx_cloud_top(m, type);
+    if (h >= top) return 0.0;
+    float y = h / top;                                    // 0 at the base .. 1 at this column's top
+    float d = m * smoothstep(0.0, 0.06, h)                // a flat, slightly soft base
+                * sqrt(max(1.0 - y * y, 0.0));            // a rounded top
+    if (detail) {
+        /* lumpy edges: rounded puffs eaten out of the shape, more towards the top and sides (cauliflower tops),
+           less in a flat stratus layer; each octave turned off the grid */
+        vec3 q = (p + vec3(u.cloud_b.z, 0.0, u.cloud_b.w) * 0.3) / 520.0;
+        const mat3 R3 = mat3(0.00, 0.80, 0.60, -0.80, 0.36, -0.48, -0.60, -0.48, 0.64);
+        vec3 q2 = R3 * q * 2.3, q3 = R3 * q2 * 2.4;
+        float n = lx_vnoise3(q) * 0.6 + lx_vnoise3(q2) * 0.3 + lx_vnoise3(q3) * 0.1;
+        float er = mix(mix(0.45, 0.75, y), 0.3, clamp(type, 0.0, 1.0) * (1.0 - clamp(type - 1.0, 0.0, 1.0)));
+        float cut = (1.0 - n) * er;
+        d = clamp((d - cut) / max(1.0 - cut, 0.05), 0.0, 1.0);
     }
     return d * mix(0.4, 1.6, u.cloud_a.y);
 }
 /* sunlight that gets through the clouds to the ground at p (1 clear sky), against the average the sun light already carries */
 float lx_cloud_shadow(vec3 p, vec3 to_light) {
     if (!lx_day_night() || u.cloud_a.x <= 0.001 || to_light.y < 0.02) return 1.0;
-    float mid = u.cloud_b.x + u.cloud_b.y * 0.3;
+    float mid = u.cloud_b.x + u.cloud_b.y * 0.15;
     vec3 c = p + to_light * ((mid - p.y) / to_light.y);
-    float d = lx_cloud_map(c.xz) * lx_cloud_profile(0.3, u.cloud_a.z) * mix(0.4, 1.6, u.cloud_a.y);
-    float t = exp(-d * u.cloud_b.y * 0.0035);
+    float m = lx_cloud_map(c.xz);
+    /* light crosses the column's height: about its density times its thickness (half of it, through a dome) */
+    float d = m * lx_cloud_top(m, u.cloud_a.z) * 0.6 * mix(0.4, 1.6, u.cloud_a.y);
+    float t = exp(-d * u.cloud_b.y * 0.004);
     float avg = max(1.0 - u.cloud_c.y, 0.03);
     return clamp(t / avg, 0.0, 1.6);
 }
