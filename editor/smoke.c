@@ -550,6 +550,49 @@ static void s_physics_objects(void) {
     SMOKE_CHECK(lx_get_character(ED.scene, g_player) != NULL, "Character has a character controller");
     ed_select(g_phys_cube);   /* inspector shows the physics sections, viewport the wireframe */
 }
+/* terrain: create, sculpt (one undo step), undo/redo, grow by a chunk, saved with the scene */
+static float g_terrain_h;
+static void s_terrain_create(void) {
+    LxEntity e = ed_create("Terrain");
+    ed_select(e);
+    SMOKE_CHECK(e && lx_get_terrain(ED.scene, e) && lx_terrain_chunk_count(ED.scene, e) == 1, "Create > Terrain makes a terrain with one chunk");
+}
+static void s_terrain_sculpt(void) {
+    LxEntity e = lx_entity_find(ED.scene, "Terrain");
+    SMOKE_CHECK(find_node(ED.inspector, NULL, "Raise") && find_node(ED.inspector, NULL, "Add Chunk"), "the Terrain inspector shows its tools");
+    LxTerrainBrush b = {LX_TERRAIN_RAISE, 10, 1, 0.5f, 0, 4, 0};
+    lx_terrain_begin_stroke(ED.scene, e);
+    for (int i = 0; i < 10; i++) lx_terrain_brush(ED.scene, e, lx_v3(0, 0, 0), &b, 0.1f);
+    lx_terrain_end_stroke(ED.scene, e);
+    ed_mark_changed();
+    ed_commit();
+    g_terrain_h = 0;
+    lx_terrain_height(ED.scene, 0, 0, &g_terrain_h);
+    SMOKE_CHECK(g_terrain_h > 0.2f, "a Raise stroke lifts the ground (%.2f m)", (double)g_terrain_h);
+    ed_undo();
+}
+static void s_terrain_undo(void) {
+    float h = -1;
+    lx_terrain_height(ED.scene, 0, 0, &h);
+    SMOKE_CHECK(fabsf(h) < 0.01f, "Undo flattens it again (%.2f m)", (double)h);
+    ed_redo();
+}
+static void s_terrain_grow(void) {
+    float h = -1;
+    lx_terrain_height(ED.scene, 0, 0, &h);
+    SMOKE_CHECK(fabsf(h - g_terrain_h) < 0.01f, "Redo brings the hill back");
+    LxEntity e = lx_entity_find(ED.scene, "Terrain");
+    SMOKE_CHECK(lx_terrain_add_chunk(ED.scene, e, 1, 0) && lx_terrain_chunk_count(ED.scene, e) == 2, "Add Chunk grows the terrain");
+    ed_mark_changed();
+    ed_commit();
+}
+static void s_terrain_saved(void) {
+    LxTerrainComponent *t = lx_get_terrain(ED.scene, lx_entity_find(ED.scene, "Terrain"));
+    char ref[LX_REF_MAX], p[LX_PATH_MAX];
+    snprintf(ref, sizeof ref, "%s/c_1_0.lxchunk", t ? t->folder : "?");
+    lx_asset_path(p, sizeof p, ref);
+    SMOKE_CHECK(t && lx_file_exists(p) && !lx_terrain_unsaved(ED.scene), "saving the scene writes the terrain's chunks (%s)", ref);
+}
 /* the new project's sample script (Assets/Scripts/game.c) is compiled by the built-in compiler */
 static LxEntity g_spinner;
 static float g_spin0;
@@ -1095,7 +1138,12 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {154, s_step, "step"},
     {158, s_game_view, "game view"},
     {170, s_stop, "stop"},
-    {174, s_save, "save scene"},
+    {171, s_terrain_create, "create a terrain"},
+    {172, s_terrain_sculpt, "sculpt the terrain"},
+    {173, s_terrain_undo, "undo a terrain stroke"},
+    {174, s_terrain_grow, "redo and add a chunk"},
+    {175, s_save, "save scene"},
+    {177, s_terrain_saved, "terrain chunks saved"},
     {180, s_rename_dialog, "rename dialog"},
     {186, s_close, "close"},
     {190, s_new_scene, "new scene"},

@@ -89,7 +89,10 @@ void lx_scene_destroy(LxScene *s) {
         lx_fsm_entity_free(d);
         lx_free(d->sgraph);
         d->sgraph = NULL;
+        lx_terrain_component_free(d->terrain);
+        d->terrain = NULL;
     }
+    lx_terrain_scene_destroyed(s);
     for (int i = 1; i < s->count; i++)
         if (s->entities[i].alive && s->entities[i].crowd_sim) lx_crowd_destroy(s->entities[i].crowd_sim);
     lx_free(s->entities);
@@ -176,6 +179,8 @@ void lx_entity_destroy(LxScene *s, LxEntity e) {
     lx_fsm_entity_free(d);
     lx_free(d->sgraph);
     d->sgraph = NULL;
+    lx_terrain_component_free(d->terrain);
+    d->terrain = NULL;
     if (d->audio_voice >= 0) lx_audio_stop(s, e);
     if (d->crowd_sim) { lx_crowd_destroy(d->crowd_sim); d->crowd_sim = NULL; }   /* the slot is freed, not cleared: scene_destroy would free it again */
     if ((d->comps & LX_COMP_MESH) && d->mesh.static_geometry) s->static_version++;
@@ -210,6 +215,10 @@ static void copy_components(LxEntityData *dst, const LxEntityData *src) {
         if (!dst->sgraph) dst->sgraph = lx_state_graph_alloc();
         *dst->sgraph = *src->sgraph;
     }
+    if (src->terrain) {   /* so does the Terrain component */
+        if (!dst->terrain) dst->terrain = lx_alloc(sizeof *dst->terrain);
+        *dst->terrain = *src->terrain;
+    }
     memcpy(dst->tag, src->tag, sizeof dst->tag);
     memcpy(dst->prefab, src->prefab, sizeof dst->prefab);
 }
@@ -225,7 +234,8 @@ static LxEntity duplicate_rec(LxScene *s, LxEntity e, LxEntity parent) {
     if (parent) lx_entity_set_parent(s, c, parent);
     LxEntity kids[512];
     int n = 0;
-    for (LxEntity ch = lx_entity_data(s, e)->first_child; ch && n < 512; ch = lx_entity_data(s, ch)->next_sibling) kids[n++] = ch;
+    for (LxEntity ch = lx_entity_data(s, e)->first_child; ch && n < 512; ch = lx_entity_data(s, ch)->next_sibling)
+        if (!lx_entity_data(s, ch)->generated) kids[n++] = ch;   /* a terrain's chunks are made again for the copy */
     for (int i = 0; i < n; i++) duplicate_rec(s, kids[i], c);
     return c;
 }
@@ -350,6 +360,7 @@ LxEntity lx_scene_entity_at(const LxScene *cs, int index) {
 }
 
 LxEntity lx_scene_root_first(const LxScene *s) { return s->first_root; }
+bool lx_entity_generated(const LxScene *s, LxEntity e) { LxEntityData *d = lx_entity_data(s, e); return d && d->generated; }
 
 /* ---------------- transforms ---------------- */
 LxVec3 lx_entity_position(const LxScene *s, LxEntity e) { LxEntityData *d = lx_entity_data(s, e); return d ? d->position : lx_v3(0, 0, 0); }
@@ -667,6 +678,15 @@ void lx_remove_component(LxScene *s, LxEntity e, LxComponentBits c) {
     if (c & (LX_COMP_ANIMATOR | LX_COMP_MESH)) lx_anim_free_entity(d);
     if (c & LX_COMP_STATE_GRAPH) lx_fsm_entity_free(d);
     if (c & LX_COMP_BAKE_VOLUME) d->vol_index = -1;
+    if (c & LX_COMP_TERRAIN) {   /* its chunk objects go; the terrain's files stay */
+        lx_terrain_component_free(d->terrain);
+        d->terrain = NULL;
+        LxEntity kids[4096];
+        int n = 0;
+        for (LxEntity ch = d->first_child; ch && n < 4096; ch = lx_entity_data(s, ch)->next_sibling)
+            if (lx_entity_data(s, ch)->generated) kids[n++] = ch;
+        for (int i = 0; i < n; i++) lx_entity_destroy(s, kids[i]);
+    }
 }
 
 LxEntity lx_spawn_primitive(LxScene *s, LxPrimitive p, const char *name, LxVec3 pos) {

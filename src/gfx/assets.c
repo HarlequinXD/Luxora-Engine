@@ -55,6 +55,10 @@ static AssetEntry *add(const char *ref, AssetKind k, void *ptr) {
 
 LxMesh *lx_asset_mesh(const char *ref) {
     if (!ref || !ref[0]) ref = "builtin:cube";
+    if (!strncmp(ref, "terrain:", 8)) {   /* a terrain's chunk: owned by the terrain */
+        LxMesh *tm = lx_terrain_mesh_ref(ref);
+        return tm ? tm : lx_asset_mesh("builtin:cube");
+    }
     if (strchr(ref, '#')) {   /* a part of an imported model: owned by the model */
         LxMesh *part = lx_model_mesh_ref(ref);
         return part ? part : lx_asset_mesh("builtin:cube");
@@ -163,6 +167,11 @@ static LxMaterial *builtin_material(const char *name) {
 
 LxMaterial *lx_asset_material(const char *ref) {
     if (!ref || !ref[0]) ref = "builtin:default";
+    if (!strncmp(ref, "terrain:", 8)) {   /* a terrain's ground or grass: owned by the terrain */
+        LxMaterial *tm = lx_terrain_material_ref(ref);
+        if (tm) return tm;
+        ref = "builtin:default";
+    }
     AssetEntry *e = find(ref, ASSET_MATERIAL);
     if (e) {
         if (e->ptr) return e->ptr;
@@ -185,6 +194,7 @@ LxMaterial *lx_asset_material(const char *ref) {
 
 LxTexture *lx_asset_texture(const char *ref) {
     if (!ref || !ref[0]) return NULL;
+    if (!strncmp(ref, "terrain:", 8)) return lx_terrain_texture_ref(ref);   /* the terrain's own (grass) */
     AssetEntry *e = find(ref, ASSET_TEXTURE);
     if (e) return e->ptr;
     char path[LX_PATH_MAX];

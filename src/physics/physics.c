@@ -75,6 +75,7 @@ typedef struct MNode { LxAabb box; int left, right, first, count; } MNode;  /* l
 typedef struct MeshCache {
     uint32_t entity;           /* entity handle */
     const LxMesh *mesh;
+    uint32_t version;          /* the mesh's version it was built from (terrain chunks are rebuilt in place) */
     float key[16];             /* world matrix it was built for */
     Tri *tris;
     int ntris;
@@ -267,7 +268,7 @@ static int mesh_cache_get(LxPhysicsWorld *w, LxEntity e, const LxEntityData *d) 
     const LxMesh *mesh = lx_asset_mesh(d->mesh.mesh);
     for (int i = 0; i < w->nm; i++) {
         MeshCache *m = &w->meshes[i];
-        if (m->entity == e && m->mesh == mesh && !memcmp(m->key, d->world.m, sizeof m->key)) { m->used = true; return i; }
+        if (m->entity == e && m->mesh == mesh && m->version == mesh->version && !memcmp(m->key, d->world.m, sizeof m->key)) { m->used = true; return i; }
     }
     /* reuse a slot of the same entity or append */
     int slot = -1;
@@ -281,6 +282,7 @@ static int mesh_cache_get(LxPhysicsWorld *w, LxEntity e, const LxEntityData *d) 
     memset(m, 0, sizeof *m);
     m->entity = e;
     m->mesh = mesh;
+    m->version = mesh->version;
     memcpy(m->key, d->world.m, sizeof m->key);
     m->used = true;
     int ic = LX_MESH_ICOUNT(mesh);

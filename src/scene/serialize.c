@@ -28,6 +28,7 @@ static void write_entity(LxStrBuf *sb, const LxScene *s, LxEntity e, int id_of_p
         clean_value(dm->animator.model); clean_value(dm->animator.clip); clean_value(dm->animator.graph);
     }
     const LxEntityData *d = dm;
+    if (!d || d->generated) return;   /* a terrain's chunks, grass and scatter are made again when the scene loads */
     int id = (*next_id)++;
     lx_sb_printf(sb, "\n[entity]\nid = %d\nparent = %d\nname = %s\nactive = %d\n", id, id_of_parent, d->name, d->active);
     if (d->tag[0]) lx_sb_printf(sb, "tag = %s\n", d->tag);
@@ -120,6 +121,32 @@ static void write_entity(LxStrBuf *sb, const LxScene *s, LxEntity e, int id_of_p
     if (d->comps & LX_COMP_BAKE_VOLUME) {
         lx_sb_printf(sb, "volume.size = %g %g %g\nvolume.density = %g\n", d->bvol.size.x, d->bvol.size.y, d->bvol.size.z, d->bvol.density);
         if (d->vol_index >= 0 && !prefab_root) lx_sb_printf(sb, "volume.baked = %d\n", d->vol_index);
+    }
+    if ((d->comps & LX_COMP_TERRAIN) && d->terrain) {
+        LxTerrainComponent *t = d->terrain;
+        clean_value(t->folder);
+        lx_sb_printf(sb, "terrain.folder = %s\nterrain.chunk = %g %d\nterrain.load_radius = %g\nterrain.lod = %g\nterrain.revision = %u\n",
+                     t->folder, t->chunk_size, t->resolution, t->load_radius, t->lod_distance, prefab_root ? 0u : t->revision);
+        for (int l = 0; l < t->layer_count && l < LX_TERRAIN_LAYERS; l++) {
+            const LxTerrainLayer *L = &t->layers[l];
+            clean_value(t->layers[l].material);
+            lx_sb_printf(sb, "terrain.layer%d.material = %s\nterrain.layer%d = %g %g %g %g %g\n", l, L->material, l, L->tiling, L->slope_min,
+                         L->slope_max, L->height_min, L->height_max);
+        }
+        lx_sb_printf(sb, "terrain.grass = %d %g %g %g %g %g %g\n", t->grass_layer, t->grass_density, t->grass_height, t->grass_color.x,
+                     t->grass_color.y, t->grass_color.z, t->grass_distance);
+        for (int k = 0; k < t->scatter_count && k < LX_TERRAIN_SCATTERS; k++) {
+            const LxTerrainScatter *S = &t->scatter[k];
+            clean_value(t->scatter[k].prefab);
+            lx_sb_printf(sb, "terrain.scatter%d.prefab = %s\nterrain.scatter%d = %g %d %g %g %g\n", k, S->prefab, k, S->density, S->layer,
+                         S->scale_min, S->scale_max, S->max_slope);
+        }
+        for (int k = 0; k < t->edit_layer_count && k < LX_TERRAIN_EDIT_LAYERS; k++) {
+            clean_value(t->edit_layers[k].name);
+            lx_sb_printf(sb, "terrain.edit%d.name = %s\nterrain.edit%d = %d %g\n", k, t->edit_layers[k].name, k, t->edit_layers[k].visible,
+                         t->edit_layers[k].strength);
+        }
+        lx_sb_printf(sb, "terrain.active_edit = %d\n", t->active_edit_layer);
     }
     for (LxEntity c = d->first_child; c; c = lx_entity_next_sibling(s, c)) write_entity(sb, s, c, id, next_id, false);
 }
@@ -404,6 +431,36 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
                     sl->override_count++;
                 }
             }
+        } else if (!strncmp(k, "terrain.", 8)) {
+            const char *f = k + 8;
+            LxTerrainComponent *t = lx_terrain_component_ensure(s, cur_e);
+            int n = -1;
+            if (!t) {}
+            else if (!strcmp(f, "folder")) lx_strcpy(t->folder, sizeof t->folder, v);
+            else if (!strcmp(f, "chunk")) { sscanf(v, "%f %d", &t->chunk_size, &t->resolution); }
+            else if (!strcmp(f, "load_radius")) t->load_radius = (float)atof(v);
+            else if (!strcmp(f, "lod")) t->lod_distance = (float)atof(v);
+            else if (!strcmp(f, "revision")) t->revision = (uint32_t)strtoul(v, NULL, 10);
+            else if (!strcmp(f, "active_edit")) t->active_edit_layer = atoi(v);
+            else if (!strcmp(f, "grass")) {
+                sscanf(v, "%d %f %f %f %f %f %f", &t->grass_layer, &t->grass_density, &t->grass_height, &t->grass_color.x, &t->grass_color.y,
+                       &t->grass_color.z, &t->grass_distance);
+            } else if (sscanf(f, "layer%d", &n) == 1 && n >= 0 && n < LX_TERRAIN_LAYERS) {
+                LxTerrainLayer *L = &t->layers[n];
+                if (n + 1 > t->layer_count || n == 0) t->layer_count = lx_maxi(n + 1, n == 0 ? 1 : t->layer_count);
+                if (strstr(f, ".material")) lx_strcpy(L->material, sizeof L->material, v);
+                else sscanf(v, "%f %f %f %f %f", &L->tiling, &L->slope_min, &L->slope_max, &L->height_min, &L->height_max);
+            } else if (sscanf(f, "scatter%d", &n) == 1 && n >= 0 && n < LX_TERRAIN_SCATTERS) {
+                LxTerrainScatter *S = &t->scatter[n];
+                if (n + 1 > t->scatter_count) t->scatter_count = n + 1;
+                if (strstr(f, ".prefab")) lx_strcpy(S->prefab, sizeof S->prefab, v);
+                else sscanf(v, "%f %d %f %f %f", &S->density, &S->layer, &S->scale_min, &S->scale_max, &S->max_slope);
+            } else if (sscanf(f, "edit%d", &n) == 1 && n >= 0 && n < LX_TERRAIN_EDIT_LAYERS) {
+                LxTerrainEditLayer *E = &t->edit_layers[n];
+                if (n + 1 > t->edit_layer_count) t->edit_layer_count = n + 1;
+                if (strstr(f, ".name")) lx_strcpy(E->name, sizeof E->name, v);
+                else { int vis = 1; sscanf(v, "%d %f", &vis, &E->strength); E->visible = vis != 0; }
+            }
         } else if (!strncmp(k, "volume.", 7)) {
             const char *f = k + 7;
             LxBakeVolume *bv = lx_add_bake_volume(s, cur_e);
@@ -447,6 +504,7 @@ bool lx_scene_save(const LxScene *s, const char *path) {
     bool ok = lx_file_write(path, text, strlen(text));
     lx_free(text);
     if (!ok) LX_ERROR("Could not save scene to %s", path);
+    if (!lx_terrain_save((LxScene *)s)) ok = false;   /* the terrains' changed chunks go with the scene */
     return ok;
 }
 

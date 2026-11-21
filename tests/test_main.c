@@ -1368,6 +1368,192 @@ static void test_sky(void) {
     lx_scene_destroy(b);
 }
 
+
+/* ---- terrain ---- */
+static int count_generated(LxScene *s, uint8_t kind) {
+    int n = 0;
+    for (int i = 1; i < s->count; i++) n += s->entities[i].alive && s->entities[i].generated == kind;
+    return n;
+}
+static LxEntity chunk_entity(LxScene *s, int cx, int cz) {
+    char name[48];
+    snprintf(name, sizeof name, "Chunk %d,%d", cx, cz);
+    for (int i = 1; i < s->count; i++)
+        if (s->entities[i].alive && s->entities[i].generated == LX_GEN_TERRAIN_CHUNK && !strcmp(s->entities[i].name, name))
+            return lx_entity_make((uint32_t)i, s->entities[i].generation & ((1u << (32 - LX_INDEX_BITS)) - 1u));
+    return 0;
+}
+static void test_terrain(void) {
+    printf("terrain\n");
+    char dir[LX_PATH_MAX];
+    snprintf(dir, sizeof dir, "%s", "luxora_test_terrain");
+    lx_path_remove(dir);
+    lx_mkdir_p(dir);
+    lx_assets_set_root(dir);
+    LxScene *s = lx_scene_create("Terrain test");
+    LxEntity te = lx_entity_create(s, "Island");
+    LxTerrainComponent *t = lx_add_terrain(s, te, "");
+    CHECK(t && !strcmp(t->folder, "Terrains/Island") && lx_terrain_chunk_count(s, te) == 1, "a new terrain: one chunk, in Terrains/<name>");
+    t->grass_layer = -1;   /* grass and scatter are checked later */
+    lx_terrain_update(s, lx_v3(32, 0, 32), true);
+    CHECK(count_generated(s, LX_GEN_TERRAIN_CHUNK) == 1, "...one chunk object");
+    LxEntity c00 = chunk_entity(s, 0, 0);
+    LxMesh *m = c00 ? lx_asset_mesh(lx_entity_data(s, c00)->mesh.mesh) : NULL;
+    CHECK(m && m->lod_count == 4 && m->lods[0].vertex_count == 129 * 129 + 4 * 129 && !m->has_uv2,
+          "its mesh: 129x129 points with skirts, four levels of detail, not lightmapped (%d LODs)", m ? m->lod_count : 0);
+    CHECK(c00 && (lx_entity_data(s, c00)->comps & LX_COMP_COLLIDER) && lx_entity_data(s, c00)->collider.shape == LX_COLLIDER_MESH, "...and a mesh collider");
+    float y = -1;
+    CHECK(lx_terrain_height(s, 10, 10, &y) && fabsf(y) < 1e-5f, "flat at first (%g)", y);
+
+    /* sculpt */
+    LxTerrainBrush b = {LX_TERRAIN_RAISE, 10, 1, 0.5f, 0, 4, 0};
+    uint32_t r0 = t->revision;
+    lx_terrain_begin_stroke(s, te);
+    for (int i = 0; i < 10; i++) lx_terrain_brush(s, te, lx_v3(32, 0, 32), &b, 0.05f);
+    lx_terrain_end_stroke(s, te);
+    float top = 0, far_y = 1;
+    lx_terrain_height(s, 32, 32, &top);
+    lx_terrain_height(s, 55, 55, &far_y);
+    CHECK(top > 1.0f && fabsf(far_y) < 1e-5f && t->revision == r0 + 1, "Raise: up in the middle, untouched outside (%.2f)", top);
+
+    /* grow: a neighbour joins without a step, and a brush across the border stays seamless */
+    CHECK(lx_terrain_add_chunk(s, te, 1, 0) && lx_terrain_has_chunk(s, te, 1, 0) && !lx_terrain_add_chunk(s, te, 1, 0), "Add Chunk at the edge");
+    CHECK(lx_terrain_test_seams(s, te) < 1e-5f, "the new chunk's edge matches its neighbour exactly");
+    b.radius = 14;
+    lx_terrain_begin_stroke(s, te);
+    for (int i = 0; i < 10; i++) lx_terrain_brush(s, te, lx_v3(64, 0, 20), &b, 0.05f);
+    b.tool = LX_TERRAIN_SMOOTH;
+    for (int i = 0; i < 10; i++) lx_terrain_brush(s, te, lx_v3(62, 0, 22), &b, 0.05f);
+    b.tool = LX_TERRAIN_ERODE;
+    for (int i = 0; i < 10; i++) lx_terrain_brush(s, te, lx_v3(63, 0, 21), &b, 0.05f);
+    lx_terrain_stamp(s, te, lx_v3(64, 0, 40), LX_STAMP_CRATER, 12, 6);
+    lx_terrain_end_stroke(s, te);
+    float l = 0, rr = 0;
+    lx_terrain_height(s, 63.9f, 20, &l);
+    lx_terrain_height(s, 64.1f, 20, &rr);
+    CHECK(lx_terrain_test_seams(s, te) < 1e-5f && l > 0.5f && fabsf(l - rr) < 0.2f, "brushes across a chunk border leave no seam (%.3f | %.3f)", l, rr);
+    lx_terrain_update(s, lx_v3(32, 0, 32), true);
+    CHECK(count_generated(s, LX_GEN_TERRAIN_CHUNK) == 2, "two chunk objects now");
+
+    /* undo and redo: the scene's revision decides */
+    uint32_t r_after = t->revision;
+    t->revision = r0;
+    lx_terrain_update(s, lx_v3(32, 0, 32), true);
+    lx_terrain_height(s, 32, 32, &top);
+    CHECK(fabsf(top) < 1e-5f && !lx_terrain_has_chunk(s, te, 1, 0) && t->revision == r0, "undo walks back: flat again, the added chunk gone");
+    lx_terrain_update(s, lx_v3(32, 0, 32), true);
+    CHECK(count_generated(s, LX_GEN_TERRAIN_CHUNK) == 1, "...its object too");
+    t->revision = r_after;
+    lx_terrain_update(s, lx_v3(32, 0, 32), true);
+    lx_terrain_height(s, 32, 32, &top);
+    CHECK(top > 1.0f && lx_terrain_has_chunk(s, te, 1, 0) && t->revision == r_after, "redo brings it all back");
+
+    /* paint, holes */
+    LxTerrainBrush p = {LX_TERRAIN_PAINT, 6, 1, 0.3f, 0, 0, 2};
+    for (int i = 0; i < 20; i++) lx_terrain_brush(s, te, lx_v3(100, 0, 10), &p, 0.05f);
+    int layer = -1;
+    lx_terrain_sample(s, 100, 10, NULL, NULL, &layer);
+    CHECK(layer == 2, "Paint: layer 2 shows where it was painted (%d)", layer);
+    p.tool = LX_TERRAIN_HOLE;
+    p.radius = 2;
+    lx_terrain_brush(s, te, lx_v3(110, 0, 50), &p, 0.05f);
+    CHECK(!lx_terrain_height(s, 110.2f, 50.2f, &y) && lx_terrain_height(s, 116, 50, &y), "Hole: no ground there, ground beside it");
+    LxRay down = {{110.2f, 50, 50.2f}, {0, -1, 0}};
+    LxVec3 hit;
+    CHECK(!lx_terrain_raycast(s, te, down, 100, &hit), "a ray falls through the hole");
+    down.origin = lx_v3(32, 50, 32);
+    CHECK(lx_terrain_raycast(s, te, down, 100, &hit) && fabsf(hit.y - top) < 0.05f, "and hits the ground elsewhere (%.2f)", hit.y);
+
+    /* edit layers: a road on its own layer, hidden, collapsed */
+    int road = lx_terrain_add_edit_layer(s, te, "Road");
+    CHECK(road == 1 && t->active_edit_layer == 1, "an edit layer, made active");
+    LxTerrainBrush rb = {LX_TERRAIN_RAISE, 6, 1, 0.3f, 0, 0, 0};
+    float before = 0, after = 0;
+    lx_terrain_height(s, 20, 50, &before);
+    lx_terrain_begin_stroke(s, te);
+    for (int i = 0; i < 10; i++) lx_terrain_brush(s, te, lx_v3(20, 0, 50), &rb, 0.05f);
+    lx_terrain_end_stroke(s, te);
+    lx_terrain_height(s, 20, 50, &after);
+    t->edit_layers[1].visible = false;
+    lx_terrain_update(s, lx_v3(32, 0, 32), true);
+    float hidden = 0;
+    lx_terrain_height(s, 20, 50, &hidden);
+    CHECK(after > before + 0.5f && fabsf(hidden - before) < 1e-4f, "hiding the layer hides its sculpting (%.2f -> %.2f -> %.2f)", before, after, hidden);
+    t->edit_layers[1].visible = true;
+    lx_terrain_update(s, lx_v3(32, 0, 32), true);
+    lx_terrain_collapse_edit_layers(s, te);
+    lx_terrain_height(s, 20, 50, &hidden);
+    CHECK(t->edit_layer_count == 1 && fabsf(hidden - after) < 1e-4f, "collapsing keeps what shows in the Base");
+
+    /* physics: a ball dropped on the terrain lands on it */
+    LxEntity ball = lx_entity_create(s, "Ball");
+    lx_entity_set_position(s, ball, lx_v3(40, 20, 40));
+    lx_add_collider(s, ball, LX_COLLIDER_SPHERE)->radius = 0.5f;
+    lx_add_rigidbody(s, ball);
+    float ground = 0;
+    lx_terrain_height(s, 40, 40, &ground);
+    for (int i = 0; i < 300; i++) lx_scene_simulate(s, 1.0f / 60.0f);
+    LxVec3 bp = lx_entity_world_position(s, ball);
+    CHECK(fabsf(bp.y - 0.5f - ground) < 0.3f, "a ball lands on the terrain (%.2f on %.2f)", bp.y, ground);
+    lx_scene_stop_simulation(s);
+
+    /* saved: the scene keeps the settings, the folder the chunks; no chunk objects in the scene text */
+    t->layers[1].tiling = 7.5f;
+    CHECK(lx_terrain_save(s) && !lx_terrain_unsaved(s), "saved");
+    char *text = lx_scene_serialize(s);
+    CHECK(strstr(text, "terrain.folder = Terrains/Island") && !strstr(text, "Chunk 0,0") && strstr(text, "terrain.layer1 = 7.5"), "scene text: the settings, no chunk objects");
+    char path[LX_PATH_MAX];
+    snprintf(path, sizeof path, "%s/Terrains/Island/c_1_0.lxchunk", dir);
+    CHECK(lx_file_exists(path), "a file per chunk");
+    float h_saved = 0;
+    lx_terrain_height(s, 32, 32, &h_saved);
+    lx_scene_destroy(s);
+    lx_terrain_shutdown();   /* forget everything in memory: what comes back is what was saved */
+    s = lx_scene_deserialize(text);
+    lx_free(text);
+    te = lx_entity_find(s, "Island");
+    t = lx_get_terrain(s, te);
+    CHECK(t && t->layers[1].tiling == 7.5f && lx_terrain_chunk_count(s, te) == 2, "loaded back: settings and both chunks");
+    t->grass_layer = -1;
+    lx_terrain_update(s, lx_v3(32, 0, 32), true);
+    lx_terrain_height(s, 32, 32, &top);
+    CHECK(fabsf(top - h_saved) < 1e-4f && !lx_terrain_height(s, 110.2f, 50.2f, &y), "heights and holes came back from the files (%.3f)", top);
+
+    /* streaming: far away, chunks drop to their simplified copy and lose collision; close, they come back */
+    t->load_radius = 40;
+    lx_terrain_update(s, lx_v3(2000, 0, 2000), true);
+    LxEntity c10 = chunk_entity(s, 1, 0);
+    CHECK(lx_terrain_loaded_count(s, te) == 0 && c10 && strstr(lx_entity_data(s, c10)->mesh.mesh, "/far") && !(lx_entity_data(s, c10)->comps & LX_COMP_COLLIDER),
+          "far from the focus: simplified, no collision (%d loaded)", lx_terrain_loaded_count(s, te));
+    float fy = 0;
+    CHECK(lx_terrain_height(s, 32, 32, &fy) && fabsf(fy - top) < 0.6f, "the simplified copy keeps the shape (%.2f vs %.2f)", fy, top);
+    lx_terrain_update(s, lx_v3(120, 0, 32), true);   /* chunk 1,0 holds it; chunk 0,0 is 56 m off */
+    CHECK(lx_terrain_loaded_count(s, te) == 1 && !strstr(lx_entity_data(s, c10)->mesh.mesh, "/far") && (lx_entity_data(s, c10)->comps & LX_COMP_COLLIDER),
+          "near: full detail and collision again, only for the chunk in range");
+
+    /* grass and scatter */
+    t->load_radius = 0;
+    t->grass_layer = 0;
+    t->grass_density = 2;
+    t->scatter_count = 1;
+    lx_strcpy(t->scatter[0].prefab, sizeof t->scatter[0].prefab, "builtin:cube");
+    t->scatter[0].density = 4;
+    t->scatter[0].layer = -1;
+    t->scatter[0].scale_min = t->scatter[0].scale_max = 1;
+    lx_terrain_update(s, lx_v3(32, 0, 32), true);
+    int grass = count_generated(s, LX_GEN_GRASS), scat = count_generated(s, LX_GEN_SCATTER);
+    CHECK(grass >= 1 && scat > 10, "grass near the camera, scattered objects (%d, %d)", grass, scat);
+    LxEntity dup = lx_entity_duplicate(s, te);
+    int kids = 0;
+    for (LxEntity k = lx_entity_data(s, dup)->first_child; k; k = lx_entity_next_sibling(s, k)) kids++;
+    CHECK(kids == 0, "duplicating a terrain copies none of its made objects (%d)", kids);
+    lx_entity_destroy(s, dup);
+    lx_scene_destroy(s);
+    lx_terrain_shutdown();
+    lx_path_remove(dir);
+    lx_assets_set_root("");
+}
+
 static void test_lightmapper(void) {
     printf("baked lighting\n");
     LxScene *s = lx_scene_create("Bake");
@@ -3560,6 +3746,7 @@ int main(void) {
     test_lightmap_uvs();
     test_lightmapper();
     test_sky();
+    test_terrain();
     test_bake_volumes();
     test_gi_sky_calibration();
     test_acoustics();

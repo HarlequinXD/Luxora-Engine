@@ -321,11 +321,17 @@ static void viewport_frame(UiNode *n) {
             LxVec3 f2 = lx_quat_rotate(cam_rot(), lx_v3(0, 0, -1));
             ED.cam_pos = lx_madd3(V.orbit_pivot, f2, -V.orbit_dist);
         }
-    } else if (hot) {
+    } else if (hot && !(ed_terrain_tool_active() && lx_key_down(LX_KEY_CTRL))) {
         float wheel = lx_mouse_wheel();
         if (wheel != 0) ED.cam_pos = lx_madd3(ED.cam_pos, fwd, wheel * lx_maxf(0.5f, ED.cam_speed * 0.25f));
     }
 
+    /* terrain brushes replace the gizmo and selection while a tool is out */
+    if (ed_terrain_tool_active() && V.axis < 0) {
+        ed_terrain_viewport(mouse_ray(), hot && V.nav == 0, inside);
+        V.pressed_in_view = false;
+        return;
+    }
     /* gizmo / selection */
     bool can_gizmo = ED.selected && ED.gizmo != ED_GIZMO_SELECT && ED.play == ED_EDIT && lx_entity_valid(ED.scene, ED.selected);
     V.hover_axis = -1;
@@ -349,6 +355,7 @@ static void viewport_frame(UiNode *n) {
             else {
                 float dist;
                 LxEntity hit = lx_scene_raycast(ED.scene, mouse_ray(), 5000.0f, &dist);
+                while (hit && lx_entity_generated(ED.scene, hit)) hit = lx_entity_parent(ED.scene, hit);   /* a chunk: its terrain */
                 /* clicking a child of a selected hierarchy selects the child; clicking empty space clears */
                 ed_select(hit);
             }
@@ -586,7 +593,8 @@ static void viewport_draw(UiNode *n, UiCtx *ui) {
     bool game = showing_game();
     if (!game) {
         draw_icons(ui);
-        draw_gizmo(ui);
+        if (ed_terrain_tool_active()) ed_terrain_draw(ui);
+        else draw_gizmo(ui);
         draw_axis_triad(ui, n);
     }
     const UiTheme *t = ui_theme(ui);

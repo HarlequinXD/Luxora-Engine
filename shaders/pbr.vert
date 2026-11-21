@@ -24,6 +24,17 @@ layout(location = 7) out vec3 v_lm;    // lightmap texel: uv in the atlas, layer
 void main() {
     mat4 model = mat4(in_m0, in_m1, in_m2, vec4(in_m3.xyz, 1.0));   // w carries the moving-object mark
     vec4 world = model * vec4(in_pos, 1.0);
+    if (in_lm.w < -1.5) {   // grass: uv2.x how far up the blade (it sways that much), uv2.y its phase
+        vec2 wind = lx_day_night() ? u.weather_b.xy : vec2(1.5, 0.6);
+        float speed = length(wind);
+        vec2 dir = speed > 0.01 ? wind / speed : vec2(1.0, 0.0);
+        float t = u.camera_pos.w;
+        float gust = 0.6 + 0.4 * sin(t * 0.7 + dot(world.xz, vec2(0.05, 0.03)));
+        float sway = sin(t * (1.6 + speed * 0.15) + in_uv2.y + dot(world.xz, dir) * 0.4) * (0.08 + speed * 0.025) * gust;
+        float lean = (0.05 + speed * 0.015) * gust;
+        world.xz += dir * (sway + lean) * in_uv2.x * 2.0;
+        world.y -= abs(sway + lean) * in_uv2.x * 0.6;
+    }
     // exact normal transform for translate/rotate/scale matrices without a matrix inverse
     vec3 s2 = vec3(dot(in_m0.xyz, in_m0.xyz), dot(in_m1.xyz, in_m1.xyz), dot(in_m2.xyz, in_m2.xyz));
     v_normal = normalize(mat3(model) * (in_normal / s2));

@@ -21,6 +21,7 @@ uint32_t ed_color_for_icon(UiIcon icon) {
     case UI_ICON_PROBE: return UI_HEX(0x8be9fd);
     case UI_ICON_PREFAB: return UI_HEX(0x6fb7ff);
     case UI_ICON_MODEL: return UI_HEX(0xe8a07a);
+    case UI_ICON_TERRAIN: return UI_HEX(0x8bc34a);
     case UI_ICON_ANIMATOR: return UI_HEX(0xf08a4b);
     case UI_ICON_GRAPH: return UI_HEX(0xc58cff);
     case UI_ICON_AVATAR: return UI_HEX(0x7fd47a);
@@ -46,6 +47,7 @@ UiIcon ed_icon_for_entity(LxScene *s, LxEntity e) {
     if (c & LX_COMP_CHARACTER) return UI_ICON_CHARACTER;
     if (c & LX_COMP_REFLECTION_PROBE) return UI_ICON_PROBE;
     if (c & LX_COMP_BAKE_VOLUME) return UI_ICON_GRID;
+    if (c & LX_COMP_TERRAIN) return UI_ICON_TERRAIN;
     if (c & LX_COMP_MESH) {
         const char *m = lx_get_mesh(s, e)->mesh;
         if (strstr(m, "sphere")) return UI_ICON_SPHERE;
@@ -283,6 +285,7 @@ static uint64_t hierarchy_hash(void) {
     int n = lx_scene_entity_count(s);
     for (int i = 0; i < n; i++) {
         LxEntity e = lx_scene_entity_at(s, i);
+        if (lx_entity_generated(s, e)) continue;   /* a terrain's chunks come and go as it streams: not in the hierarchy */
         const char *name = lx_entity_name(s, e);
         h = (h ^ e) * 1099511628211ull;
         h = (h ^ lx_entity_parent(s, e)) * 1099511628211ull;
@@ -298,7 +301,13 @@ static uint64_t hierarchy_hash(void) {
     return h ? h : 1;
 }
 
+static LxEntity first_shown_child(LxScene *s, LxEntity e) {
+    LxEntity c = lx_entity_first_child(s, e);
+    while (c && lx_entity_generated(s, c)) c = lx_entity_next_sibling(s, c);
+    return c;
+}
 static bool subtree_matches(LxEntity e) {
+    if (lx_entity_generated(ED.scene, e)) return false;
     if (lx_str_icontains(lx_entity_name(ED.scene, e), ED.hierarchy_search)) return true;
     for (LxEntity c = lx_entity_first_child(ED.scene, e); c; c = lx_entity_next_sibling(ED.scene, c))
         if (subtree_matches(c)) return true;
@@ -311,7 +320,7 @@ static void add_rows(UiNode *list, LxEntity e, int depth) {
     LxScene *s = ED.scene;
     if (!subtree_matches(e)) return;
     bool searching = ED.hierarchy_search[0] != 0;
-    LxEntity first_child = lx_entity_first_child(s, e);
+    LxEntity first_child = first_shown_child(s, e);
     bool open = searching || is_expanded(e);
     UiNode *row = ui_box(ui, list, UI_ROW);
     row->h = 24;
@@ -599,6 +608,12 @@ static void add_component(UiNode *n) {
     case LX_COMP_CHARACTER: lx_add_character(s, e); break;
     case LX_COMP_ANIMATOR: lx_add_animator(s, e, ""); break;
     case LX_COMP_STATE_GRAPH: lx_add_state_graph(s, e, ""); break;
+    case LX_COMP_TERRAIN: {
+        char folder[LX_REF_MAX];
+        ed_terrain_unique_folder(lx_entity_name(s, e)[0] ? lx_entity_name(s, e) : "Terrain", folder, sizeof folder);
+        lx_add_terrain(s, e, folder);
+        break;
+    }
     }
     ED.inspector_dirty = true;
     ED.hierarchy_hash = 0;
@@ -616,7 +631,7 @@ static void add_component_menu(UiNode *b) {
         {LX_COMP_REFLECTION_PROBE, "Reflection Probe", UI_ICON_PROBE}, {LX_COMP_COLLIDER, "Collider", UI_ICON_COLLIDER},
         {LX_COMP_RIGIDBODY, "Rigidbody", UI_ICON_RIGIDBODY}, {LX_COMP_CHARACTER, "Character Controller", UI_ICON_CHARACTER},
         {LX_COMP_ANIMATOR, "Animator", UI_ICON_ANIMATOR}, {LX_COMP_STATE_GRAPH, "State Graph", UI_ICON_GRAPH},
-        {LX_COMP_BAKE_VOLUME, "Baked Lighting Volume", UI_ICON_GRID}};
+        {LX_COMP_BAKE_VOLUME, "Baked Lighting Volume", UI_ICON_GRID}, {LX_COMP_TERRAIN, "Terrain", UI_ICON_TERRAIN}};
     for (int i = 0; i < (int)(sizeof comps / sizeof comps[0]); i++) {
         UiNode *it = ui_menu_item(ED.ui, p, comps[i].name, NULL, add_component);
         it->icon = comps[i].icon;
@@ -958,6 +973,11 @@ static void build_entity_inspector(UiNode *body) {
         hint->font = UI_FONT_SMALL;
         hint->fg = t->text_dim;
         hint->wrap = true;
+    }
+    if (d->comps & LX_COMP_TERRAIN) {
+        static bool g_open_terrain = true;
+        sec = comp_section(body, UI_ICON_TERRAIN, "Terrain", &g_open_terrain, LX_COMP_TERRAIN);
+        ed_terrain_section(sec, e);
     }
     if (d->comps & LX_COMP_ANIMATOR) {
         static bool g_open_animator = true;

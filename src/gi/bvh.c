@@ -149,6 +149,8 @@ bool lx_gi_moving_takes(LxScene *s, int i) { return takes(s, i, true); }
 static const LxMeshLod *build_lod(LxEntityData *d, bool moving) {
     const LxMesh *m = moving ? lx_skin_mesh_of(d) : lx_asset_mesh(d->mesh.mesh);
     if (!m) return NULL;
+    /* terrain chunks: a lighter level (about 2 m between points) is plenty for bounce light, sound and baking */
+    if (d->generated == LX_GEN_TERRAIN_CHUNK && m->lod_count > 2) return &m->lods[2];
     return moving && !m->skin && m->lod_count > 1 ? &m->lods[m->lod_count - 1] : &m->lods[0];
 }
 #define MOVING_TRI_MAX 400000   /* the most moving triangles GI takes in one frame */

@@ -36,6 +36,19 @@ Two frames are in flight. Per-frame resources (UBO slices, the instance stream, 
 - **Photon GI and probes**: the sun creeping across the sky counts as a small lighting change (like a flickering light), so GI stays smooth. Only a jump of the clock restarts it. Reflection probes recapture after the sun moves a couple of degrees or the sky's colour changes by a few percent.
 - **State graphs** get SUNRISE, SUNSET, NOON, MIDNIGHT and LIGHTNING events. The *Sky* actions are Set/Get Time of Day, At Time of Day, Set Weather, Set Clouds, Set Rain and Snow, and Strike Lightning.
 
+## Terrain
+
+`src/terrain/terrain.c`, with its shading in `terrain_surface()` (`shaders/pbr_body.glsl`) and the editor half in `editor/terrain_tools.c`. A Terrain component is one object made of square chunks on a grid, like Unity's neighbour terrains or Unreal's Landscape components.
+
+- **Data** lives per folder (`Assets/Terrains/<name>/`), shared by every scene that shows it: `terrain.lxterrain` lists the chunks with a 17×17 simplified copy of each one's heights and paint, and each chunk has its own `c_<x>_<z>.lxchunk` (heights per edit layer, paint weights, holes). Chunks share their edge points, so a brush that crosses a border writes both sides and seams can't open. A new chunk's heights are blended in from the edges of its neighbours.
+- **Objects**: each chunk is drawn by a child object the terrain makes itself (`terrain:<id>/<x>_<z>` mesh, a mesh collider, static). These are never saved, don't show in the Hierarchy, and clicking one selects the terrain.
+- **Streaming and LOD**: chunks within the load radius of the listener (or the camera; the editor camera while editing) are loaded in full detail with collision, a few per frame while playing. Further chunks are drawn from the simplified copy, and the mesh LOD chain does the rest; skirts hide the cracks between levels. There is no geomorphing, so a chunk switches detail in one step.
+- **Edit layers** (Unreal's Edit Layers): each chunk keeps one height field per layer on top of the Base; what shows is the Base plus each visible layer times its strength. Brushes write to the active layer; Collapse merges them.
+- **Undo**: a stroke (begin … end) stores the chunks it touched. The component's `revision` is saved with the scene, so the editor's text-snapshot undo restores it, and the terrain seeks its history to match.
+- **Paint**: six layers. Weights ride in the vertex (uv: 0-1, uv2: 2-3, tangent.w: 4; layer 5 is the remainder) and slope or height rules are applied as meshes are built. The shader (`MF_TERRAIN`) samples each layer's maps from texture arrays (set bindings 6 and 7) triplanar and blends by height.
+- **Grass and scatter** are made per loaded chunk from the paint: grass as instanced tufts that sway (instance `lm.w = -2`), scatter as prefab instances. Both are generated objects like the chunks.
+- Photon GI traces the terrain through LOD2 of each chunk.
+
 ## Virtual photon global illumination
 
 1. Static meshes are flattened into a triangle BVH (binned SAH, 4 triangles per leaf).

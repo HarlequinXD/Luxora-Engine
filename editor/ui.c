@@ -600,6 +600,11 @@ void ui_draw_icon(UiCtx *ui, UiIcon icon, float x, float y, float s, uint32_t c)
         ui_draw_triangle(ui, P(0.4f, 0.28f), P(0.6f, 0.28f), P(0.9f, 0.9f), c2);
         ui_draw_triangle(ui, P(0.4f, 0.28f), P(0.9f, 0.9f), P(0.1f, 0.9f), c2);
         break;
+    case UI_ICON_TERRAIN:   /* two peaks, the near one snow-capped */
+        ui_draw_triangle(ui, P(0.55f, 0.22f), P(0.95f, 0.82f), P(0.2f, 0.82f), c2);
+        ui_draw_triangle(ui, P(0.33f, 0.36f), P(0.62f, 0.82f), P(0.04f, 0.82f), c);
+        ui_draw_triangle(ui, P(0.33f, 0.36f), P(0.42f, 0.5f), P(0.24f, 0.5f), UI_HEX(0xf4f6fa));
+        break;
     case UI_ICON_PLANE:
         ui_draw_triangle(ui, P(0.3f, 0.3f), P(0.95f, 0.3f), P(0.7f, 0.75f), c);
         ui_draw_triangle(ui, P(0.3f, 0.3f), P(0.7f, 0.75f), P(0.05f, 0.75f), c);

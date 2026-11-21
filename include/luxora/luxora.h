@@ -316,6 +316,7 @@ typedef enum LxComponentBits {
     LX_COMP_ANIMATOR = 1 << 11,
     LX_COMP_STATE_GRAPH = 1 << 12,
     LX_COMP_BAKE_VOLUME = 1 << 13,
+    LX_COMP_TERRAIN = 1 << 14,
 } LxComponentBits;
 
 typedef struct LxCamera {
@@ -542,6 +543,7 @@ LxEntity lx_entity_first_child(const LxScene *s, LxEntity e);
 LxEntity lx_entity_next_sibling(const LxScene *s, LxEntity e);
 int lx_scene_entity_count(const LxScene *s);
 LxEntity lx_scene_entity_at(const LxScene *s, int index); /* stable creation order */
+bool lx_entity_generated(const LxScene *s, LxEntity e);    /* made by the engine (a terrain's chunks, grass, scatter): never saved */
 LxEntity lx_scene_root_first(const LxScene *s);           /* first root entity */
 
 /* Transform (local space) */
@@ -572,6 +574,94 @@ LxBehaviourRef *lx_add_behaviour(LxScene *s, LxEntity e, const char *behaviour_n
 LxCrowdComponent *lx_add_crowd(LxScene *s, LxEntity e, int agents);
 LxReflectionProbe *lx_add_reflection_probe(LxScene *s, LxEntity e);
 LxBakeVolume *lx_add_bake_volume(LxScene *s, LxEntity e);
+
+/* ---------------- Terrain (src/terrain): one object made of square chunks that join seamlessly. Grow it by adding
+ * chunks at its edge; brushes work across chunk borders. Each chunk is saved to its own file in the terrain's folder;
+ * chunks near the player (or the editor camera) are loaded in full with collision, those further off are drawn from
+ * a simplified copy. Paint layers blend by height; grass sways in the wind; prefabs can be scattered on a layer. */
+#define LX_TERRAIN_LAYERS 6
+#define LX_TERRAIN_SCATTERS 4
+#define LX_TERRAIN_EDIT_LAYERS 8
+typedef struct LxTerrainLayer {
+    char material[LX_REF_MAX];    /* its colour, normal, roughness, height and AO maps */
+    float tiling;                 /* metres one repeat of its textures covers */
+    float slope_min, slope_max;   /* paints itself on slopes between these (degrees); max <= min = off */
+    float height_min, height_max; /* paints itself between these heights (metres); max <= min = off */
+} LxTerrainLayer;
+typedef struct LxTerrainScatter {
+    char prefab[LX_REF_MAX];      /* a prefab (or a mesh) placed over the terrain: trees, rocks, bushes */
+    float density;                /* per 100 square metres where its layer is painted */
+    int layer;                    /* the paint layer it grows on (-1 = anywhere) */
+    float scale_min, scale_max;
+    float max_slope;              /* degrees */
+} LxTerrainScatter;
+typedef struct LxTerrainEditLayer {
+    char name[32];
+    bool visible;
+    float strength;               /* 0..1: how much of its sculpting shows */
+} LxTerrainEditLayer;
+typedef struct LxTerrainComponent {
+    char folder[LX_REF_MAX];      /* where its chunks are saved, under Assets ("Terrains/Island") */
+    float chunk_size;             /* metres along a chunk's edge */
+    int resolution;               /* height points along a chunk's edge: 33, 65, 129 or 257 */
+    float load_radius;            /* metres: full detail and collision within, simplified beyond (0 = everything) */
+    float lod_distance;           /* how far each level of detail reaches (1 = default) */
+    int layer_count;
+    LxTerrainLayer layers[LX_TERRAIN_LAYERS];
+    int grass_layer;              /* the paint layer grass grows on (-1 = no grass) */
+    float grass_density;          /* tufts per square metre */
+    float grass_height;           /* metres */
+    LxVec3 grass_color;
+    float grass_distance;         /* metres from the camera */
+    int scatter_count;
+    LxTerrainScatter scatter[LX_TERRAIN_SCATTERS];
+    int edit_layer_count;         /* edit layers stack on the Base (layer 0): sculpt a road on its own layer, hide or erase it later */
+    LxTerrainEditLayer edit_layers[LX_TERRAIN_EDIT_LAYERS];
+    int active_edit_layer;
+    uint32_t revision;            /* which state of the terrain this scene shows (the editor's undo) */
+} LxTerrainComponent;
+typedef enum LxTerrainTool {
+    LX_TERRAIN_RAISE, LX_TERRAIN_LOWER, LX_TERRAIN_SMOOTH, LX_TERRAIN_FLATTEN, LX_TERRAIN_SET_HEIGHT, LX_TERRAIN_NOISE,
+    LX_TERRAIN_ERODE, LX_TERRAIN_TERRACE, LX_TERRAIN_PAINT, LX_TERRAIN_HOLE, LX_TERRAIN_FILL_HOLE, LX_TERRAIN_ERASE_LAYER,
+    LX_TERRAIN_TOOL_COUNT
+} LxTerrainTool;
+typedef enum LxTerrainStamp { LX_STAMP_HILL, LX_STAMP_MOUNTAIN, LX_STAMP_CRATER, LX_STAMP_MESA, LX_STAMP_VOLCANO, LX_STAMP_VALLEY, LX_STAMP_COUNT } LxTerrainStamp;
+typedef enum LxTerrainPreset { LX_TERRAIN_FLAT, LX_TERRAIN_HILLS, LX_TERRAIN_MOUNTAINS, LX_TERRAIN_ISLAND, LX_TERRAIN_CANYONS, LX_TERRAIN_PRESET_COUNT } LxTerrainPreset;
+typedef struct LxTerrainBrush {
+    int tool;                     /* LxTerrainTool */
+    float radius;                 /* metres */
+    float strength;               /* 0..1 */
+    float falloff;                /* 0 hard edge .. 1 soft */
+    float target;                 /* Flatten / Set Height: the height (metres, world) */
+    float spacing;                /* Terrace: metres between steps */
+    int layer;                    /* Paint: the layer */
+} LxTerrainBrush;
+
+LxTerrainComponent *lx_add_terrain(LxScene *s, LxEntity e, const char *folder);   /* folder "" = Terrains/<name>; one flat chunk */
+LxTerrainComponent *lx_get_terrain(LxScene *s, LxEntity e);
+LxEntity lx_terrain_of(LxScene *s, LxEntity e);                 /* the terrain an object belongs to (itself, or a chunk's terrain) */
+bool lx_terrain_height(LxScene *s, float x, float z, float *y); /* the ground of any terrain at world x, z */
+bool lx_terrain_sample(LxScene *s, float x, float z, float *y, LxVec3 *normal, int *layer);   /* ... its normal and most painted layer */
+bool lx_terrain_raycast(LxScene *s, LxEntity terrain, LxRay ray, float max_dist, LxVec3 *hit);
+bool lx_terrain_add_chunk(LxScene *s, LxEntity terrain, int cx, int cz);       /* edges blended from its neighbours */
+bool lx_terrain_remove_chunk(LxScene *s, LxEntity terrain, int cx, int cz);
+bool lx_terrain_has_chunk(LxScene *s, LxEntity terrain, int cx, int cz);
+int lx_terrain_chunk_count(LxScene *s, LxEntity terrain);
+int lx_terrain_loaded_count(LxScene *s, LxEntity terrain);     /* chunks in full detail now */
+bool lx_terrain_chunk_at(LxScene *s, LxEntity terrain, LxVec3 world, int *cx, int *cz);   /* the chunk square under a point */
+void lx_terrain_begin_stroke(LxScene *s, LxEntity terrain);     /* brush strokes between begin and end are one undo step */
+void lx_terrain_brush(LxScene *s, LxEntity terrain, LxVec3 world, const LxTerrainBrush *b, float dt);
+void lx_terrain_stamp(LxScene *s, LxEntity terrain, LxVec3 world, LxTerrainStamp shape, float radius, float height);
+void lx_terrain_ramp(LxScene *s, LxEntity terrain, LxVec3 a, LxVec3 b, float width, float falloff);   /* a smooth road from a to b */
+void lx_terrain_generate(LxScene *s, LxEntity terrain, LxTerrainPreset preset, float height, uint32_t seed);   /* every chunk */
+void lx_terrain_end_stroke(LxScene *s, LxEntity terrain);
+int lx_terrain_add_edit_layer(LxScene *s, LxEntity terrain, const char *name);   /* returns its index (-1 when full) */
+void lx_terrain_remove_edit_layer(LxScene *s, LxEntity terrain, int index);      /* its sculpting goes */
+void lx_terrain_collapse_edit_layers(LxScene *s, LxEntity terrain);              /* all of them into the Base */
+void lx_terrain_layers_changed(LxScene *s, LxEntity terrain);   /* after changing paint layers, grass or scatter settings */
+bool lx_terrain_save(LxScene *s);                               /* writes every changed chunk of the scene's terrains */
+bool lx_terrain_unsaved(LxScene *s);
+void lx_terrain_stream(LxScene *s, LxVec3 focus);              /* load chunks around a point (the editor camera); play mode streams by itself */
 LxCollider *lx_add_collider(LxScene *s, LxEntity e, LxColliderShape shape); /* sized to the mesh when there is one */
 LxRigidbody *lx_add_rigidbody(LxScene *s, LxEntity e);
 LxCharacterController *lx_add_character(LxScene *s, LxEntity e);

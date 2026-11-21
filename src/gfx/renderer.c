@@ -206,7 +206,9 @@ static struct {
     DrawList local_lists[LOCAL_SHADOW_LIGHTS];
     GpuImage gi[3];
     int gi_res[3];
-    GpuImage white, flat_normal;
+    GpuImage white, flat_normal, dummy_array;
+    struct TerrainSet { const LxMaterial *mat; uint32_t version; GpuImage a, b; VkDescriptorSet set; } *terrain_sets;
+    int terrain_set_count, terrain_set_cap;
     UiTex ui_tex[MAX_UI_TEXTURES];
     MatSet *mat_sets; int mat_set_count, mat_set_cap;
     LxRenderTarget *backbuffer;
@@ -395,17 +397,19 @@ static void image_destroy(GpuImage *im) {
 }
 
 /* upload pixels into a 2D image (and optionally generate mips), leaving it SHADER_READ_ONLY */
+/* every layer of the image (pixels holds them one after another), mips made by blitting */
 static void image_upload_2d(GpuImage *im, const void *pixels, size_t bytes, bool gen_mips) {
+    uint32_t L = im->layers ? im->layers : 1;
     GpuBuffer staging;
     buffer_create(&staging, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true);
     memcpy(staging.mapped, pixels, bytes);
     VkCommandBuffer cmd = one_shot_begin();
     image_barrier(cmd, im->img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, 0, im->mips, 1);
+                  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, 0, im->mips, L);
     VkBufferImageCopy region;
     memset(&region, 0, sizeof region);
     region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    region.imageSubresource.layerCount = 1;
+    region.imageSubresource.layerCount = L;
     region.imageExtent.width = im->w;
     region.imageExtent.height = im->h;
     region.imageExtent.depth = 1;
@@ -414,12 +418,12 @@ static void image_upload_2d(GpuImage *im, const void *pixels, size_t bytes, bool
         int32_t mw = (int32_t)im->w, mh = (int32_t)im->h;
         for (uint32_t m = 1; m < im->mips; m++) {
             image_barrier(cmd, im->img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, m - 1, 1, 1);
+                          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, m - 1, 1, L);
             VkImageBlit blit;
             memset(&blit, 0, sizeof blit);
             blit.srcSubresource.aspectMask = blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             blit.srcSubresource.mipLevel = m - 1;
-            blit.srcSubresource.layerCount = blit.dstSubresource.layerCount = 1;
+            blit.srcSubresource.layerCount = blit.dstSubresource.layerCount = L;
             blit.dstSubresource.mipLevel = m;
             blit.srcOffsets[1].x = mw; blit.srcOffsets[1].y = mh; blit.srcOffsets[1].z = 1;
             mw = mw > 1 ? mw / 2 : 1;
@@ -427,13 +431,13 @@ static void image_upload_2d(GpuImage *im, const void *pixels, size_t bytes, bool
             blit.dstOffsets[1].x = mw; blit.dstOffsets[1].y = mh; blit.dstOffsets[1].z = 1;
             vkCmdBlitImage(cmd, im->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, im->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
             image_barrier(cmd, im->img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, m - 1, 1, 1);
+                          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, m - 1, 1, L);
         }
         image_barrier(cmd, im->img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, im->mips - 1, 1, 1);
+                      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, im->mips - 1, 1, L);
     } else {
         image_barrier(cmd, im->img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, 0, im->mips, 1);
+                      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, 0, im->mips, L);
     }
     one_shot_end(cmd);
     buffer_destroy(&staging);
@@ -1442,7 +1446,9 @@ static void volumes_fill_ubo(LxScene *s, SceneUBO *ubo) {
 }
 
 /* the lightmap tile an object draws with (or none) */
+static const float SWAYS[4] = {0, 0, 0, -2};   /* grass: the vertex shader bends it in the wind */
 static const float *entity_lightmap(const LxEntityData *d, const LxMesh *mesh, float out[4]) {
+    if (d->generated == LX_GEN_GRASS) return SWAYS;
     if (d->lm_index < 0 || d->lm_index >= R.lm_count || !mesh->has_uv2 || mesh->skin || mesh->dynamic) return NO_LIGHTMAP;
     out[0] = d->lm_st[0]; out[1] = d->lm_st[1]; out[2] = d->lm_st[2]; out[3] = (float)d->lm_index;
     return out;
@@ -1939,9 +1945,9 @@ static void create_static_resources(void) {
         {13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
         {14, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL}};
     R.scene_layout = set_layout(sb, 15);
-    VkDescriptorSetLayoutBinding mb[MAT_TEXTURES];
-    for (uint32_t i = 0; i < MAT_TEXTURES; i++) mb[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
-    R.material_layout = set_layout(mb, MAT_TEXTURES);
+    VkDescriptorSetLayoutBinding mb[MAT_TEXTURES + 2];   /* + a terrain's layer arrays (placeholders for other materials) */
+    for (uint32_t i = 0; i < MAT_TEXTURES + 2; i++) mb[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+    R.material_layout = set_layout(mb, MAT_TEXTURES + 2);
     VkDescriptorSetLayoutBinding tb = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
     R.tex_layout = set_layout(&tb, 1);
     VkDescriptorSetLayoutBinding pb = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, PROBE_SLOTS, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
@@ -1957,7 +1963,7 @@ static void create_static_resources(void) {
     R.gspec_format = VK_FORMAT_R8G8B8A8_UNORM;
 
     VkDescriptorSetLayout pbr_sets[3] = {R.scene_layout, R.material_layout, R.probe_layout};
-    R.pbr_layout = pipe_layout(pbr_sets, 3, 64, VK_SHADER_STAGE_FRAGMENT_BIT);
+    R.pbr_layout = pipe_layout(pbr_sets, 3, 96, VK_SHADER_STAGE_FRAGMENT_BIT);
     VkDescriptorSetLayout ssr_sets[3] = {R.scene_layout, R.ssr_layout, R.probe_layout};
     R.ssr_pipe_layout = pipe_layout(ssr_sets, 3, 32, VK_SHADER_STAGE_FRAGMENT_BIT);
     R.filter_layout = pipe_layout(&R.tex_layout, 1, 16, VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -2057,6 +2063,10 @@ static void create_static_resources(void) {
     image_upload_2d(&R.white, white, 4, false);
     image_create(&R.flat_normal, &d);
     image_upload_2d(&R.flat_normal, flat, 4, false);
+    ImageDesc da = {1, 1, 1, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                    VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_2D_ARRAY, false, 0};
+    image_create(&R.dummy_array, &da);   /* the terrain layer slots of ordinary materials */
+    image_upload_2d(&R.dummy_array, white, 4, false);
 
     for (int f = 0; f < FRAMES; f++) {
         FrameData *fr = &R.frames[f];
@@ -2157,6 +2167,9 @@ void lx_renderer_shutdown(void) {
     for (int c = 0; c < 2; c++) image_destroy(&R.gi_vis[c]);
     image_destroy(&R.white);
     image_destroy(&R.flat_normal);
+    image_destroy(&R.dummy_array);
+    for (int i = 0; i < R.terrain_set_count; i++) { image_destroy(&R.terrain_sets[i].a); image_destroy(&R.terrain_sets[i].b); }
+    lx_free(R.terrain_sets);
     probes_destroy();
     image_destroy(&R.dummy_cube);
     VkPipeline pipes[] = {R.pbr, R.shadow, R.sky, R.grid, R.outline, R.tonemap_ldr, R.tonemap_swap, R.ui, R.precip,
@@ -2326,7 +2339,49 @@ static void release_all_meshes_textures(void) {
     while (g_live_tex_count) lx_renderer_texture_release(g_live_tex[0]);
 }
 
+/* a terrain's material: its layers' textures as two arrays (colour + roughness; normal, height, ao) */
+static VkDescriptorSet terrain_set(const LxMaterial *m, const LxTerrainGpuLayers *tl) {
+    struct TerrainSet *ts = NULL;
+    for (int i = 0; i < R.terrain_set_count; i++) if (R.terrain_sets[i].mat == m) { ts = &R.terrain_sets[i]; break; }
+    if (ts && ts->version == tl->version) return ts->set;
+    if (!ts) {
+        struct TerrainSet n;
+        memset(&n, 0, sizeof n);
+        n.mat = m;
+        LX_VEC_PUSH(R.terrain_sets, R.terrain_set_count, R.terrain_set_cap, n);
+        ts = &R.terrain_sets[R.terrain_set_count - 1];
+    } else {   /* the layers changed: new images (rare: editing the layers) */
+        vkDeviceWaitIdle(R.device);
+        image_destroy(&ts->a);
+        image_destroy(&ts->b);
+        if (ts->set) vkFreeDescriptorSets(R.device, R.desc_pool, 1, &ts->set);
+    }
+    ts->version = tl->version;
+    uint32_t mips = 1;
+    for (int k = tl->size; k > 1; k >>= 1) mips++;
+    VkFormat fa = VK_FORMAT_R8G8B8A8_SRGB, fb = VK_FORMAT_R8G8B8A8_UNORM;
+    bool blit = format_supports(fa, VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
+    if (!blit) mips = 1;
+    ImageDesc d = {(uint32_t)tl->size, (uint32_t)tl->size, 1, (uint32_t)tl->count, mips, fa,
+                   VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
+                   VK_IMAGE_VIEW_TYPE_2D_ARRAY, false, 0};
+    size_t bytes = (size_t)tl->count * tl->size * tl->size * 4;
+    image_create(&ts->a, &d);
+    image_upload_2d(&ts->a, tl->a, bytes, mips > 1);
+    d.fmt = fb;
+    image_create(&ts->b, &d);
+    image_upload_2d(&ts->b, tl->b, bytes, mips > 1);
+    ts->set = alloc_set(R.material_layout);
+    for (int k = 0; k < MAT_TEXTURES; k++)
+        write_image(ts->set, (uint32_t)k, k == 1 ? R.flat_normal.view : R.white.view, R.linear_repeat, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    write_image(ts->set, MAT_TEXTURES, ts->a.view, R.linear_repeat, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    write_image(ts->set, MAT_TEXTURES + 1, ts->b.view, R.linear_repeat, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    return ts->set;
+}
+
 static VkDescriptorSet material_set(const LxMaterial *m) {
+    const LxTerrainGpuLayers *tl = lx_terrain_gpu_layers(m);
+    if (tl) return terrain_set(m, tl);
     const char *refs[MAT_TEXTURES] = {m->albedo_map, m->normal_map, m->roughness_map, m->metallic_map, m->ao_map, m->height_map};
     LxTexture *tex[MAT_TEXTURES];
     for (int k = 0; k < MAT_TEXTURES; k++) tex[k] = refs[k][0] ? lx_asset_texture(refs[k]) : NULL;
@@ -2340,6 +2395,8 @@ static VkDescriptorSet material_set(const LxMaterial *m) {
         VkImageView view = tex[k] ? texture_gpu(tex[k], k == 0)->view : fallback;   /* only albedo is colour */
         write_image(ms.set, (uint32_t)k, view, R.linear_repeat, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
+    write_image(ms.set, MAT_TEXTURES, R.dummy_array.view, R.linear_repeat, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    write_image(ms.set, MAT_TEXTURES + 1, R.dummy_array.view, R.linear_repeat, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     LX_VEC_PUSH(R.mat_sets, R.mat_set_count, R.mat_set_cap, ms);
     return ms.set;
 }
@@ -2763,11 +2820,17 @@ static void draw_batches(VkCommandBuffer cmd, const DrawList *dl, VkBuffer inst,
             float nstr = m->normal_map[0] ? lx_maxf(m->normal_strength, 0.001f) * (m->normal_flip_green ? -1.0f : 1.0f) : 0.0f;
             int flags = (m->roughness_map[0] ? 1 : 0) | (m->metallic_map[0] ? 2 : 0) | (m->ao_map[0] ? 4 : 0) |
                         (m->roughness_is_smoothness ? 8 : 0) | (m->parallax_shadows ? 16 : 0);
-            float pc[16] = {m->albedo.x, m->albedo.y, m->albedo.z, m->albedo.w,
+            const LxTerrainGpuLayers *tl = lx_terrain_gpu_layers(m);
+            if (tl) flags |= 32;   /* MF_TERRAIN: blend the layers the vertices carry */
+            float pc[24] = {m->albedo.x, m->albedo.y, m->albedo.z, m->albedo.w,
                             m->metallic, m->roughness, m->uv_scale > 0 ? m->uv_scale : 1.0f, nstr,
                             m->emissive.x, m->emissive.y, m->emissive.z, m->emissive_strength,
                             m->height_map[0] ? lx_maxf(m->height_scale, 0.0f) : 0.0f, m->ao_strength, (float)flags, 0};
-            vkCmdPushConstants(cmd, R.pbr_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 64, pc);
+            if (tl) {   /* each layer's tiling (metres a repeat covers), how many layers */
+                for (int l = 0; l < 6; l++) pc[16 + l] = tl->tiling[l] > 0.05f ? tl->tiling[l] : 4.0f;
+                pc[22] = (float)tl->count;
+            }
+            vkCmdPushConstants(cmd, R.pbr_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 96, pc);
         }
         vkCmdDrawIndexed(cmd, (uint32_t)bt->mesh->lods[bt->lod].index_count, bt->count, 0, 0, bt->first);
         R.stats.draw_calls++;
@@ -3257,7 +3320,10 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
         if (local_shadow_size(gs->shadow_resolution) != R.local_shadow_res) create_local_shadow(local_shadow_size(gs->shadow_resolution));
         write_scene_sets();
     }
-    if (!R.preview) lx_sky_prepare(s);   /* Day-night: places the sun light before anything reads it */
+    if (!R.preview) {
+        lx_sky_prepare(s);   /* Day-night: places the sun light before anything reads it */
+        lx_terrain_update(s, lx_terrain_focus(s, view->eye), !s->simulating);
+    }
     lx_scene_update_transforms(s);
     if (!R.preview) lightmaps_sync(s, fr);
 
@@ -3470,7 +3536,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
                 LxMesh *dm = lm[3] >= 0 ? lx_mesh_lightmap_variant(mesh, lx_mat4_scale_of(&d->world)) : mesh;   /* stretched: its own unwrap */
                 dl_add_lm(&R.main_list, dm, pick_lod(dm, radius * proj_scale / dist), mat, d->world.m, white, lm);
             } else R.stats.instances_culled++;
-            if (precip_map && lx_frustum_test_sphere(&pfr, c, radius) && !moves_about(s, d))   /* roofs: what stays put */
+            if (precip_map && d->generated != LX_GEN_GRASS && lx_frustum_test_sphere(&pfr, c, radius) && !moves_about(s, d))   /* roofs: what stays put */
                 dl_add(&R.precip_list, mesh, mesh->lod_count > 1 ? 1 : 0, mat, d->world.m, white);
             if (d->mesh.cast_shadows) {
                 for (int k = 0; k < cascades; k++)

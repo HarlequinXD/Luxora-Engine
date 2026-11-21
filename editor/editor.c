@@ -635,6 +635,7 @@ LxEntity ed_create(const char *what) {
         if (!strcmp(what, prims[i])) {
             e = lx_spawn_primitive(s, (LxPrimitive)i, prims[i], lx_v3(at.x, i == 2 ? 0 : (i >= 3 ? 1.0f : 0.5f), at.z));
         }
+    if (!e && !strcmp(what, "Terrain")) e = ed_terrain_create();
     if (!e && !strcmp(what, "Physics Cube")) {
         e = lx_spawn_primitive(s, LX_PRIM_CUBE, "Physics Cube", lx_v3(at.x, 2.5f, at.z));
         lx_add_rigidbody(s, e);
@@ -895,6 +896,7 @@ static void create_items(UiNode *p) {
     item(p, "Reflection Probe", NULL, UI_ICON_PROBE, m_create);
     item(p, "Baked Lighting Volume", NULL, UI_ICON_GRID, m_create);
     ui_menu_separator(ED.ui, p);
+    item(p, "Terrain", NULL, UI_ICON_TERRAIN, m_create);
     ui_menu_separator(ED.ui, p);
     item(p, "Character", NULL, UI_ICON_CHARACTER, m_create);
     item(p, "Physics Cube", NULL, UI_ICON_RIGIDBODY, m_create);
@@ -1219,6 +1221,7 @@ void ed_update(float dt) {
         }
     } else {
         lx_scene_update_transforms(ED.scene);
+        ed_terrain_frame();
     }
     if (ED.play != ED_EDIT) {   /* the game asked to change scene or quit: in the editor, Quit stops playing */
         char next[LX_REF_MAX];

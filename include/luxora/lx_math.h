@@ -30,6 +30,9 @@ LX_INLINE float lx_minf(float a, float b) { return a < b ? a : b; }
 LX_INLINE float lx_maxf(float a, float b) { return a > b ? a : b; }
 LX_INLINE float lx_clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 LX_INLINE float lx_lerpf(float a, float b, float t) { return a + (b - a) * t; }
+LX_INLINE int lx_mini(int a, int b) { return a < b ? a : b; }
+LX_INLINE int lx_maxi(int a, int b) { return a > b ? a : b; }
+LX_INLINE int lx_clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 LX_INLINE float lx_saturate(float v) { return lx_clampf(v, 0.0f, 1.0f); }
 
 LX_INLINE LxVec2 lx_v2(float x, float y) { LxVec2 r = {x, y}; return r; }

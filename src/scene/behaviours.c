@@ -220,6 +220,7 @@ void lx_scene_simulate(LxScene *s, float real_dt) {
     lx_gameplay_begin_frame(s, dt, real_dt);
     lx_sky_simulate(s, dt);   /* the clock and the weather; the sun light follows */
     lx_sky_prepare(s);
+    lx_terrain_update(s, lx_terrain_focus(s, lx_v3(0, 0, 0)), false);   /* chunks stream in around the player */
     int n = s->count;
     for (int i = 1; i < n; i++) {
         LxEntityData *d = &s->entities[i];

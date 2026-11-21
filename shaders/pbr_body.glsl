@@ -21,15 +21,74 @@ layout(set = 1, binding = 2) uniform sampler2D u_roughness_map;  // G channel (g
 layout(set = 1, binding = 3) uniform sampler2D u_metallic_map;   // B channel
 layout(set = 1, binding = 4) uniform sampler2D u_ao_map;         // R channel
 layout(set = 1, binding = 5) uniform sampler2D u_height_map;     // R channel, white = high
+layout(set = 1, binding = 6) uniform sampler2DArray u_layer_a;   // terrain: each layer's colour (sRGB) + roughness
+layout(set = 1, binding = 7) uniform sampler2DArray u_layer_b;   // terrain: normal xy, height, ao
 
 layout(push_constant) uniform Material {
     vec4 albedo;
     vec4 params;    // metallic, roughness, uv scale, normal strength (0 = no normal map, < 0 = DirectX green)
     vec4 emissive;  // rgb, strength
     vec4 params2;   // height scale (0 = no parallax), ao strength, flags, -
+    vec4 tile_a;    // terrain: metres one repeat of layers 0-3 covers
+    vec4 tile_b;    // terrain: layers 4-5, how many layers, -
 } m;
 
-const int MF_ROUGH_MAP = 1, MF_METAL_MAP = 2, MF_AO_MAP = 4, MF_SMOOTHNESS = 8, MF_PARALLAX_SHADOWS = 16;
+const int MF_ROUGH_MAP = 1, MF_METAL_MAP = 2, MF_AO_MAP = 4, MF_SMOOTHNESS = 8, MF_PARALLAX_SHADOWS = 16, MF_TERRAIN = 32;
+
+/* Terrain: the vertices carry six layer weights (uv: 0-1, uv2: 2-3, tangent.w: 4, the rest: 5). Each layer is
+   sampled from above in world space (or from three sides on steep slopes), and they are blended by height so rock
+   shows between grass rather than smearing into it. */
+void terrain_surface(vec3 ng, inout vec3 albedo, inout float rough, inout float ao, inout vec3 n) {
+    float w[6];
+    w[0] = v_uv.x; w[1] = v_uv.y; w[2] = v_uv2.x; w[3] = v_uv2.y; w[4] = v_tangent.w;
+    w[5] = max(1.0 - (w[0] + w[1] + w[2] + w[3] + w[4]), 0.0);
+    float tiles[6] = float[6](m.tile_a.x, m.tile_a.y, m.tile_a.z, m.tile_a.w, m.tile_b.x, m.tile_b.y);
+    int count = int(m.tile_b.z + 0.5);
+    vec3 bl = pow(abs(ng), vec3(6.0));
+    bl /= bl.x + bl.y + bl.z;
+    bool tri = bl.y < 0.97;   // steep: textures from the side too, so cliffs don't stretch
+    vec3 p = v_world;
+    vec3 dpx = dFdx(p), dpy = dFdy(p);
+    // pass 1: each layer's height, to pick which shows
+    float score[6];
+    float best = -10.0;
+    for (int l = 0; l < 6; l++) {
+        score[l] = -10.0;
+        if (l >= count || w[l] < 0.004) continue;
+        float s = 1.0 / tiles[l];
+        float h = textureGrad(u_layer_b, vec3(p.xz * s, float(l)), dpx.xz * s, dpy.xz * s).b;
+        score[l] = h * 0.6 + w[l];
+        best = max(best, score[l]);
+    }
+    vec3 col = vec3(0.0), nrm = vec3(0.0);
+    float r = 0.0, occ = 0.0, total = 0.0;
+    for (int l = 0; l < 6; l++) {
+        float b = max(score[l] - (best - 0.25), 0.0);
+        if (b <= 0.0) continue;
+        float s = 1.0 / tiles[l];
+        vec4 A = textureGrad(u_layer_a, vec3(p.xz * s, float(l)), dpx.xz * s, dpy.xz * s);
+        vec4 B = textureGrad(u_layer_b, vec3(p.xz * s, float(l)), dpx.xz * s, dpy.xz * s);
+        vec3 lc = A.rgb * bl.y, ln = vec3(B.x * 2.0 - 1.0, 0.0, B.y * 2.0 - 1.0) * bl.y;
+        float lr = A.a * bl.y, lo = B.a * bl.y;
+        if (tri) {   // from the x and z sides
+            vec4 Ax = textureGrad(u_layer_a, vec3(p.zy * s, float(l)), dpx.zy * s, dpy.zy * s);
+            vec4 Bx = textureGrad(u_layer_b, vec3(p.zy * s, float(l)), dpx.zy * s, dpy.zy * s);
+            vec4 Az = textureGrad(u_layer_a, vec3(p.xy * s, float(l)), dpx.xy * s, dpy.xy * s);
+            vec4 Bz = textureGrad(u_layer_b, vec3(p.xy * s, float(l)), dpx.xy * s, dpy.xy * s);
+            lc += Ax.rgb * bl.x + Az.rgb * bl.z;
+            lr += Ax.a * bl.x + Az.a * bl.z;
+            lo += Bx.a * bl.x + Bz.a * bl.z;
+            ln += vec3(0.0, Bx.y * 2.0 - 1.0, Bx.x * 2.0 - 1.0) * bl.x * sign(ng.x) + vec3(Bz.x * 2.0 - 1.0, Bz.y * 2.0 - 1.0, 0.0) * bl.z * sign(ng.z);
+        }
+        col += lc * b; r += lr * b; occ += lo * b; nrm += ln * b;
+        total += b;
+    }
+    if (total <= 0.0) return;
+    albedo = col / total * v_tint.rgb;
+    rough = clamp(r / total, 0.04, 1.0);
+    ao = occ / total;
+    n = normalize(ng + nrm / total);
+}
 
 const float PI = 3.14159265;
 
@@ -367,6 +426,7 @@ void main() {
 
     vec3 n = ng;
     float nstrength = m.params.w;
+    if ((flags & MF_TERRAIN) != 0) { terrain_surface(ng, albedo, rough, ao, n); metallic = 0.0; nstrength = 0.0; }
     if (nstrength != 0.0) {
         vec3 tn = textureGrad(u_normal_map, uv, uv_dx, uv_dy).xyz * 2.0 - 1.0;
         if (nstrength < 0.0) tn.y = -tn.y;     // DirectX-style normal map

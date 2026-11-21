@@ -331,7 +331,31 @@ typedef struct LxEntityData {
     int16_t lm_index;         /* baked lighting: lightmap atlas, -1 = none */
     float lm_st[3];           /* its tile in the atlas: size, x, y (0..1) */
     int16_t vol_index;        /* Baked Lighting Volume: its baked probes (vol<i>.lxlv), -1 = not baked */
+    LxTerrainComponent *terrain;   /* Terrain component (heap) */
+    uint8_t generated;        /* made by the engine at run time, never saved or shown in the hierarchy: LX_GEN_* */
 } LxEntityData;
+#define LX_GEN_TERRAIN_CHUNK 1
+#define LX_GEN_GRASS 2
+#define LX_GEN_SCATTER 3
+
+/* ---------- Terrain (src/terrain/terrain.c) ---------- */
+void lx_terrain_update(LxScene *s, LxVec3 focus, bool editing);   /* streams chunks around focus, keeps chunk objects in step */
+void lx_terrain_scene_destroyed(LxScene *s);
+LxVec3 lx_terrain_focus(LxScene *s, LxVec3 fallback);   /* the player while playing, else fallback */
+void lx_terrain_component_free(LxTerrainComponent *t);
+LxTerrainComponent *lx_terrain_component_ensure(LxScene *s, LxEntity e);   /* defaults only: no data made */
+LxMesh *lx_terrain_mesh_ref(const char *ref);          /* "terrain:<id>/..." meshes and materials the terrain owns */
+LxMaterial *lx_terrain_material_ref(const char *ref);
+LxTexture *lx_terrain_texture_ref(const char *ref);
+typedef struct LxTerrainGpuLayers {
+    int count, size;           /* layers, texels along an edge */
+    const uint8_t *a, *b;      /* count x size x size RGBA8: albedo (sRGB) + roughness; normal xy, height, ao */
+    float tiling[LX_TERRAIN_LAYERS];
+    uint32_t version;          /* changes when the layers change */
+} LxTerrainGpuLayers;
+const LxTerrainGpuLayers *lx_terrain_gpu_layers(const LxMaterial *m);   /* NULL: not a terrain material */
+void lx_terrain_shutdown(void);
+float lx_terrain_test_seams(LxScene *s, LxEntity e);   /* tests: worst mismatch along shared chunk edges */
 
 /* ---------- Day-night sky and weather (src/scene/sky.c) ---------- */
 typedef struct LxSkyEval {

@@ -262,6 +262,14 @@ void ed_prefab_select_asset(LxEntity e);
 LxEntity ed_model_place(const char *ref, LxVec3 pos, LxEntity parent);
 void ed_model_inspector(UiNode *body, const char *ref);
 void ed_animator_section(UiNode *sec, LxEntity e);
+/* terrain_tools.c: the Terrain inspector and its brushes in the Scene view */
+void ed_terrain_section(UiNode *sec, LxEntity e);
+bool ed_terrain_tool_active(void);
+void ed_terrain_viewport(LxRay ray, bool hot, bool inside);
+void ed_terrain_draw(UiCtx *ui);
+void ed_terrain_frame(void);
+LxEntity ed_terrain_create(void);
+void ed_terrain_unique_folder(const char *base, char *out, size_t cap);
 void ed_avatar_window(const char *ref);
 void ed_avatar_refresh_dots(void);
 void ed_remember_scene(void);           /* editor.c: reopen this scene next time */   /* panels.c: write edited materials */
