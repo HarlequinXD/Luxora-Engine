@@ -205,6 +205,7 @@ LxTexture *lx_asset_texture(const char *ref) {
 
 LxSound *lx_asset_sound(const char *ref) {
     if (!ref || !ref[0]) return NULL;
+    if (!strncmp(ref, "builtin:", 8)) return lx_sky_builtin_sound(ref + 8);   /* made in code, never freed */
     AssetEntry *e = find(ref, ASSET_SOUND);
     if (e) return e->ptr;
     char path[LX_PATH_MAX];

@@ -134,6 +134,17 @@ char *lx_scene_serialize(const LxScene *s) {
                  e->ground_color.z);
     lx_sb_printf(&sb, "ambient = %g\nexposure = %g\nfog_color = %g %g %g\nfog_density = %g\n", e->ambient_intensity, e->exposure,
                  e->fog_color.x, e->fog_color.y, e->fog_color.z, e->fog_density);
+    {   /* the Day-night sky and weather */
+        lx_sb_printf(&sb, "sky.mode = %d\nsky.time = %g\nsky.day_length = %g\nsky.latitude = %g\nsky.day_of_year = %g\nsky.heading = %g\n",
+                     e->sky_mode, e->time_of_day, e->day_length, e->latitude, e->day_of_year, e->sun_heading);
+        lx_sb_printf(&sb, "sky.sun = %g\nsky.moon = %g\nsky.moon_phase = %g\nsky.stars = %g\nsky.haze = %g\n", e->sun_intensity,
+                     e->moon_intensity, e->moon_phase, e->star_intensity, e->haze);
+        lx_sb_printf(&sb, "clouds.coverage = %g\nclouds.density = %g\nclouds.type = %d\nclouds.height = %g\nclouds.thickness = %g\n",
+                     e->cloud_coverage, e->cloud_density, e->cloud_type, e->cloud_height, e->cloud_thickness);
+        lx_sb_printf(&sb, "wind.direction = %g\nwind.speed = %g\nweather = %d\nweather.rain = %g\nweather.snow = %g\n", e->wind_direction,
+                     e->wind_speed, e->weather, e->rain, e->snow);
+        lx_sb_printf(&sb, "weather.lightning = %g\nweather.mist = %g\nweather.blend = %g\n", e->lightning, e->mist, e->weather_blend);
+    }
     const LxBakeSettings *bk = &s->bake;
     lx_sb_printf(&sb, "bake.texels_per_unit = %g\nbake.max_atlas = %d\nbake.bounces = %d\nbake.samples = %d\nbake.directional = %d\nbake.denoise = %d\n",
                  bk->texels_per_unit, bk->max_atlas_size, bk->bounces, bk->samples, bk->directional, bk->denoise);
@@ -192,6 +203,33 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
             else if (!strcmp(k, "exposure")) e->exposure = (float)atof(v);
             else if (!strcmp(k, "fog_color")) e->fog_color = lx_parse_vec3(v);
             else if (!strcmp(k, "fog_density")) e->fog_density = (float)atof(v);
+            else if (!strncmp(k, "sky.", 4) || !strncmp(k, "clouds.", 7) || !strncmp(k, "wind.", 5) || !strncmp(k, "weather", 7)) {
+                float f = (float)atof(v);
+                if (!strcmp(k, "sky.mode")) e->sky_mode = atoi(v) == LX_SKY_DAY_NIGHT ? LX_SKY_DAY_NIGHT : LX_SKY_GRADIENT;
+                else if (!strcmp(k, "sky.time")) e->time_of_day = lx_clampf(f, 0, 24);
+                else if (!strcmp(k, "sky.day_length")) e->day_length = lx_maxf(f, 0);
+                else if (!strcmp(k, "sky.latitude")) e->latitude = lx_clampf(f, -90, 90);
+                else if (!strcmp(k, "sky.day_of_year")) e->day_of_year = lx_clampf(f, 1, 365);
+                else if (!strcmp(k, "sky.heading")) e->sun_heading = f;
+                else if (!strcmp(k, "sky.sun")) e->sun_intensity = lx_maxf(f, 0);
+                else if (!strcmp(k, "sky.moon")) e->moon_intensity = lx_maxf(f, 0);
+                else if (!strcmp(k, "sky.moon_phase")) e->moon_phase = lx_clampf(f, 0, 1);
+                else if (!strcmp(k, "sky.stars")) e->star_intensity = lx_maxf(f, 0);
+                else if (!strcmp(k, "sky.haze")) e->haze = lx_clampf(f, 0.5f, 12);
+                else if (!strcmp(k, "clouds.coverage")) e->cloud_coverage = lx_clampf(f, 0, 1);
+                else if (!strcmp(k, "clouds.density")) e->cloud_density = lx_clampf(f, 0, 1);
+                else if (!strcmp(k, "clouds.type")) e->cloud_type = (int)lx_clampf(f, 0, LX_CLOUDS_STORM);
+                else if (!strcmp(k, "clouds.height")) e->cloud_height = lx_clampf(f, 100, 20000);
+                else if (!strcmp(k, "clouds.thickness")) e->cloud_thickness = lx_clampf(f, 50, 15000);
+                else if (!strcmp(k, "wind.direction")) e->wind_direction = f;
+                else if (!strcmp(k, "wind.speed")) e->wind_speed = lx_clampf(f, 0, 60);
+                else if (!strcmp(k, "weather")) e->weather = (int)lx_clampf(f, 0, LX_WEATHER_CUSTOM);
+                else if (!strcmp(k, "weather.rain")) e->rain = lx_clampf(f, 0, 1);
+                else if (!strcmp(k, "weather.snow")) e->snow = lx_clampf(f, 0, 1);
+                else if (!strcmp(k, "weather.lightning")) e->lightning = lx_clampf(f, 0, 1);
+                else if (!strcmp(k, "weather.mist")) e->mist = lx_clampf(f, 0, 1);
+                else if (!strcmp(k, "weather.blend")) e->weather_blend = lx_clampf(f, 0, 3600);
+            }
             else if (!strcmp(k, "bake.texels_per_unit")) s->bake.texels_per_unit = (float)atof(v);
             else if (!strcmp(k, "bake.max_atlas")) s->bake.max_atlas_size = atoi(v);
             else if (!strcmp(k, "bake.bounces")) s->bake.bounces = atoi(v);

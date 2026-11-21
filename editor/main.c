@@ -10,7 +10,8 @@
  *   --build                               build the open project for this platform, then quit
  *   --show-graph <object>[/<state>]       select the object and open its State Graph (and a state, inside its Sub State)
  *
- * Screenshot helpers for the State Graph view (environment variables, with --show-graph):
+ * Screenshot helpers: LUXORA_SKY="<hour>[,<weather>]" turns on the Day-night sky, LUXORA_SHOW_LIGHTING=1 shows the
+ * Lighting tab. For the State Graph view (environment variables, with --show-graph):
  *   LUXORA_GRAPH_TAB=0..4      inspector tab (FSM, State, Events, Variables, Action Browser)
  *   LUXORA_GRAPH_ZOOM=0.45     the view's zoom once the graph is framed
  *   LUXORA_GRAPH_QUICKADD=1    open the quick-add box
@@ -187,6 +188,15 @@ int main(int argc, char **argv) {
         extern void ge_finder_open(const char *query);
         if (getenv("LUXORA_GRAPH_FIND")) ge_finder_open(getenv("LUXORA_GRAPH_FIND"));   /* screenshots: the Finder */
     }
+    if (ED.has_project && ED.scene && getenv("LUXORA_SKY")) {   /* screenshots: "<hour>[,<weather 0..5>]" turns on the Day-night sky */
+        LxEnvironment *e = lx_scene_environment(ED.scene);
+        e->sky_mode = LX_SKY_DAY_NIGHT;
+        const char *v = getenv("LUXORA_SKY");
+        lx_sky_set_time(ED.scene, (float)atof(v));
+        const char *w = strchr(v, ',');
+        if (w) lx_sky_set_weather(ED.scene, (LxWeather)atoi(w + 1), 0);
+    }
+    if (ED.has_project && getenv("LUXORA_SHOW_LIGHTING") && ED.inspector_tabs) ED.inspector_tabs->tab_index = 1;   /* screenshots */
     if (auto_play && ED.has_project) ed_play();
 
     double last = lx_time();

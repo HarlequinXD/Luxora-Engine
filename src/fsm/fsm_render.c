@@ -373,7 +373,8 @@ static void en_day_night(LxFsmCtx *c) {
         hour = hour - floorf(hour / 24.0f) * 24.0f;
         lx_fsm_set_float(c, 1, hour);
     }
-    lx_day_night_apply(c->scene, sun, hour);
+    if (lx_scene_environment(c->scene)->sky_mode == LX_SKY_DAY_NIGHT) lx_sky_set_time(c->scene, hour);   /* the real sky follows */
+    else lx_day_night_apply(c->scene, sun, hour);
     bool night = hour < 6.0f || hour >= 18.0f;
     lx_fsm_set_bool(c, 5, night);
     int *was = c->state;
@@ -387,6 +388,91 @@ static const LxFsmActionDesc A_EN_DAY_NIGHT = {"Day Night Cycle", "Rendering", "
      PT("Seconds Per Day", LX_FSM_FLOAT, "240", "0 = hold at this hour"), PEV("Morning Event"), PEV("Evening Event"),
      POPT("Store Is Night", LX_FSM_BOOL)},
     sizeof(int), 0, LX_FSM_EVERY_FRAME, en_day_night, en_day_night, NULL};
+
+/* ---- the Day-night sky and weather (Lighting panel: Sky Mode Day-night) ---- */
+static void sk_set_time(LxFsmCtx *c) {
+    LxEnvironment *e = lx_scene_environment(c->scene);
+    if (!lx_fsm_is_none(c, 0)) lx_sky_set_time(c->scene, lx_fsm_float(c, 0));
+    if (!lx_fsm_is_none(c, 1)) e->day_length = lx_maxf(0.0f, lx_fsm_float(c, 1));
+}
+static const LxFsmActionDesc A_SK_SET_TIME = {"Set Time of Day", "Sky", "Sets the clock of the Day-night sky, and how fast it runs. The sun, moon and sky follow at once.",
+    "time {0}h",
+    {PT("Hour", LX_FSM_FLOAT, "12", "0..24: 6 is about sunrise, 18 about sunset"),
+     PT("Day Length", LX_FSM_FLOAT, "", "real minutes per day; 0 stops the clock; None leaves it")},
+    0, 0, LX_FSM_ONCE, sk_set_time, NULL, NULL};
+
+static void sk_get_time(LxFsmCtx *c) {
+    lx_fsm_set_float(c, 0, lx_sky_time(c->scene));
+    lx_fsm_set_bool(c, 1, lx_sky_is_day(c->scene));
+    lx_fsm_set_vec3(c, 2, lx_sky_sun_direction(c->scene));
+    lx_fsm_set_int(c, 3, (int)lx_sky_weather(c->scene));
+    lx_fsm_set_float(c, 4, lx_sky_wetness(c->scene));
+}
+static const LxFsmActionDesc A_SK_GET_TIME = {"Get Time of Day", "Sky", "The clock, whether the sun is up, where it is, the weather and how wet the ground is.",
+    "time of day",
+    {POPTT("Store Hour", LX_FSM_FLOAT, "0..24"), POPT("Store Is Day", LX_FSM_BOOL), POPTT("Store Sun Direction", LX_FSM_VEC3, "towards the sun"),
+     POPTT("Store Weather", LX_FSM_INT, "0 Clear, 1 Cloudy, 2 Rain, 3 Storm, 4 Snow, 5 Fog, 6 Custom"), POPTT("Store Wetness", LX_FSM_FLOAT, "0..1")},
+    0, 0, LX_FSM_EVERY_FRAME, sk_get_time, sk_get_time, NULL};
+
+static void sk_at_time(LxFsmCtx *c) {
+    float *last = c->state;
+    float now = lx_sky_time(c->scene), at = lx_fsm_float(c, 0);
+    at = at - floorf(at / 24.0f) * 24.0f;
+    if (*last >= 0) {   /* the clock moved forward a little since last frame (across midnight too): did it pass the hour? */
+        float step = fmodf(now - *last + 24.0f, 24.0f), to = fmodf(at - *last + 24.0f, 24.0f);
+        if (step > 0 && step < 6.0f && to > 0 && to <= step) fsm_send(c, 1);
+    }
+    *last = now;
+}
+static void sk_at_time_enter(LxFsmCtx *c) { *(float *)c->state = -1.0f; sk_at_time(c); }
+static const LxFsmActionDesc A_SK_AT_TIME = {"At Time of Day", "Sky", "Sends an event when the clock passes an hour: street lamps at dusk, shops opening at 9.",
+    "at {0}h send {1}",
+    {PT("Hour", LX_FSM_FLOAT, "20", "0..24"), PEV("Event")},
+    sizeof(float), 0, LX_FSM_EVERY_FRAME, sk_at_time_enter, sk_at_time, NULL};
+
+static void sk_weather(LxFsmCtx *c) {
+    float blend = lx_fsm_is_none(c, 1) ? -1.0f : lx_maxf(0.0f, lx_fsm_float(c, 1));
+    lx_sky_set_weather(c->scene, (LxWeather)lx_fsm_int(c, 0), blend);
+}
+static const LxFsmActionDesc A_SK_WEATHER = {"Set Weather", "Sky", "Changes the weather to a preset: the clouds, rain, snow, lightning, mist and wind all move towards it together.",
+    "weather {0}",
+    {PENUM("Weather", "Clear|Cloudy|Rain|Storm|Snow|Fog", "2"),
+     PT("Blend Seconds", LX_FSM_FLOAT, "", "how long the change takes; 0 at once; None uses the scene's Blend Time")},
+    0, 0, LX_FSM_ONCE, sk_weather, NULL, NULL};
+
+static void sk_clouds(LxFsmCtx *c) {
+    LxEnvironment *e = lx_scene_environment(c->scene);
+    if (!lx_fsm_is_none(c, 0)) e->cloud_coverage = lx_saturate(lx_fsm_float(c, 0));
+    if (!lx_fsm_is_none(c, 1)) e->cloud_density = lx_saturate(lx_fsm_float(c, 1));
+    if (!lx_fsm_is_none(c, 2)) e->cloud_type = lx_fsm_int(c, 2);
+    if (!lx_fsm_is_none(c, 3)) e->wind_speed = lx_maxf(0.0f, lx_fsm_float(c, 3));
+    if (!lx_fsm_is_none(c, 4)) e->wind_direction = lx_fsm_float(c, 4);
+    e->weather = LX_WEATHER_CUSTOM;
+}
+static const LxFsmActionDesc A_SK_CLOUDS = {"Set Clouds", "Sky", "Changes the clouds and the wind. They move there over the scene's weather Blend Time. None leaves a setting alone.",
+    "clouds {0}",
+    {PT("Coverage", LX_FSM_FLOAT, "", "0..1 of the sky"), PT("Density", LX_FSM_FLOAT, "", "0..1: thin .. thick and dark"),
+     {"Type", LX_FSM_ENUM, "", LX_FSM_P_OPTIONAL, "Cumulus|Stratus|Storm", NULL},
+     PT("Wind Speed", LX_FSM_FLOAT, "", "m/s"), PT("Wind Direction", LX_FSM_FLOAT, "", "degrees, 0 = +X")},
+    0, 0, LX_FSM_ONCE, sk_clouds, NULL, NULL};
+
+static void sk_precip(LxFsmCtx *c) {
+    LxEnvironment *e = lx_scene_environment(c->scene);
+    if (!lx_fsm_is_none(c, 0)) e->rain = lx_saturate(lx_fsm_float(c, 0));
+    if (!lx_fsm_is_none(c, 1)) e->snow = lx_saturate(lx_fsm_float(c, 1));
+    if (!lx_fsm_is_none(c, 2)) e->lightning = lx_saturate(lx_fsm_float(c, 2));
+    if (!lx_fsm_is_none(c, 3)) e->mist = lx_saturate(lx_fsm_float(c, 3));
+    e->weather = LX_WEATHER_CUSTOM;
+}
+static const LxFsmActionDesc A_SK_PRECIP = {"Set Rain and Snow", "Sky", "Changes the rain, snow, lightning and mist. They move there over the scene's weather Blend Time. None leaves a setting alone.",
+    "rain {0} snow {1}",
+    {PT("Rain", LX_FSM_FLOAT, "", "0..1"), PT("Snow", LX_FSM_FLOAT, "", "0..1"), PT("Lightning", LX_FSM_FLOAT, "", "0..1: how often it strikes"),
+     PT("Mist", LX_FSM_FLOAT, "", "0..1: weather fog")},
+    0, 0, LX_FSM_ONCE, sk_precip, NULL, NULL};
+
+static void sk_strike(LxFsmCtx *c) { lx_sky_strike_lightning(c->scene); }
+static const LxFsmActionDesc A_SK_STRIKE = {"Strike Lightning", "Sky", "A lightning bolt now, somewhere around the horizon, with thunder that arrives as late as sound would.",
+    "lightning", {{0}}, 0, 0, LX_FSM_ONCE, sk_strike, NULL, NULL};
 
 static void gf_quality(LxFsmCtx *c) {
     LxGraphicsSettings *g = lx_graphics_settings();
@@ -437,6 +523,7 @@ void fsm_register_render(void) {
         &A_MT_SET, &A_MT_GET, &A_MT_FADE,
         &A_LI_SET, &A_LI_GET, &A_LI_FLICKER, &A_LI_FADE, &A_LI_BLINK,
         &A_SC_GET, &A_CU_SET, &A_EN_SET, &A_EN_DAY_NIGHT, &A_GF_QUALITY, &A_GF_STATS, &A_GF_REFRESH,
+        &A_SK_SET_TIME, &A_SK_GET_TIME, &A_SK_AT_TIME, &A_SK_WEATHER, &A_SK_CLOUDS, &A_SK_PRECIP, &A_SK_STRIKE,
     };
     for (size_t i = 0; i < sizeof all / sizeof all[0]; i++) lx_fsm_register_action(all[i]);
 }

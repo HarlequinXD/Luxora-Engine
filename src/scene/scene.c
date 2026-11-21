@@ -27,6 +27,21 @@ static LxEnvironment default_env(void) {
     e.exposure = 1.0f;
     e.fog_color = lx_v3(0.7f, 0.78f, 0.88f);
     e.fog_density = 0.0f;
+    e.sky_mode = LX_SKY_GRADIENT;
+    e.time_of_day = 10.0f;
+    e.day_length = 24.0f;
+    e.latitude = 35.0f;
+    e.day_of_year = 172.0f;
+    e.sun_heading = 0.0f;
+    e.sun_intensity = 3.5f;
+    e.moon_intensity = 0.35f;
+    e.moon_phase = 0.5f;
+    e.star_intensity = 1.0f;
+    e.weather_blend = 20.0f;
+    e.cloud_height = 1500.0f;
+    e.cloud_thickness = 1800.0f;
+    e.wind_direction = 30.0f;
+    lx_sky_weather_preset(LX_WEATHER_CLEAR, &e);
     return e;
 }
 

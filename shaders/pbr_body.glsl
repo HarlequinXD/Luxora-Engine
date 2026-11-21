@@ -377,6 +377,52 @@ void main() {
         float nv = dot(n, v);
         if (nv < 0.05) n = normalize(n + v * (0.05 - nv));
     }
+    // weather: rain wets what the sky can reach (darker, glossier, puddles that ripple); snow settles on what faces up
+    if (lx_day_night() && (u.weather_a.z > 0.002 || u.weather_a.w > 0.002)) {
+        float open_sky = 1.0;
+        if (u.weather_b.w > 0.5) {   // under a roof stays dry
+            vec4 c = u.precip_vp * vec4(v_world + ng * 0.05, 1.0);
+            vec3 ndc = c.xyz / c.w;
+            vec2 puv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+            if (all(greaterThan(puv, vec2(0.0))) && all(lessThan(puv, vec2(1.0))))
+                open_sky = texture(u_shadow, vec4(puv, float(u.counts.w), ndc.z * 0.5 + 0.5 - 0.003));
+        }
+        float up = max(ng.y, 0.0);
+        float wet = u.weather_a.z * open_sky * mix(0.45, 1.0, up);
+        if (wet > 0.0) {
+            float porous = (1.0 - metallic) * wet;
+            albedo *= mix(1.0, 0.55, porous * (0.6 + 0.4 * rough));   // soaked: darker
+            rough = mix(rough, 0.12, wet * 0.85);
+            // puddles where flat ground dips (noise), filling as it gets wetter
+            float pn = lx_fbm2(v_world.xz * 0.35);
+            float puddle = smoothstep(1.05 - u.weather_a.z * 0.45, 1.15 - u.weather_a.z * 0.45, pn + 0.2) * smoothstep(0.92, 0.98, up) * open_sky;
+            if (puddle > 0.0) {
+                albedo *= mix(1.0, 0.6, puddle);
+                rough = mix(rough, 0.02, puddle);
+                metallic *= 1.0 - puddle;
+                vec3 pn3 = ng;
+                if (u.weather_a.x > 0.01) {   // raindrops ring the water
+                    vec2 cell = floor(v_world.xz * 2.5), f = fract(v_world.xz * 2.5) - 0.5;
+                    float h = lx_hash12(cell);
+                    float ph = fract(u.camera_pos.w * 1.3 + h);
+                    vec2 off = vec2(lx_hash12(cell + 3.1), lx_hash12(cell + 7.7)) - 0.5;
+                    float r = length(f - off * 0.5);
+                    float ring = sin((r - ph * 0.5) * 60.0) * smoothstep(0.0, 0.1, ph * 0.5 - r + 0.05) * (1.0 - ph) * smoothstep(0.5, 0.3, r);
+                    vec2 g = (f - off * 0.5) / max(r, 1e-3) * ring * 0.25 * min(u.weather_a.x * 2.0, 1.0);
+                    pn3 = normalize(ng + vec3(g.x, 0.0, g.y));
+                }
+                n = normalize(mix(n, pn3, puddle));
+            }
+        }
+        float sn = u.weather_a.w * open_sky * smoothstep(0.25, 0.75, n.y) * smoothstep(0.1, 0.5, lx_vnoise2(v_world.xz * 1.7) + u.weather_a.w * 0.6);
+        if (sn > 0.0) {
+            albedo = mix(albedo, vec3(0.88, 0.9, 0.95), sn);
+            rough = mix(rough, 0.65, sn);
+            metallic *= 1.0 - sn;
+            n = normalize(mix(n, ng, sn * 0.7));
+        }
+        rough = clamp(rough, 0.02, 1.0);
+    }
     vec3 color = vec3(0.0);
     bool lightmapped = v_lm.z >= -0.5;
     // everything else may stand in a Baked Lighting Volume: baked light and baked shadows for characters
@@ -387,6 +433,7 @@ void main() {
     if (u.sun_color.w > 0.5) {
         float w = u.sun_color.w > 1.5 ? (lightmapped ? 0.0 : 1.0 - vol_cover) : 1.0;
         float sh = shadow_factor(v_world, ng) * self_shadow;
+        if (lx_day_night()) sh *= lx_cloud_shadow(v_world, -u.sun_dir.xyz);   // cloud shadows drift over the ground
         int sch = int(u.bvol_params.z + 0.5);
         if (u.bvol_params.z > -0.5 && vol_cover > 0.0) sh = min(sh, mix(1.0, vol_mask[sch], vol_cover));   // Mixed sun: baked shadows too
         if (w > 0.0) color += brdf(n, v, -u.sun_dir.xyz, albedo, metallic, rough) * u.sun_color.rgb * sh * w;
@@ -435,6 +482,7 @@ void main() {
         vec3 ldir = ld.xyz * 2.0 - 1.0;
         float turn = clamp((dot(n, ldir) * 0.5 + 0.5) / max(ld.w, 0.05), 0.0, 3.0);
         irradiance = lm.rgb * turn;
+        if (lm.a < 0.0) irradiance += (-lm.a) * sky_ambient;   // Day-night bake: the sky it sees, as the sky is now
         gi_cover = 0.0;
         // baked light shines: the part that comes from one direction gets a highlight, rough or glossy as the material
         float dirness = length(ldir);
@@ -465,6 +513,7 @@ void main() {
     vec3 f0 = mix(vec3(0.04), albedo, metallic);
     vec3 spec_env = env_brdf_approx(f0, rough, ndv);
     vec3 kd = (1.0 - spec_env) * (1.0 - metallic);
+    if (u.sky_misc.z > 0.0) irradiance += vec3(0.7, 0.75, 0.9) * u.sky_misc.z * 1.5 * (0.45 + 0.55 * max(n.y, 0.0));   // lightning
     color += kd * albedo / PI * irradiance * ao;
     // specular ambient: probes (or the sky), pre-filtered by roughness
     vec3 r = reflect(-v, n);

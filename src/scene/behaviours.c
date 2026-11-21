@@ -218,6 +218,8 @@ void lx_scene_simulate(LxScene *s, float real_dt) {
     s->last_dt = dt;
     s->in_update = true;
     lx_gameplay_begin_frame(s, dt, real_dt);
+    lx_sky_simulate(s, dt);   /* the clock and the weather; the sun light follows */
+    lx_sky_prepare(s);
     int n = s->count;
     for (int i = 1; i < n; i++) {
         LxEntityData *d = &s->entities[i];
