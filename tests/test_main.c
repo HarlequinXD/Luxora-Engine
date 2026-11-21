@@ -1300,6 +1300,14 @@ static void test_sky(void) {
     lx_scene_destroy(c);
     CHECK(lx_sky_builtin_sound("thunder") && lx_sky_builtin_sound("thunder")->frame_count > 22050 * 4, "thunder is made in code");
     CHECK(lx_asset_sound("builtin:thunder") == lx_sky_builtin_sound("thunder"), "...and found as builtin:thunder");
+    {   /* a sound that has played for hours still reads the right samples (float positions used to round after ~6 min) */
+        uint32_t hours = 48000u * 3600u * 3u;   /* 3 hours at 48 kHz */
+        float v = lx_audio_test_history(hours, 10.0f);
+        float want = (float)((hours - 10u) % 1000u);
+        CHECK(fabsf(v - want) < 1e-3f, "after 3 hours a voice still reads the right sample (%.2f, want %.0f)", v, want);
+        v = lx_audio_test_history(hours, 10.5f);
+        CHECK(fabsf(v - (want - 0.5f)) < 1e-2f || want < 1.0f, "...and between samples (%.3f)", v);
+    }
     {   /* eight different thunder claps; rain loops that join without a click */
         int distinct = 0;
         for (int a = 0; a < 8; a++)

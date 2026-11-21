@@ -178,12 +178,28 @@ static void fdn_process(Fdn *f, float in, float *l, float *r) {
  *  Mixer (runs on the audio device thread)
  * =================================================================== */
 static inline float history_read(const Voice *v, float delay) {
-    float p = (float)v->write_pos - delay;
+    /* from the position within the ring, not the running count: a float holds whole numbers exactly only up to 2^24,
+     * so after ~6 minutes of play (at 48 kHz) the count would round and long sounds would turn to a screech */
+    float p = (float)(v->write_pos & (HISTORY - 1)) - delay;
     while (p < 0) p += HISTORY;
     uint32_t i0 = (uint32_t)p;
     float fr = p - (float)i0;
     uint32_t a = i0 & (HISTORY - 1), b = (i0 + 1) & (HISTORY - 1);
     return v->history[a] + (v->history[b] - v->history[a]) * fr;
+}
+
+/* tests: what a voice reads `delay` samples back after `written` samples of play (its history holds i % 1000 at write i) */
+float lx_audio_test_history(uint32_t written, float delay) {
+    static float hist[HISTORY];
+    Voice v;
+    memset(&v, 0, sizeof v);
+    v.history = hist;
+    for (uint32_t k = 0; k < HISTORY; k++) {
+        uint32_t i = written - HISTORY + k;   /* the last HISTORY samples written */
+        hist[i & (HISTORY - 1)] = (float)(i % 1000u);
+    }
+    v.write_pos = written;
+    return history_read(&v, delay);
 }
 
 static void mix(float *out, int frames) {

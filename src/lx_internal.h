@@ -378,6 +378,7 @@ LxSound *lx_sky_builtin_sound(const char *name);       /* "thunder", "thunder0".
 void lx_sky_stop(LxScene *s);                          /* play stopped: silence the rain */
 void lx_audio_ambient(int slot, LxSound *snd, float volume);   /* a looping non-positional sound per slot (0..3); volume 0 stops it */
 void lx_audio_play_oneshot_sound(LxSound *snd, LxVec3 pos, float volume);
+float lx_audio_test_history(uint32_t written, float delay);   /* tests */
 
 struct LxScene {
     char name[LX_NAME_MAX];
