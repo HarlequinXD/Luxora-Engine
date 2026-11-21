@@ -1,6 +1,6 @@
 # Luxora Engine
 
-A real-time 3D game engine written in **C11**, rendering with **Vulkan 1.3**, with a professional editor built on its own retained-mode UI toolkit. Luxora builds games for **Windows, Linux and Android** from one codebase.
+A real-time 3D game engine written in **C11**, rendering with **Vulkan 1.3**, with a editor built on its own retained-mode UI toolkit. Luxora builds games for **Windows, Linux and Android** from one codebase.
 
 | | |
 |---|---|
