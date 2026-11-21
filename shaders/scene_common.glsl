@@ -237,15 +237,18 @@ float lx_cloud_density(vec3 p, float h, bool detail) {
     }
     return d * mix(0.4, 1.6, u.cloud_a.y);
 }
+/* how thick the cloud is per metre: set so a whole column of the type is optically thick (a flat stratus layer
+   only a few hundred metres deep is as opaque as a tall cumulus; real overcast hides the sun) */
+float lx_cloud_sigma() { return 7.0 / max(u.cloud_b.y * lx_cloud_top(1.0, u.cloud_a.z), 50.0); }
 /* sunlight that gets through the clouds to the ground at p (1 clear sky), against the average the sun light already carries */
 float lx_cloud_shadow(vec3 p, vec3 to_light) {
     if (!lx_day_night() || u.cloud_a.x <= 0.001 || to_light.y < 0.02) return 1.0;
     float mid = u.cloud_b.x + u.cloud_b.y * 0.15;
     vec3 c = p + to_light * ((mid - p.y) / to_light.y);
     float m = lx_cloud_map(c.xz);
-    /* light crosses the column's height: about its density times its thickness (half of it, through a dome) */
-    float d = m * lx_cloud_top(m, u.cloud_a.z) * 0.6 * mix(0.4, 1.6, u.cloud_a.y);
-    float t = exp(-d * u.cloud_b.y * 0.004);
-    float avg = max(1.0 - u.cloud_c.y, 0.03);
+    /* light crosses the column: its density times its height (0.6 of it, through a dome), as src/scene/sky.c reckons */
+    float tau = 4.2 * mix(0.4, 1.6, u.cloud_a.y) * m * lx_cloud_top(m, u.cloud_a.z) / lx_cloud_top(1.0, u.cloud_a.z);
+    float t = max(exp(-tau), 0.15 * exp(-0.12 * tau));   // what scatters through
+    float avg = max(1.0 - u.cloud_c.y, 0.03);   // the sun light already carries the average
     return clamp(t / avg, 0.0, 1.6);
 }

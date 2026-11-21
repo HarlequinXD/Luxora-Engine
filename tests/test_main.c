@@ -1262,6 +1262,10 @@ static void test_sky(void) {
     CHECK(e->weather == LX_WEATHER_STORM && e->rain > 0.9f && e->lightning > 0 && e->cloud_type == LX_CLOUDS_STORM, "the Storm preset");
     CHECK(sky_lum(v->sun_light) < sky_lum(noon_light) * 0.2f, "storm clouds take most of the sunlight (%.3f)", sky_lum(v->sun_light));
     CHECK(v->wetness > 0.9f && v->fog_density > e->fog_density, "rain: wet ground and mist straight away while editing");
+    lx_sky_set_weather(s, LX_WEATHER_CLOUDY, 0);
+    lx_sky_prepare(s);
+    CHECK(sky_lum(v->sun_light) < sky_lum(noon_light) * 0.35f && e->cloud_coverage >= 0.85f,
+          "an overcast sky hides the sun: little direct light gets through (%.3f)", sky_lum(v->sun_light));
 
     /* playing: the weather blends, the ground dries slowly, the clock runs */
     lx_sky_set_weather(s, LX_WEATHER_CLEAR, 0);

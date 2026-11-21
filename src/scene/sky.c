@@ -123,10 +123,10 @@ void lx_sky_weather_preset(LxWeather w, LxEnvironment *e) {
     /*                     coverage density type               rain  snow  lightning mist  wind haze */
     static const float P[LX_WEATHER_CUSTOM][9] = {
         /* Clear  */ {0.25f, 0.45f, LX_CLOUDS_CUMULUS, 0.0f, 0.0f, 0.0f, 0.0f, 4.0f, 1.5f},
-        /* Cloudy */ {0.70f, 0.65f, LX_CLOUDS_STRATUS, 0.0f, 0.0f, 0.0f, 0.05f, 6.0f, 2.5f},
-        /* Rain   */ {0.88f, 0.85f, LX_CLOUDS_STRATUS, 0.7f, 0.0f, 0.0f, 0.2f, 8.0f, 3.5f},
-        /* Storm  */ {0.97f, 1.00f, LX_CLOUDS_STORM, 1.0f, 0.0f, 0.6f, 0.3f, 14.0f, 4.0f},
-        /* Snow   */ {0.85f, 0.70f, LX_CLOUDS_STRATUS, 0.0f, 0.7f, 0.0f, 0.25f, 3.0f, 3.0f},
+        /* Cloudy */ {0.88f, 0.70f, LX_CLOUDS_STRATUS, 0.0f, 0.0f, 0.0f, 0.05f, 6.0f, 2.5f},
+        /* Rain   */ {0.97f, 0.85f, LX_CLOUDS_STRATUS, 0.7f, 0.0f, 0.0f, 0.2f, 8.0f, 3.5f},
+        /* Storm  */ {1.00f, 1.00f, LX_CLOUDS_STORM, 1.0f, 0.0f, 0.6f, 0.3f, 14.0f, 4.0f},
+        /* Snow   */ {0.95f, 0.75f, LX_CLOUDS_STRATUS, 0.0f, 0.7f, 0.0f, 0.25f, 3.0f, 3.0f},
         /* Fog    */ {0.55f, 0.55f, LX_CLOUDS_STRATUS, 0.0f, 0.0f, 0.0f, 0.9f, 1.0f, 6.0f},
     };
     const float *p = P[w];
@@ -193,11 +193,14 @@ static float flash_curve(float t) {
     return 0.6f * expf(-(t - 0.32f) * 9.0f);
 }
 
-/* how much sunlight the clouds take, on average (the sky shader and the cloud shadows use the same terms) */
+/* how much sunlight the clouds take, on average. The same terms as lx_cloud_shadow in the shader: a column of cloud
+ * has optical depth 4.2 x the density factor (whatever its type: the sky shader scales thin layers up to match), and
+ * lets through what light finds its way by scattering (15%, fading as it thickens); clear sky between lets all through. */
+static float cloud_through(float tau) { return lx_maxf(expf(-tau), 0.15f * expf(-0.12f * tau)); }
 static float cloud_shade(float coverage, float density, float ctype) {
-    float c = lx_clampf(coverage, 0, 1);
-    float thick = lx_clampf(density, 0, 1) * (0.55f + 0.25f * lx_clampf(ctype, 0, 2));
-    return lx_clampf(c * c * (0.35f + 0.6f * thick) + c * 0.1f, 0.0f, 0.97f);
+    LX_UNUSED(ctype);
+    float tau = 4.2f * (0.4f + 1.2f * lx_clampf(density, 0, 1));
+    return lx_clampf(lx_clampf(coverage, 0, 1) * (1.0f - cloud_through(tau)), 0.0f, 0.97f);
 }
 
 void lx_sky_prepare(LxScene *s) {

@@ -84,6 +84,7 @@ vec4 dn_clouds(vec3 d, float jitter) {
     float lstep = thick * 0.6 / float(max(LS, 1));
     float flash = u.sky_misc.z;
     vec3 flash_dir = u.bolt.xyz;
+    float ks = lx_cloud_sigma();
     float T = 1.0;
     vec3 Lsum = vec3(0.0);
     float first_t = -1.0;
@@ -95,13 +96,13 @@ vec4 dn_clouds(vec3 d, float jitter) {
         float dens = lx_cloud_density(p, h, true);
         if (dens <= 0.002) continue;
         if (first_t < 0.0) first_t = t;
-        float sigma = dens * 0.004;
+        float sigma = dens * ks;
         /* light through the cloud above this point */
         float od = 0.0;
         for (int k = 0; k < LS; k++) {
             vec3 q = p + ldir * (lstep * (float(k) + 0.5));
             float hq = clamp((q.y - base) / slab, 0.0, 1.0);
-            od += lx_cloud_density(q, hq, false) * 0.004 * lstep;
+            od += lx_cloud_density(q, hq, false) * ks * lstep;
         }
         float tl = max(exp(-od), exp(-od * 0.25) * 0.7);   // light scattered many times reaches deeper
         float powder = 1.0 - exp(-sigma * 2.0 * thick * 0.25);
@@ -114,10 +115,10 @@ vec4 dn_clouds(vec3 d, float jitter) {
         if (T < 0.02) break;
     }
     if (first_t < 0.0) return vec4(0.0, 0.0, 0.0, 1.0);
-    /* far clouds fade into the haze of the horizon */
+    /* far clouds take the colour of the horizon haze, but stay just as solid: what they hide stays hidden */
     float fade = exp(-first_t / 28000.0) * smoothstep(0.0, 0.04, d.y);
     vec3 haze = u.sky_horizon.rgb * u.sky_zenith.w * (1.0 - T);
-    return vec4(mix(haze, Lsum, fade), mix(1.0, T, fade));
+    return vec4(mix(haze, Lsum, fade), T);
 }
 
 /* stars: one at most in each cell of a cube around the sky, turning about the pole through the night */
@@ -209,7 +210,7 @@ vec3 dn_sky(vec3 dir) {
             space += vec3(1.0) * 60.0 * limb * (u.sky_params.y / 3.5);
         }
     }
-    c += space * trans * cl.a;
+    c += space * trans * cl.a * cl.a;   // a thin veil of cloud already hides a disc's edge
     c = c * cl.a + cl.rgb;
     c += dn_bolt(dir) * smoothstep(-0.01, 0.0, dir.y);
     c += vec3(0.7, 0.75, 0.9) * u.sky_misc.z * 0.25 * (1.0 - cl.a * 0.7);   // the whole sky brightens in a flash
