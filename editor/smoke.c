@@ -41,6 +41,17 @@ static UiNode *find_node(UiNode *n, const void *bound_float, const char *text) {
     return NULL;
 }
 
+/* a clickable node by its text: buttons, and picture tiles (boxes) */
+static UiNode *find_clickable(UiNode *n, const char *text) {
+    if (!n) return NULL;
+    if (n->on_click && !strcmp(n->text, text)) return n;
+    for (UiNode *c = n->first; c; c = c->next) {
+        UiNode *r = find_clickable(c, text);
+        if (r) return r;
+    }
+    return NULL;
+}
+
 static void s_game_edit(void) {
     ED.game_view = true;
     SMOKE_CHECK(ed_viewport_showing_game(), "Game view shows the main camera in edit mode");
@@ -559,7 +570,10 @@ static void s_terrain_create(void) {
 }
 static void s_terrain_sculpt(void) {
     LxEntity e = lx_entity_find(ED.scene, "Terrain");
-    SMOKE_CHECK(find_node(ED.inspector, NULL, "Raise") && find_node(ED.inspector, NULL, "Add Chunk"), "the Terrain inspector shows its tools");
+    SMOKE_CHECK(find_clickable(ED.inspector, "Raise") && find_clickable(ED.inspector, "Paint") && find_clickable(ED.inspector, "Expand"),
+                "the Terrain inspector shows its modes and tools");
+    UiNode *paint = find_clickable(ED.inspector, "Paint");
+    if (paint) paint->on_click(paint);   /* to the Paint mode: rebuilt next frame */
     LxTerrainBrush b = {LX_TERRAIN_RAISE, 10, 1, 0.5f, 0, 4, 0};
     lx_terrain_begin_stroke(ED.scene, e);
     for (int i = 0; i < 10; i++) lx_terrain_brush(ED.scene, e, lx_v3(0, 0, 0), &b, 0.1f);
@@ -572,6 +586,9 @@ static void s_terrain_sculpt(void) {
     ed_undo();
 }
 static void s_terrain_undo(void) {
+    SMOKE_CHECK(find_clickable(ED.inspector, "Add Texture") != NULL, "Paint shows the ground textures");
+    UiNode *shape = find_clickable(ED.inspector, "Shape");
+    if (shape) shape->on_click(shape);
     float h = -1;
     lx_terrain_height(ED.scene, 0, 0, &h);
     SMOKE_CHECK(fabsf(h) < 0.01f, "Undo flattens it again (%.2f m)", (double)h);

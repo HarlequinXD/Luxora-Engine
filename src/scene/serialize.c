@@ -130,8 +130,12 @@ static void write_entity(LxStrBuf *sb, const LxScene *s, LxEntity e, int id_of_p
         for (int l = 0; l < t->layer_count && l < LX_TERRAIN_LAYERS; l++) {
             const LxTerrainLayer *L = &t->layers[l];
             clean_value(t->layers[l].material);
+            clean_value(t->layers[l].texture);
+            clean_value(t->layers[l].normal_map);
             lx_sb_printf(sb, "terrain.layer%d.material = %s\nterrain.layer%d = %g %g %g %g %g\n", l, L->material, l, L->tiling, L->slope_min,
                          L->slope_max, L->height_min, L->height_max);
+            if (L->texture[0]) lx_sb_printf(sb, "terrain.layer%d.texture = %s\n", l, L->texture);
+            if (L->normal_map[0]) lx_sb_printf(sb, "terrain.layer%d.normal = %s\n", l, L->normal_map);
         }
         lx_sb_printf(sb, "terrain.grass = %d %g %g %g %g %g %g\n", t->grass_layer, t->grass_density, t->grass_height, t->grass_color.x,
                      t->grass_color.y, t->grass_color.z, t->grass_distance);
@@ -449,6 +453,8 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
                 LxTerrainLayer *L = &t->layers[n];
                 if (n + 1 > t->layer_count || n == 0) t->layer_count = lx_maxi(n + 1, n == 0 ? 1 : t->layer_count);
                 if (strstr(f, ".material")) lx_strcpy(L->material, sizeof L->material, v);
+                else if (strstr(f, ".texture")) lx_strcpy(L->texture, sizeof L->texture, v);
+                else if (strstr(f, ".normal")) lx_strcpy(L->normal_map, sizeof L->normal_map, v);
                 else sscanf(v, "%f %f %f %f %f", &L->tiling, &L->slope_min, &L->slope_max, &L->height_min, &L->height_max);
             } else if (sscanf(f, "scatter%d", &n) == 1 && n >= 0 && n < LX_TERRAIN_SCATTERS) {
                 LxTerrainScatter *S = &t->scatter[n];

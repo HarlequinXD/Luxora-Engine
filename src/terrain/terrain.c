@@ -891,6 +891,13 @@ static void refresh_layers(TData *d) {
     h = hash_bytes(h, &count, sizeof count);
     for (int l = 0; l < count; l++) {
         h = hash_bytes(h, t->layers[l].material, strlen(t->layers[l].material));
+        h = hash_bytes(h, t->layers[l].texture, strlen(t->layers[l].texture));
+        h = hash_bytes(h, t->layers[l].normal_map, strlen(t->layers[l].normal_map));
+        if (t->layers[l].texture[0]) {   /* an image loads in the background: look again once it's there */
+            LxTexture *tx = lx_asset_texture(t->layers[l].texture);
+            h = hash_bytes(h, &(int){tx && tx->pixels ? tx->width : 0}, sizeof(int));
+            continue;
+        }
         LxMaterial *m = t->layers[l].material[0] && strncmp(t->layers[l].material, "builtin:terrain_", 16) ? lx_asset_material(t->layers[l].material) : NULL;
         if (m) h = hash_bytes(h, m, sizeof *m);   /* a material edited in its inspector shows at once */
     }
@@ -906,7 +913,13 @@ static void refresh_layers(TData *d) {
         const char *ref = t->layers[l].material;
         uint8_t *a = d->gpu_a + (size_t)l * S * S * 4, *b = d->gpu_b + (size_t)l * S * S * 4;
         LxVec3 avg;
-        if (!ref[0] || !strncmp(ref, "builtin:terrain_", 16)) layer_procedural(ref[0] ? ref : "grass", a, b, S, &avg);
+        if (t->layers[l].texture[0]) {   /* just an image */
+            LxMaterial m = lx_material_default();
+            lx_strcpy(m.albedo_map, sizeof m.albedo_map, t->layers[l].texture);
+            lx_strcpy(m.normal_map, sizeof m.normal_map, t->layers[l].normal_map);
+            m.roughness = 0.92f;
+            layer_from_material(&m, a, b, S, &avg);
+        } else if (!ref[0] || !strncmp(ref, "builtin:terrain_", 16)) layer_procedural(ref[0] ? ref : "grass", a, b, S, &avg);
         else layer_from_material(lx_asset_material(ref), a, b, S, &avg);
         total = lx_add3(total, l == 0 ? lx_scale3(avg, 2) : avg);
     }
@@ -1234,7 +1247,7 @@ bool lx_terrain_add_chunk(LxScene *s, LxEntity e, int cx, int cz) {
     LX_VEC_PUSH(d->ch, d->nch, d->cch, nc);
     Chunk *ch = &d->ch[d->nch - 1];
     chunk_alloc(d, ch);
-    /* fill it from its neighbours (like Unity's cross-blend): each edge takes its neighbour's edge, the inside
+    /* fill it from its neighbours : each edge takes its neighbour's edge, the inside
        blends between them, so the new chunk joins without a step */
     int R = d->R, N = N_(d);
     Chunk *nb[4] = {ensure_loaded(d, cx - 1, cz), ensure_loaded(d, cx + 1, cz), ensure_loaded(d, cx, cz - 1), ensure_loaded(d, cx, cz + 1)};
@@ -1668,6 +1681,38 @@ void lx_terrain_collapse_edit_layers(LxScene *s, LxEntity e) {
     c.t->edit_layer_count = 1;
     c.t->active_edit_layer = 0;
     d->set = *c.t;
+    auto_end(&c, began);
+}
+void lx_terrain_remove_layer(LxScene *s, LxEntity e, int layer) {
+    Ctx c;
+    if (!ctx_of(s, e, &c) || layer < 0 || layer >= c.t->layer_count || c.t->layer_count <= 1) return;
+    TData *d = c.d;
+    bool began = auto_begin(d);
+    size_t n = (size_t)d->R * d->R;
+    for (int k = 0; k < d->nch; k++) {
+        Chunk *ch = ensure_loaded(d, d->ch[k].cx, d->ch[k].cz);
+        touch(d, ch->cx, ch->cz);
+        for (size_t i = 0; i < n; i++) {
+            uint8_t *w = &ch->w[i * NL];
+            if (layer > 0) w[0] = (uint8_t)lx_mini(255, w[0] + w[layer]);   /* what it covered goes back to the first layer */
+            else w[1] = (uint8_t)lx_mini(255, w[1] + w[0]);
+            memmove(&w[layer], &w[layer + 1], (size_t)(NL - 1 - layer));
+            w[NL - 1] = 0;
+        }
+        update_far(d, ch);
+        ch->dirty_mesh = ch->dirty_file = ch->dirty_far = ch->dirty_grass = ch->dirty_scatter = true;
+    }
+    LxTerrainComponent *t = c.t;
+    memmove(&t->layers[layer], &t->layers[layer + 1], sizeof t->layers[0] * (size_t)(t->layer_count - 1 - layer));
+    t->layer_count--;
+    memset(&t->layers[t->layer_count], 0, sizeof t->layers[0]);
+    if (t->grass_layer == layer) t->grass_layer = -1;
+    else if (t->grass_layer > layer) t->grass_layer--;
+    for (int k = 0; k < t->scatter_count; k++) {
+        if (t->scatter[k].layer == layer) t->scatter[k].layer = -1;
+        else if (t->scatter[k].layer > layer) t->scatter[k].layer--;
+    }
+    d->index_dirty = true;
     auto_end(&c, began);
 }
 void lx_terrain_layers_changed(LxScene *s, LxEntity e) {

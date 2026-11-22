@@ -1454,6 +1454,15 @@ static void test_terrain(void) {
     int layer = -1;
     lx_terrain_sample(s, 100, 10, NULL, NULL, &layer);
     CHECK(layer == 2, "Paint: layer 2 shows where it was painted (%d)", layer);
+    int nlayers = t->layer_count;
+    lx_terrain_remove_layer(s, te, 1);
+    lx_terrain_sample(s, 100, 10, NULL, NULL, &layer);
+    CHECK(t->layer_count == nlayers - 1 && layer == 1, "deleting a texture before it: the painted one moves up (%d)", layer);
+    lx_terrain_remove_layer(s, te, 1);
+    lx_terrain_sample(s, 100, 10, NULL, NULL, &layer);
+    CHECK(t->layer_count == nlayers - 2 && layer == 0, "deleting the painted texture: the first one takes its place (%d)", layer);
+    while (t->layer_count < nlayers) { t->layers[t->layer_count] = t->layers[0]; t->layers[t->layer_count].tiling = 4; t->layer_count++; }
+    lx_strcpy(t->layers[0].texture, sizeof t->layers[0].texture, "Textures/my_grass.png");
     p.tool = LX_TERRAIN_HOLE;
     p.radius = 2;
     lx_terrain_brush(s, te, lx_v3(110, 0, 50), &p, 0.05f);
@@ -1514,6 +1523,7 @@ static void test_terrain(void) {
     te = lx_entity_find(s, "Island");
     t = lx_get_terrain(s, te);
     CHECK(t && t->layers[1].tiling == 7.5f && lx_terrain_chunk_count(s, te) == 2, "loaded back: settings and both chunks");
+    CHECK(t && !strcmp(t->layers[0].texture, "Textures/my_grass.png"), "a ground texture's image is kept");
     t->grass_layer = -1;
     lx_terrain_update(s, lx_v3(32, 0, 32), true);
     lx_terrain_height(s, 32, 32, &top);

@@ -584,6 +584,8 @@ LxBakeVolume *lx_add_bake_volume(LxScene *s, LxEntity e);
 #define LX_TERRAIN_EDIT_LAYERS 8
 typedef struct LxTerrainLayer {
     char material[LX_REF_MAX];    /* its colour, normal, roughness, height and AO maps */
+    char texture[LX_REF_MAX];     /* or simply an image (with an optional normal map): used instead of the material when set */
+    char normal_map[LX_REF_MAX];
     float tiling;                 /* metres one repeat of its textures covers */
     float slope_min, slope_max;   /* paints itself on slopes between these (degrees); max <= min = off */
     float height_min, height_max; /* paints itself between these heights (metres); max <= min = off */
@@ -658,6 +660,7 @@ void lx_terrain_end_stroke(LxScene *s, LxEntity terrain);
 int lx_terrain_add_edit_layer(LxScene *s, LxEntity terrain, const char *name);   /* returns its index (-1 when full) */
 void lx_terrain_remove_edit_layer(LxScene *s, LxEntity terrain, int index);      /* its sculpting goes */
 void lx_terrain_collapse_edit_layers(LxScene *s, LxEntity terrain);              /* all of them into the Base */
+void lx_terrain_remove_layer(LxScene *s, LxEntity terrain, int layer);   /* where it was painted becomes layer 0; one undo step */
 void lx_terrain_layers_changed(LxScene *s, LxEntity terrain);   /* after changing paint layers, grass or scatter settings */
 bool lx_terrain_save(LxScene *s);                               /* writes every changed chunk of the scene's terrains */
 bool lx_terrain_unsaved(LxScene *s);
