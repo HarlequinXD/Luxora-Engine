@@ -2471,7 +2471,7 @@ static void upload_gi(VkCommandBuffer cmd, FrameData *fr) {
     if (cres && cres != R.gc_res) { gc_create(cres); write_scene_sets(); }
     /* the staging space this frame could need: every level, colours and walls */
     size_t far_cells = (size_t)gv->res[0] * (size_t)gv->res[1] * (size_t)gv->res[2], cc = (size_t)cres * cres * cres;
-    size_t need = (far_cells + cc * LX_GI_CASCADES) * (3 * 8 + 2 * 4) + cc * 8 * 2 * LX_GI_CASCADES + 16 * 16;
+    size_t need = (far_cells + cc * LX_GI_CASCADES) * (3 * 8 + 2 * 4) + cc * 8 * 2 * LX_GI_CASCADES + 32 * 16;
     if (fr->gi_staging_size < need) {   /* this frame's buffer: the GPU finished with it (its fence was waited on) */
         buffer_destroy(&fr->gi_staging);
         buffer_create(&fr->gi_staging, need, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true);

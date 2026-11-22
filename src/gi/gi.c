@@ -2,7 +2,7 @@
  *
  * Nothing is baked and nothing needs ray-tracing hardware. Around the camera sit three nested clipmap levels
  * (fine near the eye, coarse far away). Each level holds:
- *   - a signed distance field of the scene (static geometry and, refreshed as they move, moving objects), two
+ *   - a signed distance field of the scene's static geometry (terrain measured from its heights), two
  *     voxels per probe spacing, truncated a few voxels from the surfaces. Rays march through it in big safe steps
  *     ("sphere tracing"), so a ray costs a few dozen samples whatever the triangle count;
  *   - a surface cache: the voxels the surfaces pass through, each with the surface's colour, glow and the light
@@ -15,7 +15,7 @@
  * The shader reads the probes exactly as before (nested grids, walls between cells so light doesn't leak).
  *
  * Fast by design: the work is a fixed budget of rays per frame spread over the probes that still need light, on
- * every core. Probes near a change (a lamp switched on, a door opening, a character walking by) are updated
+ * every core. Probes near a change (a lamp switched on, the geometry edited) are updated
  * first; once the lighting has settled nothing is traced at all, so a still scene costs nothing. Moving the
  * camera only fills in the thin slab of a level that came into view. */
 #include "../lx_internal.h"
@@ -45,7 +45,7 @@ typedef struct Level {
     int oc[3];                /* the grid's corner, in probe cells (world = oc x pcell) */
     LxVec3 origin;
     float *sdf;               /* per voxel: signed distance (world units), TRUNC voxels at most */
-    int32_t *tri;             /* per voxel: the closest triangle, + 1 (static), -(index + 1) (moving), 0 none */
+    int32_t *tri;             /* per voxel: the closest triangle + 1, TERRAIN_TRI, or 0 (none) */
     float *rad;               /* per voxel: 3, light leaving the surface (surface voxels) */
     uint8_t *surf;            /* per voxel: 1 = a surface voxel */
     int *slist;               /* the surface voxels */
@@ -71,17 +71,14 @@ typedef struct Level {
 } Level;
 
 static struct {
-    LxBvh bvh, moving;
+    LxBvh bvh;
     LxScene *built_scene;
     uint32_t built_version;
     uint64_t geo_hash;        /* the static geometry's content: a copy of the scene (pressing Play) keeps the light */
+    unsigned stale;           /* levels still to build again after the geometry changed (one per frame) */
     LxTerrainQuery tq;        /* the scene's terrains, read straight from their height data */
     uint64_t terrain_sig;
     float sky_sh[12];         /* the sky alone, as probes would see it in the open (new probes start from it) */
-    uint64_t moving_hash, moving_set;
-    float moving_built_area;
-    LxAabb moving_prev;       /* where moving objects were when the field last took them in */
-    bool moving_prev_on;
     Level lv[NLEV];
     int probe_res;            /* the setting the levels were made for */
     float base_cell;
@@ -111,7 +108,6 @@ static void level_free(Level *L) {
 }
 void lx_gi_shutdown(void) {
     lx_bvh_free(&G.bvh);
-    lx_bvh_free(&G.moving);
     for (int l = 0; l < NLEV; l++) level_free(&G.lv[l]);
     memset(&G, 0, sizeof G);
     G.walls = true;
@@ -131,7 +127,7 @@ void lx_gi_reset(void) {
 const LxGiVolume *lx_gi_volume(void) { return &G.volume; }
 int lx_gi_last_ray_count(void) { return G.rays_last; }
 float lx_gi_last_ms(void) { return G.ms_last; }
-int lx_gi_moving_triangles(void) { return G.moving.tri_count; }
+int lx_gi_moving_triangles(void) { return 0; }   /* moving objects are lit by the GI but don't block or bounce it */
 
 static float luminance(LxVec3 c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; }
 static uint64_t hash_floats(uint64_t h, const float *f, int n) {
@@ -270,18 +266,13 @@ static void queue_box(Level *L, int x0, int y0, int z0, int x1, int y1, int z1, 
         int *b = L->boxes[0];
         for (int i = 1; i < L->nboxes; i++) {
             for (int a = 0; a < 3; a++) { b[a] = lx_mini(b[a], L->boxes[i][a]); b[3 + a] = lx_maxi(b[3 + a], L->boxes[i][3 + a]); }
-            b[6] |= L->boxes[i][6];
+            b[6] = lx_maxi(b[6], L->boxes[i][6]);
         }
         L->nboxes = 1;
     }
     int *b = L->boxes[L->nboxes++];
     b[0] = x0; b[1] = y0; b[2] = z0; b[3] = x1; b[4] = y1; b[5] = z1; b[6] = changed;
     L->dirty_sdf = true;
-}
-static void queue_world_box(Level *L, LxAabb w) {
-    LxVec3 a = lx_scale3(lx_sub3(w.min, L->origin), 1.0f / L->scell), b = lx_scale3(lx_sub3(w.max, L->origin), 1.0f / L->scell);
-    int m = (int)TRUNC + 1;
-    queue_box(L, (int)floorf(a.x) - m, (int)floorf(a.y) - m, (int)floorf(a.z) - m, (int)ceilf(b.x) + m, (int)ceilf(b.y) + m, (int)ceilf(b.z) + m, 1);
 }
 
 /* Place a level around the eye, in steps of two probes. A small move keeps everything that's still inside and
@@ -379,14 +370,11 @@ static void sdf_job(void *user, int begin, int end, int thread) {
         int x = b[0] + k % nx, y = b[1] + (k / nx) % ny, z = b[2] + k / (nx * ny);
         LxVec3 p = lx_add3(L->origin, lx_v3((x + 0.5f) * L->scell, (y + 0.5f) * L->scell, (z + 0.5f) * L->scell));
         float best2 = far * far, sign = 1;
-        int tri = -1, mtri = -1;
+        int tri = -1;
         bvh_closest(&G.bvh, p, &best2, &tri, &sign);
-        float b2 = best2;
-        bvh_closest(&G.moving, p, &best2, &mtri, &sign);
         int i = vidx(L, x, y, z);
-        float dist = sqrtf(best2);
-        float sd = best2 < far * far ? sign * dist : far;
-        int32_t id = (mtri >= 0 && best2 < b2) ? -(mtri + 1) : tri >= 0 ? tri + 1 : 0;
+        float sd = best2 < far * far ? sign * sqrtf(best2) : far;
+        int32_t id = tri >= 0 ? tri + 1 : 0;
         /* terrain: exact, from its heights (its meshes are only an approximation further away) */
         float h;
         LxVec3 tn;
@@ -394,7 +382,8 @@ static void sdf_job(void *user, int begin, int end, int thread) {
             float st = (p.y - h) * lx_maxf(tn.y, 0.05f);
             if (st < sd) { sd = lx_maxf(st, -far); id = st < far ? TERRAIN_TRI : 0; }
         }
-        L->sdf[i] = lx_minf(sd, far);
+        sd = lx_minf(sd, far);
+        L->sdf[i] = sd;
         L->tri[i] = id;
     }
 }
@@ -569,8 +558,8 @@ static void light_job(void *user, int begin, int end, int thread) {
             float h;
             if (!lx_terrain_query(&G.tq, c.x, c.z, &h, &n, &albedo)) continue;
         } else {
-            const LxBvh *b = t > 0 ? &G.bvh : &G.moving;
-            int ti = t > 0 ? t - 1 : -t - 1;
+            const LxBvh *b = &G.bvh;
+            int ti = t - 1;
             if (ti >= b->tri_count) continue;
             n = b->normals[ti];
             const LxTriMaterial *mt = &b->materials[b->mat_index[ti]];
@@ -685,7 +674,11 @@ static void vis_job(void *user, int begin, int end, int thread) {
         vis_probe(L, i);
         if (L->cls[i] == 0) { L->need[i] = 0; L->hist[i] = 0; continue; }
         if (!j->changed) continue;   /* only came into view: seeded, and traced nearest first */
-        /* the geometry around it changed: gather again, quickly forgetting what was there */
+        if (j->changed == 1) {   /* a small change: a few more updates, keeping the history */
+            if (L->need[i] < 3) L->need[i] = 3;
+            continue;
+        }
+        /* the geometry around it changed a lot: gather again, forgetting what was there */
         int want = L->cls[i] == 1 ? TARGET / 2 : TARGET_AIR;
         if (L->need[i] < want) L->need[i] = want;
         L->hist[i] = 0;   /* its next update replaces what it had (shown until then, so nothing goes dark) */
@@ -740,52 +733,10 @@ static void fill_buried(Level *L) {
             }
 }
 
-/* ---------------------------------------------------------------- the scene: geometry, moving objects, lights */
-static uint64_t moving_signature(LxScene *s, uint64_t *set) {
-    uint64_t h = 1469598103934665603ull, hs = h;
-    for (int i = 1; i < s->count; i++) {
-        LxEntityData *d = &s->entities[i];
-        if (!lx_gi_moving_takes(s, i)) continue;
-        const LxMesh *m = lx_skin_mesh_of(d);
-        if (!m) continue;
-        int32_t q[19];
-        for (int k = 0; k < 12; k++) q[k] = (int32_t)lroundf(d->world.m[k < 9 ? k + k / 3 : 12 + (k - 9)] * 50.0f);
-        q[12] = (int32_t)lroundf(m->bounds.min.x * 50); q[13] = (int32_t)lroundf(m->bounds.min.y * 50); q[14] = (int32_t)lroundf(m->bounds.min.z * 50);
-        q[15] = (int32_t)lroundf(m->bounds.max.x * 50); q[16] = (int32_t)lroundf(m->bounds.max.y * 50); q[17] = (int32_t)lroundf(m->bounds.max.z * 50);
-        q[18] = i;
-        for (int k = 0; k < 19; k++) h = (h ^ (uint32_t)q[k]) * 1099511628211ull;
-        hs = (hs ^ (uint32_t)i) * 1099511628211ull;
-        hs = (hs ^ (uint32_t)m->lods[0].index_count ^ ((uint32_t)m->lod_count << 24)) * 1099511628211ull;
-    }
-    *set = hs;
-    return h;
-}
-static float box_area(LxAabb b) {
-    LxVec3 e = lx_sub3(b.max, b.min);
-    return 2.0f * (e.x * e.y + e.y * e.z + e.z * e.x);
-}
-/* moving objects: refit (or rebuild) their triangles; the field around where they were and are is rebuilt */
-static bool update_moving(LxScene *s) {
-    uint64_t set;
-    uint64_t h = moving_signature(s, &set);
-    if (h == G.moving_hash && set == G.moving_set) return false;
-    if (set != G.moving_set || !G.moving.tri_count || !lx_bvh_refit_moving(&G.moving, s) || box_area(G.moving.bounds) > G.moving_built_area * 2.0f) {
-        lx_bvh_build_moving(&G.moving, s);
-        G.moving_built_area = G.moving.tri_count ? box_area(G.moving.bounds) : 0;
-    }
-    G.moving_hash = h;
-    G.moving_set = set;
-    LxAabb now = G.moving.bounds;
-    for (int l = 0; l < NLEV; l++) {
-        if (!G.lv[l].on) continue;
-        if (G.moving_prev_on) queue_world_box(&G.lv[l], G.moving_prev);
-        if (G.moving.tri_count) queue_world_box(&G.lv[l], now);
-    }
-    G.moving_prev = now;
-    G.moving_prev_on = G.moving.tri_count > 0;
-    return true;
-}
-
+/* ---------------------------------------------------------------- the scene: lights
+ * Things that move (characters, Rigidbodies) are lit by the GI but don't block or bounce it: with their own probes
+ * half a metre apart they only made dark halos on the ground around them, flickering as they moved. Their shadows
+ * come from the shadow maps. */
 static void gather_lights(LxScene *s) {
     G.nlights = 0;
     for (int i = 1; i < s->count && G.nlights < 64; i++) {
@@ -928,7 +879,6 @@ void lx_gi_update(LxScene *s, const LxGraphicsSettings *g, LxVec3 eye) {
         lx_bvh_build_gi(&G.bvh, s);
         G.built_scene = s;
         G.built_version = s->static_version;
-        G.moving_hash = G.moving_set = 0;
         /* the same geometry (Play makes a copy of the scene): keep every level and its light */
         uint64_t h = 1469598103934665603ull ^ (uint64_t)G.bvh.tri_count;
         h = hash_floats(h, (const float *)G.bvh.v0, G.bvh.tri_count * 3);
@@ -947,19 +897,22 @@ void lx_gi_update(LxScene *s, const LxGraphicsSettings *g, LxVec3 eye) {
     /* levels: probe count per axis from the setting; the finest covers ~12 m, each next one twice (the far one 3x) */
     int P = lx_clampi(g->gi_probe_resolution, 8, 48) & ~1;
     float base = 12.0f / (float)P;
-    if (P != G.probe_res || rebuilt) {
+    if (P != G.probe_res) {
         for (int l = 0; l < NLEV; l++) G.lv[l].on = false;
         G.probe_res = P;
-        G.moving_prev_on = false;
-    }
+        G.stale = 0;
+    } else if (rebuilt) G.stale = (1u << NLEV) - 1;
+    /* new geometry: build the levels again one per frame, the finest first (all at once stalls a frame), the
+     * others keep their light until their turn */
+    for (int l = 0; l < NLEV; l++)
+        if (G.stale & (1u << l)) { G.lv[l].on = false; G.stale &= ~(1u << l); break; }
     static const float SCALE[NLEV] = {1, 2, 4};
     for (int l = NLEV - 1; l >= 0; l--) level_place(&G.lv[l], l, eye, P, base * SCALE[l]);
-    update_moving(s);
     for (int l = NLEV - 1; l >= 0; l--) {   /* coarse first: finer levels seed their new probes from it */
         level_build(&G.lv[l]);
         seed_fresh(l);
     }
-    if (!G.bvh.tri_count && !G.moving.tri_count && !G.tq.n) {   /* nothing to bounce off: sky only, the shader's ambient does that */
+    if (!G.bvh.tri_count && !G.tq.n) {   /* nothing to bounce off: sky only, the shader's ambient does that */
         G.volume.valid = false;
         G.ms_last = (float)((lx_time() - t0) * 1000.0);
         return;

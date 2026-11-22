@@ -770,7 +770,7 @@ static void test_gi_convergence(void) {
         lx_gi_update(s, &g, GI_EYE);
         if (f == 399) noisy = gi_flicker(s, &g);
     }
-    CHECK(lx_gi_moving_triangles() > 0 && noisy < 0.05f, "moving characters and flickering lights don't keep the GI noisy (%.4f; while it gathered: %.4f)", noisy, early);
+    CHECK(noisy < 0.05f, "moving characters and flickering lights don't keep the GI noisy (%.4f; while it gathered: %.4f)", noisy, early);
     (void)still;
     lx_gi_shutdown();
     lx_scene_destroy(s);
@@ -945,28 +945,27 @@ static LxVec3 bleed_at(LxScene *s, const LxGraphicsSettings *g, int frames) {
     return e;
 }
 static void test_gi_moving(void) {
-    printf("live gi: moving objects\n");
+    printf("live gi: moving objects leave no dark halos\n");
     LxScene *s = lx_scene_create("Moving");
     LxEntity floor = lx_spawn_primitive(s, LX_PRIM_CUBE, "Floor", lx_v3(0, -0.5f, 0));
     lx_entity_set_scale(s, floor, lx_v3(20, 1, 20));
-    LxEntity lamp = lx_entity_create(s, "Lamp");
-    lx_entity_set_position(s, lamp, lx_v3(0.5f, 1.2f, 0));
-    lx_add_light(s, lamp, LX_LIGHT_POINT)->intensity = 120;
-    s->env.ambient_intensity = 0;
-    LxEntity cube = lx_spawn_primitive(s, LX_PRIM_CUBE, "Cart", lx_v3(-2, 0.75f, 0));
-    lx_entity_set_scale(s, cube, lx_v3(1.5f, 1.5f, 3));
-    lx_strcpy(lx_get_mesh(s, cube)->material, LX_REF_MAX, "builtin:red");
-    lx_get_mesh(s, cube)->static_geometry = true;   /* ignored: it has a Rigidbody */
-    lx_add_rigidbody(s, cube);
+    LxEntity sun = lx_entity_create(s, "Sun");
+    lx_entity_set_euler(s, sun, lx_v3(50, 30, 0));
+    lx_add_light(s, sun, LX_LIGHT_DIRECTIONAL)->intensity = 3;
+    s->env.ambient_intensity = 0.5f;
     LxGraphicsSettings g = lx_graphics_defaults(1);
     g.gi_rays_per_frame = 60000;
-    LxVec3 near_e = bleed_at(s, &g, 60);
-    int np = lx_gi_moving_triangles();
-    CHECK(np == 12, "the moving cube's triangles are in GI (%d)", np);
-    CHECK(near_e.x > near_e.y * 1.3f && near_e.x > 0, "it bounces red light onto what faces it (r %g g %g)", near_e.x, near_e.y);
-    lx_entity_set_position(s, cube, lx_v3(-8, 0.75f, 8));   /* moved by the game (Rigidbody): GI follows */
-    LxVec3 far_e = bleed_at(s, &g, 60);
-    CHECK(far_e.x < near_e.x * 0.25f, "moved away, the red goes with it (red %g -> %g)", near_e.x, far_e.x);
+    LxVec3 clear = bleed_at(s, &g, 200);
+    /* a character walks right next to where we look: the ground's bounce light stays as it was */
+    LxEntity hero = lx_spawn_primitive(s, LX_PRIM_CAPSULE, "Hero", lx_v3(-1.6f, 1, 0));
+    lx_add_character(s, hero);
+    float worst = 1;
+    for (int f = 0; f < 120; f++) {
+        lx_entity_set_position(s, hero, lx_v3(-1.6f + 0.4f * sinf(f * 0.1f), 1, 0.3f * cosf(f * 0.1f)));
+        LxVec3 e = bleed_at(s, &g, 1);
+        worst = lx_minf(worst, (e.x + e.y + e.z) / (clear.x + clear.y + clear.z));
+    }
+    CHECK(lx_gi_moving_triangles() == 0 && worst > 0.95f, "a character walking by leaves no dark halo (lowest %.3f of the light)", worst);
     lx_gi_shutdown();
     lx_scene_destroy(s);
 }
