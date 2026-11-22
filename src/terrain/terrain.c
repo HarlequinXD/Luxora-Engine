@@ -1158,6 +1158,32 @@ bool lx_terrain_raycast(LxScene *s, LxEntity e, LxRay ray, float max_dist, LxVec
     LxVec3 o = lx_mat4_point(c.inv, ray.origin), dir = lx_norm3(lx_mat4_dir(c.inv, ray.dir));
     float step = cell(c.d) * 0.5f, t = 0, prev_t = 0;
     bool prev_above = true, have_prev = false;
+    /* only march where the land is: the box around every chunk and its heights */
+    if (c.d->nch == 0) return false;
+    float bmin[3] = {1e30f, 1e30f, 1e30f}, bmax[3] = {-1e30f, -1e30f, -1e30f};
+    for (int i = 0; i < c.d->nch; i++) {
+        const Chunk *ch = &c.d->ch[i];
+        bmin[0] = lx_minf(bmin[0], (float)ch->cx * c.d->size); bmax[0] = lx_maxf(bmax[0], (float)(ch->cx + 1) * c.d->size);
+        bmin[2] = lx_minf(bmin[2], (float)ch->cz * c.d->size); bmax[2] = lx_maxf(bmax[2], (float)(ch->cz + 1) * c.d->size);
+        if (ch->hmax >= ch->hmin) { bmin[1] = lx_minf(bmin[1], ch->hmin); bmax[1] = lx_maxf(bmax[1], ch->hmax); }
+    }
+    if (bmax[1] < bmin[1]) { bmin[1] = 0; bmax[1] = 0; }
+    bmin[1] -= 1; bmax[1] += 1;
+    float t0 = 0, t1 = max_dist;
+    const float *po = &o.x, *pd = &dir.x;
+    for (int a = 0; a < 3; a++) {
+        if (fabsf(pd[a]) < 1e-9f) {
+            if (po[a] < bmin[a] || po[a] > bmax[a]) return false;
+            continue;
+        }
+        float ta = (bmin[a] - po[a]) / pd[a], tb = (bmax[a] - po[a]) / pd[a];
+        if (ta > tb) { float tmp = ta; ta = tb; tb = tmp; }
+        t0 = lx_maxf(t0, ta);
+        t1 = lx_minf(t1, tb);
+        if (t0 > t1) return false;
+    }
+    t = prev_t = t0;
+    max_dist = t1 + step;
     for (int k = 0; k < 200000 && t <= max_dist; k++) {
         LxVec3 p = lx_madd3(o, dir, t);
         float h;
@@ -1186,6 +1212,13 @@ bool lx_terrain_raycast(LxScene *s, LxEntity e, LxRay ray, float max_dist, LxVec
 bool lx_terrain_has_chunk(LxScene *s, LxEntity e, int cx, int cz) {
     Ctx c;
     return ctx_of(s, e, &c) && find_chunk(c.d, cx, cz) != NULL;
+}
+int lx_terrain_chunks(LxScene *s, LxEntity e, int *xz, int max) {
+    Ctx c;
+    if (!ctx_of(s, e, &c)) return 0;
+    int n = lx_mini(max, c.d->nch);
+    for (int i = 0; i < n; i++) { xz[i * 2] = c.d->ch[i].cx; xz[i * 2 + 1] = c.d->ch[i].cz; }
+    return c.d->nch;
 }
 int lx_terrain_chunk_count(LxScene *s, LxEntity e) {
     Ctx c;

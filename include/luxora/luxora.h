@@ -649,6 +649,7 @@ bool lx_terrain_add_chunk(LxScene *s, LxEntity terrain, int cx, int cz);       /
 bool lx_terrain_remove_chunk(LxScene *s, LxEntity terrain, int cx, int cz);
 bool lx_terrain_has_chunk(LxScene *s, LxEntity terrain, int cx, int cz);
 int lx_terrain_chunk_count(LxScene *s, LxEntity terrain);
+int lx_terrain_chunks(LxScene *s, LxEntity terrain, int *xz, int max);   /* fills up to max (x, z) pairs; returns how many there are */
 int lx_terrain_loaded_count(LxScene *s, LxEntity terrain);     /* chunks in full detail now */
 bool lx_terrain_chunk_at(LxScene *s, LxEntity terrain, LxVec3 world, int *cx, int *cz);   /* the chunk square under a point */
 void lx_terrain_begin_stroke(LxScene *s, LxEntity terrain);     /* brush strokes between begin and end are one undo step */

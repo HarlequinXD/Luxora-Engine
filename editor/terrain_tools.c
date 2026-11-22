@@ -56,7 +56,9 @@ static LxEntity selected_terrain(void) {
 }
 bool ed_terrain_tool_active(void) { return g_tool >= 0 && ED.play == ED_EDIT && selected_terrain() != 0; }
 
+static uint64_t g_frame;
 void ed_terrain_frame(void) {
+    g_frame++;
     if (ED.scene && ED.play == ED_EDIT) lx_terrain_stream(ED.scene, ED.cam_pos);   /* chunks around the editor camera */
 }
 
@@ -878,9 +880,43 @@ static bool plane_hit(LxEntity e, LxRay r, LxVec3 *out) {
     *out = lx_madd3(r.origin, r.dir, tt);
     return true;
 }
+/* the terrain's chunks as a hash set, rebuilt once a frame: Expand asks about thousands of squares */
+static struct { int *xz, n, cap; uint32_t *slot; int nslot; uint64_t frame; LxEntity e; } CS;
+static uint32_t cs_hash(int x, int z) { return ((uint32_t)x * 73856093u) ^ ((uint32_t)z * 19349663u); }
+static void chunk_set_refresh(LxEntity e) {
+    if (CS.frame == g_frame && CS.e == e && CS.slot) return;
+    CS.frame = g_frame;
+    CS.e = e;
+    int n = lx_terrain_chunks(ED.scene, e, CS.xz, CS.cap);
+    if (n > CS.cap) {
+        CS.cap = n * 2;
+        CS.xz = lx_realloc(CS.xz, sizeof(int) * 2 * (size_t)CS.cap);
+        n = lx_terrain_chunks(ED.scene, e, CS.xz, CS.cap);
+    }
+    CS.n = n;
+    int want = 16;
+    while (want < n * 2) want <<= 1;
+    if (want != CS.nslot) { lx_free(CS.slot); CS.slot = lx_alloc(sizeof(uint32_t) * (size_t)want); CS.nslot = want; }
+    memset(CS.slot, 0xff, sizeof(uint32_t) * (size_t)CS.nslot);
+    for (int i = 0; i < n; i++) {
+        uint32_t h = cs_hash(CS.xz[i * 2], CS.xz[i * 2 + 1]) & (uint32_t)(CS.nslot - 1);
+        while (CS.slot[h] != 0xffffffffu) h = (h + 1) & (uint32_t)(CS.nslot - 1);
+        CS.slot[h] = (uint32_t)i;
+    }
+}
+static bool chunk_has(int cx, int cz) {
+    if (!CS.nslot) return false;
+    uint32_t h = cs_hash(cx, cz) & (uint32_t)(CS.nslot - 1);
+    while (CS.slot[h] != 0xffffffffu) {
+        int i = (int)CS.slot[h];
+        if (CS.xz[i * 2] == cx && CS.xz[i * 2 + 1] == cz) return true;
+        h = (h + 1) & (uint32_t)(CS.nslot - 1);
+    }
+    return false;
+}
 static bool chunk_neighbour(LxEntity e, int cx, int cz) {
-    return lx_terrain_has_chunk(ED.scene, e, cx - 1, cz) || lx_terrain_has_chunk(ED.scene, e, cx + 1, cz) ||
-           lx_terrain_has_chunk(ED.scene, e, cx, cz - 1) || lx_terrain_has_chunk(ED.scene, e, cx, cz + 1);
+    chunk_set_refresh(e);
+    return chunk_has(cx - 1, cz) || chunk_has(cx + 1, cz) || chunk_has(cx, cz - 1) || chunk_has(cx, cz + 1);
 }
 static void finish(LxEntity e) {
     lx_terrain_end_stroke(ED.scene, e);
@@ -923,7 +959,7 @@ void ed_terrain_viewport(LxRay ray, bool hot, bool inside) {
             T.chunk_valid = g_tool == TT_ADD_CHUNK ? !has && chunk_neighbour(e, T.ccx, T.ccz) : has && lx_terrain_chunk_count(s, e) > 1;
             if (lx_mouse_pressed(LX_MOUSE_LEFT) && !lx_key_down(LX_KEY_ALT) && T.chunk_valid) {
                 bool ok = g_tool == TT_ADD_CHUNK ? lx_terrain_add_chunk(s, e, T.ccx, T.ccz) : lx_terrain_remove_chunk(s, e, T.ccx, T.ccz);
-                if (ok) { ed_mark_changed(); ed_commit(); ED.inspector_dirty = true; }
+                if (ok) { ed_mark_changed(); ed_commit(); ED.inspector_dirty = true; g_frame++; }
             }
         }
         return;
@@ -988,17 +1024,17 @@ static float ground(float x, float z, float fallback) {
     float y;
     return lx_terrain_height(ED.scene, x, z, &y) ? y + 0.05f : fallback;
 }
-static void draw_square(UiCtx *ui, LxMat4 w, float size, int cx, int cz, uint32_t col, float th) {
+static void draw_square(UiCtx *ui, LxMat4 w, float size, int cx, int cz, uint32_t col, float th, int N) {
     LxVec3 c[4] = {lx_mat4_point(w, lx_v3(cx * size, 0, cz * size)), lx_mat4_point(w, lx_v3((cx + 1) * size, 0, cz * size)),
                    lx_mat4_point(w, lx_v3((cx + 1) * size, 0, (cz + 1) * size)), lx_mat4_point(w, lx_v3(cx * size, 0, (cz + 1) * size))};
     for (int k = 0; k < 4; k++) {
         LxVec3 a = c[k], b = c[(k + 1) & 3];
-        const int N = 8;   /* follow the ground along existing chunks */
-        LxVec3 prev = lx_v3(a.x, ground(a.x, a.z, a.y), a.z);
+        /* N > 1 follows the ground along existing chunks */
+        LxVec3 prev = N > 1 ? lx_v3(a.x, ground(a.x, a.z, a.y), a.z) : a;
         for (int i = 1; i <= N; i++) {
             float f = (float)i / N;
             LxVec3 p = lx_lerp3(a, b, f);
-            p.y = ground(p.x, p.z, p.y);
+            if (N > 1) p.y = ground(p.x, p.z, p.y);
             line3(ui, prev, p, col, th);
             prev = p;
         }
@@ -1013,17 +1049,34 @@ void ed_terrain_draw(UiCtx *ui) {
     const UiTheme *th = ui_theme(ui);
     if (g_tool == TT_ADD_CHUNK || g_tool == TT_REMOVE_CHUNK) {
         LxMat4 w = lx_entity_world_matrix(ED.scene, e);
-        /* every place a chunk could go, and the one under the mouse */
-        int cmin = -64, cmax = 64;
-        for (int cz = cmin; cz <= cmax; cz++)
-            for (int cx = cmin; cx <= cmax; cx++) {
-                bool has = lx_terrain_has_chunk(ED.scene, e, cx, cz);
-                if (g_tool == TT_ADD_CHUNK && !has && chunk_neighbour(e, cx, cz)) draw_square(ui, w, t->chunk_size, cx, cz, ui_alpha(th->success, 0.35f), 1);
-                if (g_tool == TT_REMOVE_CHUNK && has) draw_square(ui, w, t->chunk_size, cx, cz, ui_alpha(th->text, 0.3f), 1);
+        /* the squares a chunk could go in (or the chunks), near the camera, and the one under the mouse */
+        chunk_set_refresh(e);
+        float near2 = 1500.0f * 1500.0f;
+        for (int i = 0; i < CS.n; i++) {
+            int cx = CS.xz[i * 2], cz = CS.xz[i * 2 + 1];
+            LxVec3 mid = lx_mat4_point(w, lx_v3((cx + 0.5f) * t->chunk_size, 0, (cz + 0.5f) * t->chunk_size));
+            LxVec3 dc = lx_sub3(mid, ED.cam_pos);
+            if (lx_dot3(dc, dc) > near2) continue;
+            if (g_tool == TT_REMOVE_CHUNK) {
+                draw_square(ui, w, t->chunk_size, cx, cz, ui_alpha(th->text, 0.3f), 1, 4);
+                continue;
             }
+            static const int nb[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+            for (int k = 0; k < 4; k++) {
+                int x = cx + nb[k][0], z = cz + nb[k][1];
+                if (chunk_has(x, z)) continue;
+                /* drawn once: by its first neighbour in the list order of (k) - skip if an earlier side already did */
+                bool drawn = false;
+                for (int q = 0; q < 4 && !drawn; q++) {
+                    int ox = x + nb[q][0], oz = z + nb[q][1];
+                    if ((ox != cx || oz != cz) && chunk_has(ox, oz) && (oz < cz || (oz == cz && ox < cx))) drawn = true;
+                }
+                if (!drawn) draw_square(ui, w, t->chunk_size, x, z, ui_alpha(th->success, 0.35f), 1, 1);
+            }
+        }
         if (T.chunk_ok)
             draw_square(ui, w, t->chunk_size, T.ccx, T.ccz,
-                        !T.chunk_valid ? ui_alpha(th->text_dim, 0.6f) : g_tool == TT_ADD_CHUNK ? th->success : th->danger, 2.5f);
+                        !T.chunk_valid ? ui_alpha(th->text_dim, 0.6f) : g_tool == TT_ADD_CHUNK ? th->success : th->danger, 2.5f, 8);
         return;
     }
     if (!T.has_hit) return;
