@@ -708,19 +708,20 @@ static void test_gi(void) {
     lx_scene_destroy(s);
 }
 
-/* noise = relative RMS change of the indirect light on the floor between two consecutive frames */
+/* noise = relative RMS change of the indirect light on the floor (7 x 7 points, as the shader sees it) over 4 frames */
 static void gi_floor_layer(float *out, int *n) {
-    const LxGiVolume *v = lx_gi_volume();
-    int y = (int)((0.6f - v->origin.y) / v->cell_size.y);
     *n = 0;
-    for (int z = v->res[2] / 4; z < v->res[2] * 3 / 4; z++)
-        for (int x = v->res[0] / 4; x < v->res[0] * 3 / 4; x++) out[(*n)++] = v->sh[((size_t)(z * v->res[1] + y) * v->res[0] + x) * 12];
+    for (int z = 0; z < 7; z++)
+        for (int x = 0; x < 7; x++) {
+            LxVec3 e = lx_gi_irradiance(lx_v3(-6.0f + 2.0f * x, 0.02f, -6.0f + 2.0f * z), lx_v3(0, 1, 0), true);
+            out[(*n)++] = e.x + e.y + e.z;
+        }
 }
 static float gi_flicker(LxScene *s, const LxGraphicsSettings *g) {
-    static float a[4096], b[4096];
+    static float a[64], b[64];
     int n;
     gi_floor_layer(a, &n);
-    lx_gi_update(s, g, GI_EYE);
+    for (int f = 0; f < 4; f++) lx_gi_update(s, g, GI_EYE);
     gi_floor_layer(b, &n);
     double d = 0, m = 0;
     for (int i = 0; i < n; i++) { d += (double)(b[i] - a[i]) * (b[i] - a[i]); m += (double)b[i] * b[i]; }
@@ -740,12 +741,12 @@ static void test_gi_convergence(void) {
     s->env.ambient_intensity = 0;
     LxGraphicsSettings g = lx_graphics_defaults(1);
     g.gi_rays_per_frame = 60000;
-    for (int f = 0; f < 8; f++) lx_gi_update(s, &g, GI_EYE);
+    for (int f = 0; f < 2; f++) lx_gi_update(s, &g, GI_EYE);
     float early = gi_flicker(s, &g);
     for (int f = 0; f < 300; f++) lx_gi_update(s, &g, GI_EYE);
     float late = gi_flicker(s, &g);
-    printf("  frame-to-frame noise after 8 frames %.4f, after 308 frames %.4f\n", early, late);
-    CHECK(late < early * 0.25f, "static lighting converges (noise %.4f -> %.4f)", early, late);
+    printf("  change over 4 frames: from frame 2 %.4f, after 300 more %.4f (%d rays then)\n", early, late, lx_gi_last_ray_count());
+    CHECK(late < 0.005f && lx_gi_last_ray_count() == 0, "static lighting settles, and then nothing is traced (%.4f, %d rays)", late, lx_gi_last_ray_count());
     /* moving the light must restart accumulation quickly instead of smearing the old result */
     lx_entity_set_position(s, lamp, lx_v3(6, 4, 6));
     for (int f = 0; f < 30; f++) lx_gi_update(s, &g, GI_EYE);
@@ -769,9 +770,52 @@ static void test_gi_convergence(void) {
         lx_gi_update(s, &g, GI_EYE);
         if (f == 399) noisy = gi_flicker(s, &g);
     }
-    CHECK(lx_gi_moving_triangles() > 0 && noisy < early * 0.5f, "moving characters and flickering lights don't keep the GI noisy (%.4f; 8 frames in: %.4f)", noisy, early);
+    CHECK(lx_gi_moving_triangles() > 0 && noisy < 0.05f, "moving characters and flickering lights don't keep the GI noisy (%.4f; while it gathered: %.4f)", noisy, early);
     (void)still;
     lx_gi_shutdown();
+    lx_scene_destroy(s);
+}
+
+/* moving the camera or pressing Play must never leave the GI dark while it gathers light again: probes that come
+ * into a level start from the coarser level's light, and a copy of the scene (Play) keeps all of it */
+static void test_gi_no_dark_sweep(void) {
+    printf("live gi: no dark sweep when the camera moves or Play starts\n");
+    LxScene *s = lx_scene_create("Sweep");
+    LxEntity floor = lx_spawn_primitive(s, LX_PRIM_CUBE, "Floor", lx_v3(0, -0.5f, 0));
+    lx_entity_set_scale(s, floor, lx_v3(80, 1, 80));
+    for (int i = 0; i < 12; i++) {
+        LxEntity b = lx_spawn_primitive(s, LX_PRIM_CUBE, "Box", lx_v3((i % 4) * 8.0f - 12, 1, (i / 4) * 8.0f - 8));
+        lx_entity_set_scale(s, b, lx_v3(2, 2, 2));
+    }
+    LxEntity sun = lx_entity_create(s, "Sun");
+    lx_entity_set_euler(s, sun, lx_v3(50, 30, 0));
+    lx_add_light(s, sun, LX_LIGHT_DIRECTIONAL)->intensity = 3;
+    s->env.ambient_intensity = 0.3f;
+    LxGraphicsSettings g = lx_graphics_defaults(1);
+    LxVec3 at = lx_v3(9.5f, 0.05f, 0.5f);   /* outside the finest level until the camera comes over */
+    for (int f = 0; f < 400; f++) lx_gi_update(s, &g, lx_v3(0, 1.7f, 0));
+    for (int f = 0; f < 400; f++) lx_gi_update(s, &g, lx_v3(9, 1.7f, 0));
+    LxVec3 settled = lx_gi_irradiance(at, lx_v3(0, 1, 0), true);
+    for (int f = 0; f < 400; f++) lx_gi_update(s, &g, lx_v3(0, 1.7f, 0));
+    float worst = 1e9f;
+    for (int step = 1; step <= 18; step++) {   /* walk over in half-metre steps, looking at each frame */
+        lx_gi_update(s, &g, lx_v3(step * 0.5f, 1.7f, 0));
+        LxVec3 e = lx_gi_irradiance(at, lx_v3(0, 1, 0), true);
+        worst = lx_minf(worst, (e.x + e.y + e.z) / (settled.x + settled.y + settled.z));
+    }
+    CHECK(worst > 0.6f, "walking over, the light there never drops away (lowest %.2f of the settled light)", worst);
+    /* Play: the scene is copied */
+    for (int f = 0; f < 400; f++) lx_gi_update(s, &g, lx_v3(9, 1.7f, 0));
+    LxVec3 before = lx_gi_irradiance(at, lx_v3(0, 1, 0), true);
+    char *text = lx_scene_serialize(s);
+    LxScene *copy = lx_scene_deserialize(text);
+    lx_free(text);
+    lx_gi_update(copy, &g, lx_v3(9, 1.7f, 0));
+    LxVec3 after = lx_gi_irradiance(at, lx_v3(0, 1, 0), true);
+    float ratio = (after.x + after.y + after.z) / (before.x + before.y + before.z);
+    CHECK(ratio > 0.95f && ratio < 1.05f, "a copy of the scene (Play) keeps the light it had (%.3f)", ratio);
+    lx_gi_shutdown();
+    lx_scene_destroy(copy);
     lx_scene_destroy(s);
 }
 
@@ -3813,6 +3857,7 @@ int main(void) {
     RUN(test_bvh);
     RUN(test_gi);
     RUN(test_gi_convergence);
+    RUN(test_gi_no_dark_sweep);
     RUN(test_gi_leaks);
     RUN(test_static_safeguard);
     RUN(test_gi_moving);

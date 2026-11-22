@@ -49,18 +49,23 @@ typedef struct Level {
     uint8_t *surf;            /* per voxel: 1 = a surface voxel */
     int *slist;               /* the surface voxels */
     int nsurf, csurf;
+    int *snew;                /* surface voxels not lit yet: lit before any probe looks at them */
+    int nnew, cnew;
     float *sh;                /* per probe: 12 (L1 SH, red / green / blue) */
     float *vis;               /* per probe: 6, distance to the first surface along +x -x +y -y +z -z (probe cells) */
     uint8_t *hist, *need;     /* per probe: updates in its history; updates it still wants */
     bool unlit;               /* some probes have never been traced */
+    bool feedback;            /* the bounce light may still be building up */
     uint32_t *stamp;          /* per probe: the frame it was last picked in */
+    uint8_t *fresh;           /* per probe: 1 = just came into the level, to be seeded from the level around it */
+    int *order;               /* the probes nearest the camera (the level's middle) first */
     uint8_t *cls;             /* per probe: 0 buried in geometry, 1 near a surface, 2 out in the open */
     int bres[3];              /* empty-space bricks (BRICK^3 voxels each) */
     uint8_t *bdist;           /* per brick: how many bricks away the nearest one with a surface is (0 = has one) */
     int rr, srr;              /* where the round-robin cursors are */
     uint32_t version, vis_version, sdf_version;
     bool dirty_sdf;           /* boxes to rebuild are queued */
-    int boxes[64][6];         /* voxel boxes (min xyz, max xyz exclusive) to rebuild */
+    int boxes[64][7];         /* voxel boxes (min xyz, max xyz exclusive) to rebuild; [6] 1 = the geometry there changed */
     int nboxes;
 } Level;
 
@@ -68,6 +73,8 @@ static struct {
     LxBvh bvh, moving;
     LxScene *built_scene;
     uint32_t built_version;
+    uint64_t geo_hash;        /* the static geometry's content: a copy of the scene (pressing Play) keeps the light */
+    float sky_sh[12];         /* the sky alone, as probes would see it in the open (new probes start from it) */
     uint64_t moving_hash, moving_set;
     float moving_built_area;
     LxAabb moving_prev;       /* where moving objects were when the field last took them in */
@@ -95,8 +102,8 @@ void lx_gi_init(void) {
     G.walls = true;
 }
 static void level_free(Level *L) {
-    lx_free(L->sdf); lx_free(L->tri); lx_free(L->rad); lx_free(L->surf); lx_free(L->slist);
-    lx_free(L->sh); lx_free(L->vis); lx_free(L->hist); lx_free(L->need); lx_free(L->cls); lx_free(L->bdist); lx_free(L->stamp);
+    lx_free(L->sdf); lx_free(L->tri); lx_free(L->rad); lx_free(L->surf); lx_free(L->slist); lx_free(L->snew);
+    lx_free(L->sh); lx_free(L->vis); lx_free(L->hist); lx_free(L->need); lx_free(L->cls); lx_free(L->bdist); lx_free(L->stamp); lx_free(L->fresh);
     memset(L, 0, sizeof *L);
 }
 void lx_gi_shutdown(void) {
@@ -195,6 +202,17 @@ static void bvh_closest(const LxBvh *b, LxVec3 p, float *best2, int *tri, float 
 static inline int vidx(const Level *L, int x, int y, int z) { return (z * L->sres[1] + y) * L->sres[0] + x; }
 static inline int pidx(const Level *L, int x, int y, int z) { return (z * L->pres[1] + y) * L->pres[0] + x; }
 
+static const Level *g_sort_level;
+static float order_key(int i) {
+    const Level *L = g_sort_level;
+    float x = (float)(i % L->pres[0]) + 0.5f - L->pres[0] * 0.5f, y = (float)((i / L->pres[0]) % L->pres[1]) + 0.5f - L->pres[1] * 0.5f,
+          z = (float)(i / (L->pres[0] * L->pres[1])) + 0.5f - L->pres[2] * 0.5f;
+    return x * x + y * y + z * z;
+}
+static int order_cmp(const void *a, const void *b) {
+    float ka = order_key(*(const int *)a), kb = order_key(*(const int *)b);
+    return ka < kb ? -1 : ka > kb ? 1 : 0;
+}
 static void level_alloc(Level *L) {
     L->np = L->pres[0] * L->pres[1] * L->pres[2];
     L->nv = L->sres[0] * L->sres[1] * L->sres[2];
@@ -208,6 +226,30 @@ static void level_alloc(Level *L) {
     L->need = lx_alloc((size_t)L->np);
     L->cls = lx_alloc((size_t)L->np);
     L->stamp = lx_calloc((size_t)L->np, sizeof(uint32_t));
+    L->fresh = lx_alloc((size_t)L->np);
+    memset(L->fresh, 1, (size_t)L->np);
+    /* the nearest-first order depends only on the level's size: kept for each size */
+    static struct { int pres[3]; int *order; } cache[6];
+    L->order = NULL;
+    for (int k = 0; k < 6 && !L->order; k++)
+        if (cache[k].order && !memcmp(cache[k].pres, L->pres, sizeof L->pres)) L->order = cache[k].order;
+    if (!L->order) {
+        int k = -1;
+        for (int c = 0; c < 6 && k < 0; c++) if (!cache[c].order) k = c;
+        for (int c = 0; c < 6 && k < 0; c++) {   /* full: one no level uses now */
+            bool used = false;
+            for (int l = 0; l < NLEV; l++) used = used || G.lv[l].order == cache[c].order;
+            if (!used) k = c;
+        }
+        if (k < 0) k = 0;   /* can't happen: three levels, six slots */
+        lx_free(cache[k].order);
+        cache[k].order = lx_alloc(sizeof(int) * (size_t)L->np);
+        memcpy(cache[k].pres, L->pres, sizeof L->pres);
+        for (int i = 0; i < L->np; i++) cache[k].order[i] = i;
+        g_sort_level = L;
+        qsort(cache[k].order, (size_t)L->np, sizeof(int), order_cmp);
+        L->order = cache[k].order;
+    }
     L->unlit = true;
     memset(L->cls, 2, (size_t)L->np);
     for (int a = 0; a < 3; a++) L->bres[a] = (L->sres[a] + BRICK - 1) / BRICK;
@@ -217,24 +259,26 @@ static void level_alloc(Level *L) {
     for (int i = 0; i < L->np * 6; i++) L->vis[i] = VIS_MAX;
     memset(L->need, TARGET, (size_t)L->np);
 }
-static void queue_box(Level *L, int x0, int y0, int z0, int x1, int y1, int z1) {
+static void queue_box(Level *L, int x0, int y0, int z0, int x1, int y1, int z1, int changed) {
     x0 = lx_maxi(x0, 0); y0 = lx_maxi(y0, 0); z0 = lx_maxi(z0, 0);
     x1 = lx_mini(x1, L->sres[0]); y1 = lx_mini(y1, L->sres[1]); z1 = lx_mini(z1, L->sres[2]);
     if (x0 >= x1 || y0 >= y1 || z0 >= z1) return;
     if (L->nboxes >= 64) {   /* too many: one box around them all */
         int *b = L->boxes[0];
-        for (int i = 1; i < L->nboxes; i++)
+        for (int i = 1; i < L->nboxes; i++) {
             for (int a = 0; a < 3; a++) { b[a] = lx_mini(b[a], L->boxes[i][a]); b[3 + a] = lx_maxi(b[3 + a], L->boxes[i][3 + a]); }
+            b[6] |= L->boxes[i][6];
+        }
         L->nboxes = 1;
     }
     int *b = L->boxes[L->nboxes++];
-    b[0] = x0; b[1] = y0; b[2] = z0; b[3] = x1; b[4] = y1; b[5] = z1;
+    b[0] = x0; b[1] = y0; b[2] = z0; b[3] = x1; b[4] = y1; b[5] = z1; b[6] = changed;
     L->dirty_sdf = true;
 }
 static void queue_world_box(Level *L, LxAabb w) {
     LxVec3 a = lx_scale3(lx_sub3(w.min, L->origin), 1.0f / L->scell), b = lx_scale3(lx_sub3(w.max, L->origin), 1.0f / L->scell);
     int m = (int)TRUNC + 1;
-    queue_box(L, (int)floorf(a.x) - m, (int)floorf(a.y) - m, (int)floorf(a.z) - m, (int)ceilf(b.x) + m, (int)ceilf(b.y) + m, (int)ceilf(b.z) + m);
+    queue_box(L, (int)floorf(a.x) - m, (int)floorf(a.y) - m, (int)floorf(a.z) - m, (int)ceilf(b.x) + m, (int)ceilf(b.y) + m, (int)ceilf(b.z) + m, 1);
 }
 
 /* Place a level around the eye, in steps of two probes. A small move keeps everything that's still inside and
@@ -260,7 +304,7 @@ static void level_place(Level *L, int lev, LxVec3 eye, int P, float pcell) {
         L->origin = lx_scale3(lx_v3((float)oc[0], (float)oc[1], (float)oc[2]), pcell);
         level_alloc(L);
         L->nboxes = 0;
-        queue_box(L, 0, 0, 0, L->sres[0], L->sres[1], L->sres[2]);
+        queue_box(L, 0, 0, 0, L->sres[0], L->sres[1], L->sres[2], 0);
         L->version++;
         L->vis_version++;
         return;
@@ -292,11 +336,13 @@ static void level_place(Level *L, int lev, LxVec3 eye, int P, float pcell) {
                 n.hist[i] = L->hist[o];
                 n.need[i] = L->need[o];
                 n.cls[i] = L->cls[o];
+                n.fresh[i] = 0;
                 n.stamp[i] = L->stamp[o];
             }
     lx_free(L->sdf); lx_free(L->tri); lx_free(L->rad); lx_free(L->surf); lx_free(L->slist);
-    lx_free(L->sh); lx_free(L->vis); lx_free(L->hist); lx_free(L->need); lx_free(L->cls); lx_free(L->bdist); lx_free(L->stamp);
+    lx_free(L->sh); lx_free(L->vis); lx_free(L->hist); lx_free(L->need); lx_free(L->cls); lx_free(L->bdist); lx_free(L->stamp); lx_free(L->fresh);
     n.slist = NULL;
+    n.nnew = 0;
     n.nsurf = n.csurf = 0;
     for (int a = 0; a < 3; a++) n.oc[a] = oc[a];
     n.origin = lx_scale3(lx_v3((float)oc[0], (float)oc[1], (float)oc[2]), pcell);
@@ -308,9 +354,10 @@ static void level_place(Level *L, int lev, LxVec3 eye, int P, float pcell) {
         int lo[3] = {0, 0, 0}, hi[3] = {L->sres[0], L->sres[1], L->sres[2]};
         if (vs[a] > 0) lo[a] = L->sres[a] - vs[a] - 2;
         else hi[a] = -vs[a] + 2;
-        queue_box(L, lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
+        queue_box(L, lo[0], lo[1], lo[2], hi[0], hi[1], hi[2], 0);
     }
     L->dirty_sdf = true;
+    L->feedback = true;
     L->version++;
     L->vis_version++;
     L->sdf_version++;
@@ -345,7 +392,10 @@ static void rebuild_surfaces(Level *L) {
     for (int i = 0; i < L->nv; i++) {
         bool s = L->tri[i] != 0 && fabsf(L->sdf[i]) <= band;
         if (!s) { L->surf[i] = 0; continue; }
-        if (!L->surf[i]) { L->rad[i * 3] = L->rad[i * 3 + 1] = L->rad[i * 3 + 2] = 0; }
+        if (!L->surf[i]) {
+            L->rad[i * 3] = L->rad[i * 3 + 1] = L->rad[i * 3 + 2] = 0;
+            LX_VEC_PUSH(L->snew, L->nnew, L->cnew, i);
+        }
         L->surf[i] = 1;
         LX_VEC_PUSH(L->slist, L->nsurf, L->csurf, i);
     }
@@ -479,7 +529,7 @@ static LxVec3 probe_irradiance(const Level *L, LxVec3 p, LxVec3 n) {
         int X = x + (k & 1), Y = y + ((k >> 1) & 1), Z = z + (k >> 2);
         if (X < 0 || Y < 0 || Z < 0 || X >= L->pres[0] || Y >= L->pres[1] || Z >= L->pres[2]) continue;
         int i = pidx(L, X, Y, Z);
-        if (!L->hist[i]) continue;   /* not traced yet, or buried */
+        if (!L->cls[i]) continue;   /* buried */
         float w = ((k & 1) ? f[0] : 1 - f[0]) * (((k >> 1) & 1) ? f[1] : 1 - f[1]) * ((k >> 2) ? f[2] : 1 - f[2]);
         if (w <= 0) continue;
         sum += w;
@@ -563,6 +613,7 @@ static void probe_job(void *user, int begin, int end, int thread) {
         LxQuat q = lx_quat_norm((LxQuat){lx_rng_f(&rng) - 0.5f, lx_rng_f(&rng) - 0.5f, lx_rng_f(&rng) - 0.5f, lx_rng_f(&rng) - 0.5f});
         float c[12] = {0};
         int N = L->cls[i] == 2 ? lx_maxi(j->rays / 2, 8) : j->rays;
+        if (!L->hist[i]) N *= 2;   /* starting over: twice the rays, so the first estimate isn't a noisy one */
         for (int r = 0; r < N; r++) {
             float zz = 1.0f - (2.0f * r + 1.0f) / (float)N, rr = sqrtf(lx_maxf(0, 1 - zz * zz)), a = (float)r * 2.39996323f;
             LxVec3 d = lx_quat_rotate(q, lx_v3(rr * cosf(a), zz, rr * sinf(a)));
@@ -601,7 +652,7 @@ static void vis_probe(Level *L, int i) {
         v[k] = lx_minf(wall, VIS_MAX);
     }
 }
-typedef struct VisJob { Level *L; const int *box; } VisJob;
+typedef struct VisJob { Level *L; const int *box; int changed; } VisJob;
 static void vis_job(void *user, int begin, int end, int thread) {
     LX_UNUSED(thread);
     VisJob *j = user;
@@ -612,12 +663,13 @@ static void vis_job(void *user, int begin, int end, int thread) {
         Level *L = j->L;
         int i = pidx(L, x, y, z);
         vis_probe(L, i);
-        /* the geometry around it changed: gather again, quickly forgetting what was there */
         if (L->cls[i] == 0) { L->need[i] = 0; L->hist[i] = 0; continue; }
+        if (!j->changed) continue;   /* only came into view: seeded, and traced nearest first */
+        /* the geometry around it changed: gather again, quickly forgetting what was there */
         int want = L->cls[i] == 1 ? TARGET / 2 : TARGET_AIR;
         if (L->need[i] < want) L->need[i] = want;
-        if (L->hist[i] > 2) L->hist[i] = 2;
-        if (!L->hist[i]) L->unlit = true;
+        L->hist[i] = 0;   /* its next update replaces what it had (shown until then, so nothing goes dark) */
+        L->unlit = true;
     }
 }
 
@@ -634,7 +686,7 @@ static void level_build(Level *L) {
                      lx_mini((b[3] + 1) / 2 + 2, L->pres[0]), lx_mini((b[4] + 1) / 2 + 2, L->pres[1]), lx_mini((b[5] + 1) / 2 + 2, L->pres[2])};
         int pn = (pb[3] - pb[0]) * (pb[4] - pb[1]) * (pb[5] - pb[2]);
         if (pn > 0) {
-            VisJob vj = {L, pb};
+            VisJob vj = {L, pb, b[6]};
             lx_parallel_for(pn, 256, vis_job, &vj);
         }
     }
@@ -765,6 +817,58 @@ static void gather_lights(LxScene *s) {
     G.soft_hash = tint;
 }
 
+/* ---------------------------------------------------------------- new probes start from what's around them */
+static void sky_sh_update(void) {
+    float c[12] = {0};
+    const int N = 64;
+    for (int r = 0; r < N; r++) {
+        float zz = 1.0f - (2.0f * r + 1.0f) / (float)N, rr = sqrtf(lx_maxf(0, 1 - zz * zz)), a = (float)r * 2.39996323f;
+        LxVec3 d = lx_v3(rr * cosf(a), zz, rr * sinf(a));
+        LxVec3 L = sky_radiance(d);
+        float sh[4] = {SH_C0, SH_C1 * d.y, SH_C1 * d.z, SH_C1 * d.x};
+        for (int b = 0; b < 4; b++) { c[b] += L.x * sh[b]; c[4 + b] += L.y * sh[b]; c[8 + b] += L.z * sh[b]; }
+    }
+    for (int b = 0; b < 12; b++) G.sky_sh[b] = c[b] * 4.0f * LX_PI / (float)N;
+}
+/* the coarser level's light at p (trilinear over its open probes); false: it isn't there */
+static bool coarse_sh(const Level *C, LxVec3 p, float out[12]) {
+    if (!C->on) return false;
+    float gx = (p.x - C->origin.x) / C->pcell - 0.5f, gy = (p.y - C->origin.y) / C->pcell - 0.5f, gz = (p.z - C->origin.z) / C->pcell - 0.5f;
+    int x = (int)floorf(gx), y = (int)floorf(gy), z = (int)floorf(gz);
+    if (x < 0 || y < 0 || z < 0 || x >= C->pres[0] - 1 || y >= C->pres[1] - 1 || z >= C->pres[2] - 1) return false;
+    float f[3] = {gx - x, gy - y, gz - z}, sum = 0;
+    memset(out, 0, sizeof(float) * 12);
+    for (int k = 0; k < 8; k++) {
+        int i = pidx(C, x + (k & 1), y + ((k >> 1) & 1), z + (k >> 2));
+        if (!C->cls[i] || C->fresh[i]) continue;
+        float w = ((k & 1) ? f[0] : 1 - f[0]) * (((k >> 1) & 1) ? f[1] : 1 - f[1]) * ((k >> 2) ? f[2] : 1 - f[2]);
+        sum += w;
+        for (int q = 0; q < 12; q++) out[q] += C->sh[i * 12 + q] * w;
+    }
+    if (sum < 1e-4f) return false;
+    for (int q = 0; q < 12; q++) out[q] /= sum;
+    return true;
+}
+/* probes that just came into a level (the camera moved, or the level is new) start from the coarser level's light
+ * there - or the open sky's - instead of black, so nothing goes dark while they are traced (nearest first) */
+static void seed_fresh(int lev) {
+    Level *L = &G.lv[lev];
+    if (!L->on) return;
+    const Level *C = lev + 1 < NLEV ? &G.lv[lev + 1] : NULL;
+    for (int i = 0; i < L->np; i++) {
+        if (!L->fresh[i]) continue;
+        L->fresh[i] = 0;
+        int x = i % L->pres[0], y = (i / L->pres[0]) % L->pres[1], z = i / (L->pres[0] * L->pres[1]);
+        LxVec3 o = lx_add3(L->origin, lx_v3((x + 0.5f) * L->pcell, (y + 0.5f) * L->pcell, (z + 0.5f) * L->pcell));
+        float c[12];
+        if (!(C && coarse_sh(C, o, c))) memcpy(c, G.sky_sh, sizeof c);
+        memcpy(&L->sh[i * 12], c, sizeof c);
+        L->hist[i] = 0;
+        L->unlit = true;
+    }
+    L->version++;
+}
+
 /* ---------------------------------------------------------------- per frame */
 static void publish(void) {
     LxGiVolume *v = &G.volume;
@@ -805,8 +909,18 @@ void lx_gi_update(LxScene *s, const LxGraphicsSettings *g, LxVec3 eye) {
         G.built_scene = s;
         G.built_version = s->static_version;
         G.moving_hash = G.moving_set = 0;
-        rebuilt = true;
+        /* the same geometry (Play makes a copy of the scene): keep every level and its light */
+        uint64_t h = 1469598103934665603ull ^ (uint64_t)G.bvh.tri_count;
+        h = hash_floats(h, (const float *)G.bvh.v0, G.bvh.tri_count * 3);
+        h = hash_floats(h, (const float *)G.bvh.e1, G.bvh.tri_count * 3);
+        h = hash_floats(h, (const float *)G.bvh.e2, G.bvh.tri_count * 3);
+        for (int m = 0; m < G.bvh.material_count; m++)
+            h = hash_floats(h, (const float *)&G.bvh.materials[m], 6);
+        rebuilt = h != G.geo_hash;
+        G.geo_hash = h;
     }
+    lx_env_effective(s, &G.env);
+    sky_sh_update();
     /* levels: probe count per axis from the setting; the finest covers ~12 m, each next one twice (the far one 3x) */
     int P = lx_clampi(g->gi_probe_resolution, 8, 48) & ~1;
     float base = 12.0f / (float)P;
@@ -816,9 +930,12 @@ void lx_gi_update(LxScene *s, const LxGraphicsSettings *g, LxVec3 eye) {
         G.moving_prev_on = false;
     }
     static const float SCALE[NLEV] = {1, 2, 4};
-    for (int l = 0; l < NLEV; l++) level_place(&G.lv[l], l, eye, P, base * SCALE[l]);
+    for (int l = NLEV - 1; l >= 0; l--) level_place(&G.lv[l], l, eye, P, base * SCALE[l]);
     update_moving(s);
-    for (int l = 0; l < NLEV; l++) level_build(&G.lv[l]);
+    for (int l = NLEV - 1; l >= 0; l--) {   /* coarse first: finer levels seed their new probes from it */
+        level_build(&G.lv[l]);
+        seed_fresh(l);
+    }
     if (!G.bvh.tri_count && !G.moving.tri_count) {   /* nothing to bounce off: sky only, the shader's ambient does that */
         G.volume.valid = false;
         G.ms_last = (float)((lx_time() - t0) * 1000.0);
@@ -862,11 +979,12 @@ void lx_gi_update(LxScene *s, const LxGraphicsSettings *g, LxVec3 eye) {
         if (pick_cap < L->np) { pick_cap = L->np; pick = lx_realloc(pick, sizeof(int) * (size_t)pick_cap); }
         int n = 0;
         /* probes that have never been traced come first (light everywhere soon, refined after) */
-        for (int i = 0; i < L->np && spent < rays && L->unlit; i++) {
+        for (int k = 0; k < L->np && spent < rays && L->unlit; k++) {
+            int i = L->order[k];
             if (L->hist[i] || !L->need[i] || !L->cls[i]) continue;
             pick[n++] = i;
             L->stamp[i] = G.frame;
-            spent += L->cls[i] == 1 ? G.rays_per_probe : G.rays_per_probe / 2;
+            spent += (L->cls[i] == 1 ? G.rays_per_probe : G.rays_per_probe / 2) * 2;
         }
         if (spent < rays) L->unlit = false;
         for (int scanned = 0; scanned < L->np && spent < rays; scanned++) {
@@ -877,17 +995,47 @@ void lx_gi_update(LxScene *s, const LxGraphicsSettings *g, LxVec3 eye) {
             pick[n++] = i;
             spent += L->cls[i] == 1 ? G.rays_per_probe : G.rays_per_probe / 2;
         }
-        if (!n) continue;
-        /* light the surfaces these rays will see: a share of the cache every frame while probes are updating */
+        if (L->nnew) {   /* new surfaces get their light before any ray sees them (else it would remember them dark) */
+            LightJob lj = {L, l, L->snew};
+            lx_parallel_for(L->nnew, 128, light_job, &lj);
+            L->nnew = 0;
+        }
+        if (!n && !L->feedback) continue;
+        /* light the surfaces these rays will see: a share of the cache every frame while probes are updating, and
+         * after they settle while the bounce light is still building up (each pass is another bounce: when the
+         * surfaces' light still changes, the probes gather once more, until it stops changing) */
         if (L->nsurf) {
             int sn = lx_mini(L->nsurf, lx_maxi(L->nsurf / 3, 2048));
             static int *sidx;
+            static float *before;
             static int scap;
-            if (scap < sn) { scap = sn; sidx = lx_realloc(sidx, sizeof(int) * (size_t)scap); }
-            for (int k = 0; k < sn; k++) { sidx[k] = L->slist[L->srr]; L->srr = (L->srr + 1) % L->nsurf; }
+            if (scap < sn) {
+                scap = sn;
+                sidx = lx_realloc(sidx, sizeof(int) * (size_t)scap);
+                before = lx_realloc(before, sizeof(float) * (size_t)scap);
+            }
+            for (int k = 0; k < sn; k++) {
+                sidx[k] = L->slist[L->srr];
+                L->srr = (L->srr + 1) % L->nsurf;
+                const float *r = &L->rad[sidx[k] * 3];
+                before[k] = r[0] + r[1] + r[2];
+            }
             LightJob lj = {L, l, sidx};
             lx_parallel_for(sn, 128, light_job, &lj);
-        }
+            double change = 0, total = 0;
+            for (int k = 0; k < sn; k++) {
+                const float *r = &L->rad[sidx[k] * 3];
+                float now = r[0] + r[1] + r[2];
+                change += fabsf(now - before[k]);
+                total += now;
+            }
+            bool moving = total > 0 && change > total * 0.01;
+            if (n) L->feedback = G.bounces > 1;
+            else if (moving && G.bounces > 1) {   /* another bounce: the open probes gather again */
+                for (int i = 0; i < L->np; i++) if (L->cls[i] && L->need[i] < 2) L->need[i] = 2;
+            } else L->feedback = false;
+        } else L->feedback = false;
+        if (!n) continue;
         ProbeJob pj = {L, l, pick, G.rays_per_probe, G.frame * 2654435761u + (uint32_t)l, 0};
         lx_parallel_for(n, 4, probe_job, &pj);
         fill_buried(L);
