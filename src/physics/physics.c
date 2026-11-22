@@ -547,7 +547,17 @@ static void point_vs_triangle(LxVec3 c, float r, const Tri *t, Manifold *m) {
     float dist = lx_len3(d), sep = dist - r;
     if (sep > MARGIN) return;
     float side = dot(sub(c, t->a), t->n);
-    LxVec3 n = dist > 1e-5f ? scl(d, 1.0f / dist) : scl(t->n, side >= 0 ? -1.0f : 1.0f);
+    LxVec3 face = scl(t->n, side >= 0 ? -1.0f : 1.0f);   /* into the face, from the sphere's side */
+    LxVec3 n = dist > 1e-5f ? scl(d, 1.0f / dist) : face;
+    /* touching the triangle's edge rather than its inside: in a mesh that edge is usually shared with the next
+     * triangle (the diagonal of a quad, the next face of a terrain), and a normal from the edge tilts the push by up
+     * to ~25 degrees for no reason - a character walking up a slope bumped into the diagonals. Push along the face
+     * instead, by how deep the edge really is. Only while the sphere is mostly in front of the face: beside it (a
+     * wall's corner, a ledge from the side) the edge's own normal is the right one */
+    if (dist > 1e-5f && fabsf(side) > 1e-4f && dot(n, face) > 0.5f && dot(sub(c, q), sub(c, q)) > 0) {
+        LxVec3 proj = lx_madd3(c, t->n, -side);
+        if (!inside_triangle(proj, t)) n = face;
+    }
     mf_add(m, n, lx_madd3(q, n, -sep * 0.5f), sep);
 }
 
@@ -1494,36 +1504,74 @@ static bool char_own(const CharCtx *k, const Body *b) {
 /* is what it ran into really a step? Where the capsule touches a wall says little (against a tall box the contact
  * is at the height of the capsule's rounded bottom, which looks like a step): lifted by the step height, the capsule
  * must be clear of the obstacle's side, so its top is within reach */
-static bool char_can_step(CharCtx *k, LxVec3 feet, LxVec3 n, const Body *b) {
-    /* lifted, and pressed a little into it (other contacts this pass may already have pushed the capsule back off) */
-    LxVec3 into = lx_v3(-n.x, 0, -n.z);
-    float il = lx_len3(into);
-    if (il > 1e-4f) feet = lx_madd3(feet, into, (k->radius * 0.5f + 0.05f) / il);   /* over the edge it would stand on */
-    float top = feet.y + k->step_height + 0.01f;
-    Body cap = char_body(k, lx_v3(feet.x, top, feet.z));
-    if (!aabb_overlap(cap.box, b->box)) return true;
+enum { STEP_NO, STEP_UP, STEP_SLOPE };
+#define CHAR_TOUCH 0x1000   /* internal: really pressed against walkable ground this move (not just near it) */
+/* lowers the capsule at (x, z) from `top` until it touches b; the height its feet come to rest at, and whether
+ * everything it touches there is flat enough to stand on. false: nothing under it down to `bottom` */
+static bool char_land(CharCtx *k, LxVec3 at, float top, float bottom, const Body *b, float *land, bool *flat) {
     Manifold m;
-    collide(k->w, &cap, b, &m);
-    for (int c = 0; c < m.count; c++) {
-        LxVec3 cn = scl(m.n[c], -1.0f);
-        if (m.sep[c] < -0.002f && (cn.y < k->cos_slope || m.p[c].y > top)) return false;   /* still against its side, or its top is higher */
-    }
-    /* and what it would stand on up there is flat enough: lower it from the top until it touches. A steep slope also
-     * passes the test above (a little higher up the slope the capsule is clear of it), but its surface is no step */
-    float bottom = feet.y - 0.01f;
+    float clear = top;
     for (float y = top - 0.03f; y > bottom; y -= 0.03f) {
-        Body low = char_body(k, lx_v3(feet.x, y, feet.z));
-        if (!aabb_overlap(low.box, b->box)) continue;
+        Body low = char_body(k, lx_v3(at.x, y, at.z));
+        if (!aabb_overlap(low.box, b->box)) { clear = y; continue; }
         collide(k->w, &low, b, &m);
-        bool hit = false, flat = true;
+        bool hit = false, ok = true;
         for (int c = 0; c < m.count; c++) {
             if (m.sep[c] >= -0.001f) continue;
             hit = true;
-            if (-m.n[c].y < k->cos_slope) flat = false;   /* any steep face under it: a slope, not a step */
+            if (-m.n[c].y < k->cos_slope) ok = false;   /* any steep face under it: a slope, not a step */
         }
-        if (hit) return flat;
+        if (!hit) { clear = y; continue; }
+        /* between the last clear height and this one: narrow it down */
+        float lo = y, hi = clear;
+        for (int it = 0; it < 6; it++) {
+            float mid = 0.5f * (lo + hi);
+            Body c2 = char_body(k, lx_v3(at.x, mid, at.z));
+            collide(k->w, &c2, b, &m);
+            bool h2 = false;
+            for (int c = 0; c < m.count; c++) if (m.sep[c] < -0.001f) h2 = true;
+            if (h2) lo = mid; else hi = mid;
+        }
+        *land = hi;
+        *flat = ok;
+        return true;
     }
-    return true;
+    return false;
+}
+
+/* is what it ran into really a step? Where the capsule touches a wall says little (against a tall box the contact
+ * is at the height of the capsule's rounded bottom, which looks like a step): lifted by the step height, the capsule
+ * must be clear of the obstacle's side, so its top is within reach. And what it would stand on up there must be flat:
+ * lowered from the top over the edge, everything it touches is walkable. If the ground there is no higher than a
+ * slope at the slope limit would be, it's no step at all, only walkable ground getting steeper (where two faces of a
+ * terrain meet, the contact's normal can look steeper than either face): STEP_SLOPE */
+static int char_can_step(CharCtx *k, LxVec3 feet, LxVec3 n, const Body *b, float *land) {
+    /* lifted, and pressed a little into it (other contacts this pass may already have pushed the capsule back off) */
+    LxVec3 into = lx_v3(-n.x, 0, -n.z);
+    float il = lx_len3(into), reach = k->radius * 0.5f + 0.05f;
+    LxVec3 over = feet;
+    if (il > 1e-4f) over = lx_madd3(feet, into, reach / il);   /* over the edge it would stand on */
+    float top = feet.y + k->step_height + 0.01f;
+    Body cap = char_body(k, lx_v3(over.x, top, over.z));
+    if (aabb_overlap(cap.box, b->box)) {
+        Manifold m;
+        collide(k->w, &cap, b, &m);
+        for (int c = 0; c < m.count; c++) {
+            LxVec3 cn = scl(m.n[c], -1.0f);
+            if (m.sep[c] < -0.002f && (cn.y < k->cos_slope || m.p[c].y > top)) return STEP_NO;   /* still against its side, or its top is higher */
+        }
+    }
+    bool flat = true;
+    float y = feet.y;
+    if (!char_land(k, over, top, feet.y - 0.01f, b, &y, &flat)) { *land = feet.y; return STEP_UP; }   /* a thin thing: over it */
+    if (!flat) return STEP_NO;
+    /* compared with where it would rest where it is (it may be pressed a little into the slope right now) */
+    float here = feet.y, slope_rise = reach * sqrtf(lx_maxf(0, 1 - k->cos_slope * k->cos_slope)) / lx_maxf(k->cos_slope, 0.05f);
+    bool here_flat;
+    if (!char_land(k, feet, top, feet.y - 0.2f, b, &here, &here_flat)) here = feet.y;
+    if (y - lx_maxf(here, feet.y) <= slope_rise + 0.01f) return STEP_SLOPE;
+    *land = y;
+    return STEP_UP;
 }
 
 /* pushes the capsule out of everything it overlaps; returns flags, slides `motion` along what it hit */
@@ -1561,15 +1609,20 @@ static int char_resolve(CharCtx *k, LxVec3 *feet, LxVec3 *motion, bool allow_ste
                     n = scl(n, 1.0f / hl);
                     sep *= hl;
                 }
-                if (!walkable && allow_step && n.y > -0.3f && rise > 0.01f && rise <= k->step_height && char_can_step(k, feet0, n, b)) {
-                    feet->y += rise + 0.01f;                    /* climb the step */
-                    flags |= LX_CHAR_GROUNDED;
-                    break;
+                if (!walkable && allow_step && n.y > -0.3f && rise > 0.01f && rise <= k->step_height) {
+                    float land = feet->y;
+                    int st = char_can_step(k, feet0, n, b, &land);
+                    if (st == STEP_UP) {
+                        feet->y = lx_maxf(feet->y, lx_minf(land, feet0.y + rise) + 0.005f);   /* climb the step: onto it, not over it */
+                        flags |= LX_CHAR_GROUNDED | CHAR_TOUCH;
+                        break;
+                    }
+                    if (st == STEP_SLOPE && n.y > 0.05f) walkable = true;   /* only the ground getting steeper */
                 }
                 if (walkable) {
                     /* push straight up on walkable ground, so standing on a slope doesn't slide */
                     feet->y += -sep / lx_maxf(n.y, 0.2f);
-                    flags |= LX_CHAR_GROUNDED;
+                    flags |= LX_CHAR_GROUNDED | CHAR_TOUCH;
                     if (motion->y < 0) motion->y = 0;
                 } else {
                     if (n.y > 0.02f) {
@@ -1629,11 +1682,13 @@ int lx_character_move(LxScene *s, LxEntity e, LxVec3 disp) {
         bool horizontal = fabsf(motion.x) + fabsf(motion.z) > 1e-6f;
         flags |= char_resolve(&k, &feet, &motion, (was_grounded || (flags & LX_CHAR_GROUNDED)) && horizontal, true);
     }
-    /* stick to the ground going down slopes and stairs */
-    if (was_grounded && !(flags & LX_CHAR_GROUNDED) && disp.y <= 0) {
+    /* stick to the ground going down slopes and stairs. Not only once it has lost the ground: walking down a slope
+     * it floats a centimetre or two above it after the move, close enough to count as standing, and without the snap
+     * it would fall that gap one frame and snap down the next (a stutter every other frame) */
+    if (was_grounded && !(flags & CHAR_TOUCH) && disp.y <= 0) {
         /* feel down in small steps: one deep probe could put the capsule's bottom through a thin floor (a plane, a
          * mesh collider), and that floor then pushes it further down instead of up */
-        float reach = k.step_height + 0.05f, inc = lx_maxf(k.radius * 0.4f, 0.01f), went = 0;
+        float reach = k.step_height + 0.05f, inc = lx_clampf(k.radius * 0.4f, 0.01f, 0.05f), went = 0;
         LxVec3 probe = feet;
         while (went < reach) {
             float dy = lx_minf(inc, reach - went);
@@ -1642,7 +1697,7 @@ int lx_character_move(LxScene *s, LxEntity e, LxVec3 disp) {
             LxVec3 m0 = lx_v3(0, 0, 0);
             int f = char_resolve(&k, &probe, &m0, false, false);
             if (fabsf(probe.x - feet.x) + fabsf(probe.z - feet.z) >= 1e-3f) break;   /* never snap sideways off a ledge */
-            if (f & LX_CHAR_GROUNDED) {
+            if (f & CHAR_TOUCH) {
                 if (probe.y < feet.y) { feet = probe; flags |= LX_CHAR_GROUNDED; }
                 break;
             }
@@ -1652,6 +1707,7 @@ int lx_character_move(LxScene *s, LxEntity e, LxVec3 disp) {
     LxQuat rot = lx_entity_world_rotation(s, e);
     lx_entity_set_world_pose(s, e, feet, rot);
     d = lx_entity_data(s, e);
+    flags &= ~CHAR_TOUCH;
     d->character.grounded = (flags & LX_CHAR_GROUNDED) != 0;
     float dt = s->last_dt > 1e-5f ? s->last_dt : 1.0f / 60.0f;
     d->character.velocity = scl(sub(feet, start), 1.0f / dt);

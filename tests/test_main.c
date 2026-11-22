@@ -291,6 +291,34 @@ static void test_character_slopes(void) {
             LX_UNUSED(lo);
             lx_scene_destroy(s);
         }
+        /* walking down and up a 30 degree slope: its height changes smoothly, frame after frame (going down it used
+         * to float a little above the slope one frame and drop onto it the next) */
+        for (int down = 0; down < 2; down++) {
+            float a = 30 * LX_DEG2RAD;
+            LxEntity ch;
+            LxScene *s = ramp_scene(30, mesh, &ch, down ? lx_v3(0, 12 * sinf(a) + 0.02f, 2 + 12 * cosf(a)) : lx_v3(0, 0.02f, 0));
+            lx_character_move(s, ch, lx_v3(0, -0.05f, 0));
+            float vy = 0, py = lx_entity_world_position(s, ch).y, pv = 0;
+            int jolts = 0, airborne = 0, frames = 0;
+            for (int f = 0; f < 150; f++) {
+                float dt = 1.0f / 60;
+                if (lx_character_grounded(s, ch) && vy < 0) vy = -1;
+                else vy -= 20 * dt;
+                int fl = lx_character_move(s, ch, lx_v3(0, vy * dt, (down ? -3.0f : 3.0f) * dt));
+                LxVec3 p = lx_entity_world_position(s, ch);
+                float v = (p.y - py) / dt;
+                if (f > 3 && p.z > 3 && p.z < 2 + 19 * cosf(a) - 1) {
+                    frames++;
+                    if (fabsf(v - pv) > 0.5f) jolts++;
+                    if (!(fl & LX_CHAR_GROUNDED)) airborne++;
+                }
+                pv = v;
+                py = p.y;
+            }
+            CHECK(frames > 60 && jolts == 0 && airborne == 0, "%s: walking %s a 30 degree slope is smooth (%d jolts, %d frames off the ground of %d)",
+                  mesh ? "mesh" : "box", down ? "down" : "up", jolts, airborne, frames);
+            lx_scene_destroy(s);
+        }
     }
 }
 
