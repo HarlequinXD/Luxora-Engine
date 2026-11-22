@@ -286,6 +286,7 @@ static int mesh_cache_get(LxPhysicsWorld *w, LxEntity e, const LxEntityData *d) 
     memcpy(m->key, d->world.m, sizeof m->key);
     m->used = true;
     int ic = LX_MESH_ICOUNT(mesh);
+    if (mesh->lods[0].solid_index_count) ic = lx_maxi(0, lx_mini(ic, mesh->lods[0].solid_index_count));   /* a terrain's skirts aren't solid */
     const LxVertex *v = LX_MESH_VERTS(mesh);
     const uint32_t *idx = LX_MESH_IDX(mesh);
     m->ntris = ic / 3;
@@ -1507,6 +1508,21 @@ static bool char_can_step(CharCtx *k, LxVec3 feet, LxVec3 n, const Body *b) {
         LxVec3 cn = scl(m.n[c], -1.0f);
         if (m.sep[c] < -0.002f && (cn.y < k->cos_slope || m.p[c].y > top)) return false;   /* still against its side, or its top is higher */
     }
+    /* and what it would stand on up there is flat enough: lower it from the top until it touches. A steep slope also
+     * passes the test above (a little higher up the slope the capsule is clear of it), but its surface is no step */
+    float bottom = feet.y - 0.01f;
+    for (float y = top - 0.03f; y > bottom; y -= 0.03f) {
+        Body low = char_body(k, lx_v3(feet.x, y, feet.z));
+        if (!aabb_overlap(low.box, b->box)) continue;
+        collide(k->w, &low, b, &m);
+        bool hit = false, flat = true;
+        for (int c = 0; c < m.count; c++) {
+            if (m.sep[c] >= -0.001f) continue;
+            hit = true;
+            if (-m.n[c].y < k->cos_slope) flat = false;   /* any steep face under it: a slope, not a step */
+        }
+        if (hit) return flat;
+    }
     return true;
 }
 
@@ -1556,6 +1572,15 @@ static int char_resolve(CharCtx *k, LxVec3 *feet, LxVec3 *motion, bool allow_ste
                     flags |= LX_CHAR_GROUNDED;
                     if (motion->y < 0) motion->y = 0;
                 } else {
+                    if (n.y > 0.02f) {
+                        /* too steep to walk on: pushed straight out sideways, like a wall. Pushed along its normal
+                         * the slope would lift the character a little every frame it walks into it (and gravity
+                         * drop it again: a jitter), and walk it up a slope it shouldn't climb. Standing on one, it
+                         * still slides down: it falls, and is pushed out sideways */
+                        LxVec3 h = lx_v3(n.x, 0, n.z);
+                        float hl = lx_len3(h);
+                        if (hl > 0.05f) { n = scl(h, 1.0f / hl); sep /= lx_maxf(hl, 0.3f); }
+                    }
                     *feet = lx_madd3(*feet, n, -sep);
                     flags |= n.y < -0.5f ? LX_CHAR_ABOVE : LX_CHAR_SIDES;
                     float into = dot(*motion, n);

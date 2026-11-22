@@ -603,6 +603,7 @@ static void build_lod(TData *d, Chunk *c, int step, LxMeshLod *lod, LxVec3 world
             if (((i + j) & 1) == 0) { idx[ic++] = q0; idx[ic++] = q2; idx[ic++] = q1; idx[ic++] = q1; idx[ic++] = q2; idx[ic++] = q3; }
             else { idx[ic++] = q0; idx[ic++] = q2; idx[ic++] = q3; idx[ic++] = q0; idx[ic++] = q3; idx[ic++] = q1; }
         }
+    lod->solid_index_count = ic > 0 ? ic : -1;   /* the skirts below aren't walls a character can bump into under the ground */
     for (int e = 0; e < 4; e++)
         for (int k = 0; k < n - 1; k++) {
             int i0 = e == 0 ? k : e == 1 ? n - 1 : e == 2 ? n - 1 - k : 0, j0 = e == 0 ? 0 : e == 1 ? k : e == 2 ? n - 1 : n - 1 - k;

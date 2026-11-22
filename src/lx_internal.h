@@ -206,6 +206,7 @@ typedef struct LxMeshLod {
     LxVertex *vertices;
     uint32_t *indices;
     int vertex_count, index_count;
+    int solid_index_count;   /* collision uses only the first this many indices (0 = all): a terrain's skirts aren't solid */
     float screen_size;  /* use this LOD while projected size >= screen_size */
 } LxMeshLod;
 

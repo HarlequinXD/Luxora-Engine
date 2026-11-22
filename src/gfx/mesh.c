@@ -312,7 +312,7 @@ void lx_mesh_generate_lods(LxMesh *m) {
     static const float sizes[] = {0.20f, 0.07f, 0.02f};
     int prev_tris = m->lods[0].index_count / 3;
     for (int l = 0; l < 3 && m->lod_count < LX_MAX_LODS; l++) {
-        LxMeshLod lod;
+        LxMeshLod lod = {0};
         memset(&lod, 0, sizeof lod);
         if (!cluster_lod(m, grids[l], &lod)) continue;
         if (lod.index_count < 12 || lod.index_count / 3 > prev_tris * 3 / 4) {

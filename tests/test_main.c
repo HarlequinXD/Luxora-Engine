@@ -238,6 +238,62 @@ static void test_character_no_sinking(void) {
     }
 }
 
+/* slopes: a walkable one is stood on without moving; walking into one too steep for it neither climbs it nor bobs
+ * up and down against it (it used to be lifted along the slope's normal every frame, then fall back) */
+static LxScene *ramp_scene(float deg, bool mesh, LxEntity *ch, LxVec3 start) {
+    LxScene *s = lx_scene_create("Ramp");
+    LxEntity g = lx_spawn_primitive(s, LX_PRIM_CUBE, "Ground", lx_v3(0, -0.5f, 0));
+    lx_entity_set_scale(s, g, lx_v3(60, 1, 60));
+    LxEntity r = lx_spawn_primitive(s, LX_PRIM_CUBE, "Ramp", lx_v3(0, 0, 0));
+    float a = deg * LX_DEG2RAD, L = 20, T = 1;
+    lx_entity_set_scale(s, r, lx_v3(10, T, L));
+    lx_entity_set_rotation(s, r, lx_quat_euler_deg(lx_v3(-deg, 0, 0)));
+    LxVec3 up = lx_v3(0, sinf(a), cosf(a)), nrm = lx_v3(0, cosf(a), -sinf(a));
+    lx_entity_set_position(s, r, lx_add3(lx_v3(0, 0, 2), lx_sub3(lx_scale3(up, L / 2), lx_scale3(nrm, T / 2))));
+    if (mesh) { lx_remove_component(s, r, LX_COMP_COLLIDER); lx_add_collider(s, r, LX_COLLIDER_MESH); }
+    *ch = lx_entity_create(s, "Player");
+    lx_entity_set_position(s, *ch, start);
+    lx_add_character(s, *ch);   /* slope limit 50 */
+    lx_scene_update_transforms(s);
+    return s;
+}
+static void test_character_slopes(void) {
+    printf("character on slopes\n");
+    for (int mesh = 0; mesh < 2; mesh++) {
+        for (int pass = 0; pass < 2; pass++) {
+            float deg = pass ? 60.0f : 25.0f, walk = pass ? 3.0f : 0.0f;
+            LxEntity ch;
+            LxScene *s = ramp_scene(deg, mesh, &ch, pass ? lx_v3(0, 0.05f, 0) : lx_v3(0, 4 * tanf(25 * LX_DEG2RAD) + 0.3f, 6));
+            float vy = 0, prev = 0, lo = 1e9f, hi = -1e9f;
+            int bobs = 0;
+            LxVec3 settled = lx_v3(0, 0, 0);
+            for (int f = 0; f < 400; f++) {
+                float dt = 1.0f / 60;
+                if (lx_character_grounded(s, ch) && vy < 0) vy = -1;
+                else vy -= 20 * dt;
+                lx_character_move(s, ch, lx_v3(0, vy * dt, walk * dt));
+                LxVec3 p = lx_entity_world_position(s, ch);
+                if (f == 100) settled = p;
+                if (f > 100) {
+                    if (fabsf(p.y - prev) > 0.003f) bobs++;
+                    lo = lx_minf(lo, p.y);
+                    hi = lx_maxf(hi, p.y);
+                }
+                prev = p.y;
+            }
+            LxVec3 end = lx_entity_world_position(s, ch);
+            if (pass == 0)
+                CHECK(lx_len3(lx_sub3(end, settled)) < 1e-3f && lx_character_grounded(s, ch), "%s: stands still on a 25 degree slope (moved %.4f)",
+                      mesh ? "mesh" : "box", lx_len3(lx_sub3(end, settled)));
+            else
+                CHECK(hi < 0.05f && bobs == 0, "%s: walking into a 60 degree slope neither climbs nor bobs (highest %.3f, %d bobs)",
+                      mesh ? "mesh" : "box", hi, bobs);
+            LX_UNUSED(lo);
+            lx_scene_destroy(s);
+        }
+    }
+}
+
 /* Layers: a number for physics, a name for everybody else. */
 static void test_layers(void) {
     printf("layers\n");
@@ -3769,6 +3825,7 @@ int main(void) {
     test_layers();
     test_physics();
     test_character_no_sinking();
+    test_character_slopes();
     test_game_ui();
     test_gameplay();
     test_jpeg();
