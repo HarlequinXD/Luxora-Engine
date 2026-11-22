@@ -128,14 +128,16 @@ static void build_graphics(UiNode *b) {
     row_bool(s, "V-Sync", &g->vsync);
     row_int(s, "Frame Rate Limit (0 = off)", &g->target_fps, 0, 1000);
     row_slider(s, "Exposure", &g->exposure, 0.1f, 4.0f);
-    s = ed_section(b, UI_ICON_SUN, "Virtual Photon Global Illumination", &g_dummy_open, NULL);
+    s = ed_section(b, UI_ICON_SUN, "Live Global Illumination", &g_dummy_open, NULL);
     row_bool(s, "Enabled", &g->gi_enabled);
-    row_int(s, "Photons per Frame", &g->gi_photons_per_frame, 256, 4000000)->step = 500;
-    row_int(s, "Max Bounces", &g->gi_max_bounces, 1, 16);
-    row_int(s, "Volume Resolution", &g->gi_grid_resolution, 4, 96);
+    row_int(s, "Rays per Frame", &g->gi_rays_per_frame, 1024, 1000000)->step = 1000;
+    row_int(s, "Rays per Probe", &g->gi_rays_per_probe, 8, 256);
+    row_int(s, "Bounces", &g->gi_max_bounces, 1, 16);
+    row_int(s, "Probe Detail", &g->gi_probe_resolution, 8, 48);
     row_slider(s, "Intensity", &g->gi_intensity, 0, 4);
     row_slider(s, "Responsiveness", &g->gi_responsiveness, 0.01f, 1);
-    note(s, UI_ICON_INFO, "Photons are traced on all CPU cores and converge over frames. More photons = less noise.");
+    note(s, UI_ICON_INFO, "Fully real-time bounce light, sky light and glow: no baking. Rays are traced through distance fields on "
+                          "all CPU cores, only where the light is changing, so a still scene costs nothing.");
     s = ed_section(b, UI_ICON_PROBE, "Reflections", &g_dummy_open, NULL);
     row_bool(s, "Reflection Probes", &g->reflections_enabled);
     g_probe_res = g->reflection_resolution >= 512 ? 3 : g->reflection_resolution >= 256 ? 2 : g->reflection_resolution >= 128 ? 1 : 0;
@@ -1185,7 +1187,7 @@ void ed_about(void) {
                                   "Reflection probes (GGX pre-filtered) + screen-space reflections",
                                   "GPU lightmapper: path-traced baked lighting, soft shadows, bounces (any GPU)",
                                   "Automatic lightmap UVs, Mixed / Realtime / Baked lights",
-                                  "Virtual photon global illumination (GPU compute or CPU)",
+                                  "Live global illumination (distance fields, all CPU cores)",
                                   "Ray-traced acoustics: speed of sound, occlusion, reflections, reverb",
                                   "Data-oriented crowds, automatic LODs, instanced batching",
                                   "Input Manager: keyboard, mouse, gamepad and touch",

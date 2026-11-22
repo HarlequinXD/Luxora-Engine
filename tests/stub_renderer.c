@@ -83,8 +83,6 @@ static void sample(const SwTex *t, float u, float v, float out[4]) {
     }
     memcpy(out, acc, sizeof acc);
 }
-float *lx_renderer_gi_readback(int res[3]) { (void)res; return NULL; }   /* photon GI runs on the CPU here */
-float *lx_renderer_gi_readback_level(int level, int res[3], LxVec3 *origin, float *cell) { (void)level; (void)res; (void)origin; (void)cell; return NULL; }
 bool lx_renderer_screenshot(const char *path) {
     int W, H;
     lx_window_size(&W, &H);
@@ -152,11 +150,11 @@ void lx_render_target_resize(LxRenderTarget *rt, int w, int h) { rt->w = w; rt->
 void lx_render_target_destroy(LxRenderTarget *rt) { lx_free(rt); }
 uint32_t lx_render_target_texture(const LxRenderTarget *rt) { return rt ? rt->tex : 0; }
 void lx_render_scene(LxScene *s, const LxRenderView *v, LxRenderTarget *t) {
-    LX_UNUSED(v); LX_UNUSED(t);
+    LX_UNUSED(t);
     lx_scene_update_transforms(s);
     if (g_preview) return;   /* a thumbnail: the GI belongs to the real views */
-    lx_gi_update(s, &g_settings); /* exercise the photon tracer with the real scene */
-    g_stats.gi_photons_traced = lx_gi_last_photon_count();
+    lx_gi_update(s, &g_settings, v ? v->eye : lx_v3(0, 0, 0)); /* exercise the GI with the real scene */
+    g_stats.gi_rays_traced = lx_gi_last_ray_count();
     g_stats.gi_ms = lx_gi_last_ms();
 }
 bool lx_camera_view(LxScene *s, LxEntity cam, int w, int h, LxRenderView *out) {

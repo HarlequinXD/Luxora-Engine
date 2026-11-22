@@ -775,7 +775,7 @@ static void build_entity_inspector(UiNode *body) {
         const char *why = NULL;
         if (lx_entity_can_be_static(s, e, &why)) {
             UiNode *st = bool_row(sec, "Static (GI + Sound)", &d->mesh.static_geometry);
-            lx_strcpy(st->tooltip, sizeof st->tooltip, "Static geometry bounces virtual photons and reflects/blocks sound");
+            lx_strcpy(st->tooltip, sizeof st->tooltip, "Static geometry bounces light (GI) and reflects/blocks sound");
         } else {   /* safeguard: still shown, faded and off, and hovering says why */
             static bool off = false;
             off = false;
@@ -1703,23 +1703,31 @@ static void lighting_frame(UiNode *body) {
     UiNode *q = ui_dropdown(ui, row, &g_quality, QUALITY, 4);
     q->grow = 1;
     q->on_change = quality_changed;
-    bool_row(sec, "Virtual Photons", &g->gi_enabled)->on_change = graphics_changed;
-    row = ed_prop_row(sec, "Photons / Frame");
-    UiNode *ph = ui_int(ui, row, &g->gi_photons_per_frame, 256, 2000000);
+    bool_row(sec, "Live GI", &g->gi_enabled)->on_change = graphics_changed;
+    row = ed_prop_row(sec, "Rays / Frame");
+    UiNode *ph = ui_int(ui, row, &g->gi_rays_per_frame, 1024, 1000000);
     ph->grow = 1;
-    ph->step = 200;
+    ph->step = 1000;
     ph->on_change = graphics_changed;
+    lx_strcpy(ph->tooltip, sizeof ph->tooltip, "The work budget: more reacts faster to changes. Nothing is traced once the light has settled");
+    row = ed_prop_row(sec, "Rays / Probe");
+    UiNode *rp = ui_int(ui, row, &g->gi_rays_per_probe, 8, 256);
+    rp->grow = 1;
+    rp->on_change = graphics_changed;
+    lx_strcpy(rp->tooltip, sizeof rp->tooltip, "More: smoother light, each update costs more");
     row = ed_prop_row(sec, "Bounces");
     UiNode *bo = ui_int(ui, row, &g->gi_max_bounces, 1, 16);
     bo->grow = 1;
     bo->on_change = graphics_changed;
-    row = ed_prop_row(sec, "Volume Resolution");
-    UiNode *gr = ui_int(ui, row, &g->gi_grid_resolution, 4, 96);
+    lx_strcpy(bo->tooltip, sizeof bo->tooltip, "1: light bounces once. 2 or more: it keeps bouncing (lit rooms fill with light)");
+    row = ed_prop_row(sec, "Probe Detail");
+    UiNode *gr = ui_int(ui, row, &g->gi_probe_resolution, 8, 48);
     gr->grow = 1;
     gr->on_change = graphics_changed;
+    lx_strcpy(gr->tooltip, sizeof gr->tooltip, "Probes along each side of each level. The finest level covers about 12 m around the camera");
     slider_row(sec, "Intensity", &g->gi_intensity, 0, 4)->on_change = graphics_changed;
     slider_row(sec, "Responsiveness", &g->gi_responsiveness, 0.01f, 1)->on_change = graphics_changed;
-    UiNode *rb = ui_button(ui, sec, "Restart Photon Accumulation", reset_gi);
+    UiNode *rb = ui_button(ui, sec, "Gather the Light Again", reset_gi);
     rb->icon = UI_ICON_REFRESH;
     rb->h = 26;
 
@@ -1786,7 +1794,7 @@ static void stats_frame(UiNode *body) {
     STAT("%d", st->instances_culled);
     STAT("%lld", (long long)st->triangles);
     STAT("%.2f ms", (double)st->cull_ms);
-    STAT("%d", st->gi_photons_traced);
+    STAT("%d", st->gi_rays_traced);
     STAT("%.2f ms", (double)st->gi_ms);
     STAT("%d active, %d faces", st->probes_active, st->probe_faces_rendered);
     STAT("%d", ED.scene ? lx_scene_entity_count(ED.scene) : 0);
@@ -1809,7 +1817,7 @@ UiNode *ed_stats_panel(UiNode *parent) {
     ui_pad(body, 12, 10, 12, 10);
     body->gap = 2;
     static const char *names[] = {"Frame rate", "Render CPU time", "Draw calls", "Instances drawn", "Instances culled", "Triangles",
-                                  "Culling time", "Photons / frame", "GI trace time", "Reflection probes", "Entities", "Worker threads",
+                                  "Culling time", "GI rays / frame", "GI time", "Reflection probes", "Entities", "Worker threads",
                                   "Audio device", "Gamepads", "Last input"};
     for (int i = 0; i < 15; i++) {
         UiNode *row = ed_prop_row(body, names[i]);

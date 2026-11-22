@@ -22,9 +22,10 @@ void lx_graphics_apply_preset(LxGraphicsSettings *g, int preset) {
     static const int shadow_res[] = {1024, 2048, 2048, 4096};
     static const int cascades[] = {1, 2, 3, 4};
     static const float shadow_dist[] = {40, 80, 120, 200};
-    static const int photons[] = {8000, 24000, 60000, 150000};
+    static const int rays[] = {6000, 16000, 40000, 100000};     /* Live GI's rays per frame: Low is for phones */
+    static const int rays_probe[] = {16, 24, 32, 48};
     static const int bounces[] = {2, 3, 4, 6};
-    static const int grid[] = {24, 32, 48, 64};
+    static const int probes[] = {16, 24, 28, 32};
     static const float lod_bias[] = {0.6f, 0.8f, 1.0f, 1.4f};
     static const int probe_res[] = {64, 128, 256, 256};
     static const bool ssr[] = {false, true, true, true};
@@ -33,9 +34,10 @@ void lx_graphics_apply_preset(LxGraphicsSettings *g, int preset) {
     g->shadow_resolution = shadow_res[preset];
     g->shadow_cascades = cascades[preset];
     g->shadow_distance = shadow_dist[preset];
-    g->gi_photons_per_frame = photons[preset];
+    g->gi_rays_per_frame = rays[preset];
+    g->gi_rays_per_probe = rays_probe[preset];
     g->gi_max_bounces = bounces[preset];
-    g->gi_grid_resolution = grid[preset];
+    g->gi_probe_resolution = probes[preset];
     g->lod_bias = lod_bias[preset];
     g->reflection_resolution = probe_res[preset];
     g->ssr_enabled = ssr[preset];
@@ -109,8 +111,9 @@ bool lx_project_save(const LxProject *p) {
                  p->name, p->company, p->version, p->startup_scene, LX_VERSION_STRING);
     lx_sb_printf(&sb, "\n[graphics]\nquality = %d\nrender_scale = %g\nshadow_resolution = %d\nshadow_cascades = %d\nshadow_distance = %g\n",
                  g->quality_preset, g->render_scale, g->shadow_resolution, g->shadow_cascades, g->shadow_distance);
-    lx_sb_printf(&sb, "gi = %d\ngi_photons = %d\ngi_bounces = %d\ngi_grid = %d\ngi_intensity = %g\ngi_responsiveness = %g\n",
-                 g->gi_enabled, g->gi_photons_per_frame, g->gi_max_bounces, g->gi_grid_resolution, g->gi_intensity, g->gi_responsiveness);
+    lx_sb_printf(&sb, "gi = %d\ngi_rays = %d\ngi_rays_per_probe = %d\ngi_bounces = %d\ngi_probes = %d\ngi_intensity = %g\ngi_responsiveness = %g\n",
+                 g->gi_enabled, g->gi_rays_per_frame, g->gi_rays_per_probe, g->gi_max_bounces, g->gi_probe_resolution, g->gi_intensity,
+                 g->gi_responsiveness);
     lx_sb_printf(&sb, "lod = %d\nlod_bias = %g\nvsync = %d\ntarget_fps = %d\nexposure = %g\n", g->lod_enabled, g->lod_bias,
                  g->vsync, g->target_fps, g->exposure);
     lx_sb_printf(&sb, "reflections = %d\nreflection_resolution = %d\nssr = %d\nssr_steps = %d\nssr_distance = %g\nssr_thickness = %g\nssr_roughness = %g\n",
@@ -173,9 +176,10 @@ bool lx_project_load(LxProject *p, const char *root) {
             else if (!strcmp(k, "shadow_cascades")) g->shadow_cascades = n;
             else if (!strcmp(k, "shadow_distance")) g->shadow_distance = f;
             else if (!strcmp(k, "gi")) g->gi_enabled = lx_parse_bool(v);
-            else if (!strcmp(k, "gi_photons")) g->gi_photons_per_frame = n;
+            else if (!strcmp(k, "gi_rays")) g->gi_rays_per_frame = n;
+            else if (!strcmp(k, "gi_rays_per_probe")) g->gi_rays_per_probe = n;
             else if (!strcmp(k, "gi_bounces")) g->gi_max_bounces = n;
-            else if (!strcmp(k, "gi_grid")) g->gi_grid_resolution = n;
+            else if (!strcmp(k, "gi_probes")) g->gi_probe_resolution = n;   /* older projects' photon settings are left to the preset */
             else if (!strcmp(k, "gi_intensity")) g->gi_intensity = f;
             else if (!strcmp(k, "gi_responsiveness")) g->gi_responsiveness = f;
             else if (!strcmp(k, "lod")) g->lod_enabled = lx_parse_bool(v);

@@ -285,6 +285,31 @@ float gi_eval_l1(vec4 c, vec3 n) {
     float k = (1.0 - rho) / (1.0 + rho);
     return a * (k + (1.0 - k) * (p + 1.0) * pow(q, p));
 }
+/* Distance-field occlusion: the probes are half a metre apart, so on their own they miss the light blocked right
+ * next to a surface (the foot of a wall, under a character, a corner). A few steps out along the normal through the
+ * camera level's distance field show how much is close by: the nearer, the darker. */
+float gi_dfao(vec3 p, vec3 n) {
+    int level = -1;
+    for (int l = 0; l < 2 && level < 0; l++) {
+        if (u.gi_casc[l].w <= 0.0) continue;
+        vec3 g = (p - u.gi_casc[l].xyz) / u.gi_casc[l].w;
+        float r = u.gi_casc_res.x;
+        if (all(greaterThan(g, vec3(1.5))) && all(lessThan(g, vec3(r - 1.5)))) level = l;
+    }
+    if (level < 0) return 1.0;
+    float cell = u.gi_casc[level].w, half_cell = cell * 0.5, r2 = u.gi_casc_res.x * 2.0;
+    float occ = 0.0, wsum = 0.0;
+    for (int i = 1; i <= 4; i++) {
+        float d = half_cell * float(i) * 1.2;
+        vec3 g = (p + n * d - u.gi_casc[level].xyz) / half_cell;   // in voxels
+        g = clamp(g, vec3(0.5), vec3(r2 - 0.5));
+        float s = texture(u_gi_sdf, vec3(g.xy / r2, (g.z + float(level) * r2) / (2.0 * r2))).r * half_cell;
+        float w = 1.0 / float(i);
+        occ += w * clamp((d - s) / d, 0.0, 1.0);
+        wsum += w;
+    }
+    return clamp(1.0 - 0.85 * occ / wsum, 0.15, 1.0);
+}
 vec3 gi_eval(GiSH sh, vec3 n) {
     vec3 e = vec3(gi_eval_l1(sh.r, n), gi_eval_l1(sh.g, n), gi_eval_l1(sh.b, n)) * u.fog_color.w;
     return (any(isnan(e)) || any(isinf(e))) ? vec3(0.0) : e;   // a broken GI cell must not blacken the screen
@@ -523,7 +548,7 @@ void main() {
         }
         color += brdf(n, v, l, albedo, metallic, rough) * L.color_type.rgb * att * lw;
     }
-    // indirect: virtual-photon GI volume (or hemisphere ambient when GI is off)
+    // indirect: Live GI probes (or hemisphere ambient when GI is off)
     vec3 irradiance;
     float ambient = u.sky_zenith.w;
     GiSH gi_sh = GiSH(vec4(0.0), vec4(0.0), vec4(0.0));
@@ -552,7 +577,10 @@ void main() {
             color += brdf_spec(n, v, bl, albedo, metallic, rough) * peak * ao;
         }
     } else {
-        if (gi_cover > 0.0) { gi_sh = gi_gather(v_world, ng); irradiance = mix(sky_ambient, gi_eval(gi_sh, n), gi_cover); }
+        if (gi_cover > 0.0) {
+            gi_sh = gi_gather(v_world, ng);
+            irradiance = mix(sky_ambient, gi_eval(gi_sh, n) * gi_dfao(v_world, ng), gi_cover);
+        }
         else irradiance = sky_ambient;
         if (vol_cover > 0.0) {
             irradiance = mix(irradiance, sh_irradiance(vol_sh, n), vol_cover);
@@ -579,7 +607,7 @@ void main() {
     vec3 r = reflect(-v, n);
     float local_w;
     vec3 env = lx_environment_reflection(v_world, r, rough, local_w);
-    // specular occlusion: compare the photon GI arriving from the reflection direction with what
+    // specular occlusion: compare the GI arriving from the reflection direction with what
     // open sky would deliver from there, so only reflections that really look into geometry darken.
     // Placed probes captured the real surroundings, so they need it much less.
     float occl = 1.0;

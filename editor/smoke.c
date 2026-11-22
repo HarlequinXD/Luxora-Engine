@@ -977,37 +977,21 @@ static void s_ls_check(void) {
     lx_free(on);
 }
 
-/* the GPU photon tracer agrees with the CPU one: same scene, both solutions summed over 4x4x4 blocks of cells
- * (each tracer's noise averages out there) must match in total light and in where it falls */
-static void s_gi_compare(void) {
-    int gr[3], cr[3];
-    float *gpu = lx_renderer_gi_readback(gr);
-    if (!gpu) { LX_INFO("[smoke] photon GI runs on the CPU here - GPU comparison skipped"); return; }
-    float *cpu = lx_gi_cpu_reference(ED.scene, lx_graphics_settings(), 40, cr);
-    SMOKE_CHECK(cpu && cr[0] == gr[0] && cr[1] == gr[1] && cr[2] == gr[2], "CPU reference solution on the same grid");
-    if (cpu && cr[0] == gr[0] && cr[1] == gr[1] && cr[2] == gr[2]) {
-        int bx = (gr[0] + 3) / 4, by = (gr[1] + 3) / 4, bz = (gr[2] + 3) / 4, nb = bx * by * bz;
-        double *ga = lx_calloc((size_t)nb, sizeof(double)), *ca = lx_calloc((size_t)nb, sizeof(double));
-        double gt[3] = {0}, ct[3] = {0};
-        for (int z = 0; z < gr[2]; z++)
-            for (int y = 0; y < gr[1]; y++)
-                for (int x = 0; x < gr[0]; x++) {
-                    size_t i = ((size_t)(z * gr[1] + y) * (size_t)gr[0] + (size_t)x) * 12;
-                    int b = ((z / 4) * by + y / 4) * bx + x / 4;
-                    for (int c = 0; c < 3; c++) { gt[c] += gpu[i + c * 4]; ct[c] += cpu[i + c * 4]; ga[b] += gpu[i + c * 4]; ca[b] += cpu[i + c * 4]; }
-                }
-        double sg = 0, sc = 0, sgg = 0, scc = 0, sgc = 0;
-        for (int b = 0; b < nb; b++) { sg += ga[b]; sc += ca[b]; sgg += ga[b] * ga[b]; scc += ca[b] * ca[b]; sgc += ga[b] * ca[b]; }
-        double cov = sgc - sg * sc / nb, vg = sgg - sg * sg / nb, vc = scc - sc * sc / nb;
-        double corr = (vg > 0 && vc > 0) ? cov / sqrt(vg * vc) : 0;
-        for (int c = 0; c < 3; c++)
-            SMOKE_CHECK(ct[c] > 0 && fabs(gt[c] - ct[c]) < ct[c] * 0.1, "GPU photons carry the same light as the CPU's (channel %d: %.4g vs %.4g)", c, gt[c], ct[c]);
-        SMOKE_CHECK(corr > 0.9, "and put it in the same places (correlation %.3f over %d blocks)", corr, nb);
-        lx_free(ga);
-        lx_free(ca);
+/* Live GI in the template level: three nested levels around the camera, all lit */
+static void s_gi_live(void) {
+    const LxGiVolume *v = lx_gi_volume();
+    SMOKE_CHECK(v->valid && v->casc[0].on && v->casc[1].on, "Live GI is on, with its camera levels");
+    double tot[3] = {0, 0, 0};
+    int lit = 0;
+    for (int l = 0; l < 3 && v->valid; l++) {
+        const float *sh = l < 2 ? v->casc[l].sh : v->sh;
+        int n = l < 2 ? v->casc[l].res * v->casc[l].res * v->casc[l].res : v->res[0] * v->res[1] * v->res[2];
+        double sum = 0;
+        for (int i = 0; i < n; i++) sum += sh[i * 12] + sh[i * 12 + 4] + sh[i * 12 + 8];
+        tot[l] = sum / n;
+        if (sum > 0) lit++;
     }
-    lx_free(gpu);
-    lx_free(cpu);
+    SMOKE_CHECK(lit == 3, "every level has light (%.3g %.3g %.3g on average)", tot[0], tot[1], tot[2]);
 }
 
 /* ======================================================================
@@ -1296,58 +1280,6 @@ static void s_gi_view(void) {
     ED.cam_yaw = 0;
     ED.cam_pitch = -30;
 }
-static void s_casc_compare(void) {
-    int sr[3];
-    LxVec3 so;
-    float scell;
-    float *scene = lx_renderer_gi_readback_level(0, sr, &so, &scell);
-    if (!scene) { LX_INFO("[smoke] photon GI runs on the CPU here - camera grid check skipped"); return; }
-    int checked = 0;
-    for (int level = 1; level <= 2; level++) {
-        int cr[3];
-        LxVec3 co;
-        float ccell;
-        float *casc = lx_renderer_gi_readback_level(level, cr, &co, &ccell);
-        if (!casc) continue;
-        checked++;
-        const int B = 4;   /* blocks per side over the fine grid */
-        double cs[64] = {0}, ss[64] = {0}, ct = 0, st = 0;
-        float size = ccell * (float)cr[0];
-        for (int z = 0; z < cr[2]; z++)
-            for (int y = 0; y < cr[1]; y++)
-                for (int x = 0; x < cr[0]; x++) {
-                    LxVec3 c = lx_v3(co.x + (x + 0.5f) * ccell, co.y + (y + 0.5f) * ccell, co.z + (z + 0.5f) * ccell);
-                    LxVec3 gs = lx_scale3(lx_sub3(c, so), 1.0f / scell);   /* only where the scene grid is too */
-                    if (gs.x < 0 || gs.y < 0 || gs.z < 0 || gs.x >= sr[0] || gs.y >= sr[1] || gs.z >= sr[2]) continue;
-                    size_t i = ((size_t)(z * cr[1] + y) * (size_t)cr[0] + (size_t)x) * 12;
-                    int b = ((z * B / cr[2]) * B + y * B / cr[1]) * B + x * B / cr[0];
-                    double v = (casc[i] + casc[i + 4] + casc[i + 8]) * (double)ccell * ccell * ccell;
-                    cs[b] += v; ct += v;
-                }
-        for (int z = 0; z < sr[2]; z++)
-            for (int y = 0; y < sr[1]; y++)
-                for (int x = 0; x < sr[0]; x++) {
-                    LxVec3 c = lx_v3(so.x + (x + 0.5f) * scell, so.y + (y + 0.5f) * scell, so.z + (z + 0.5f) * scell);
-                    LxVec3 g = lx_scale3(lx_sub3(c, co), 1.0f / size);
-                    if (g.x < 0 || g.y < 0 || g.z < 0 || g.x >= 1 || g.y >= 1 || g.z >= 1) continue;
-                    size_t i = ((size_t)(z * sr[1] + y) * (size_t)sr[0] + (size_t)x) * 12;
-                    int b = ((int)(g.z * B) * B + (int)(g.y * B)) * B + (int)(g.x * B);
-                    double v = (scene[i] + scene[i + 4] + scene[i + 8]) * (double)scell * scell * scell;
-                    ss[b] += v; st += v;
-                }
-        double sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
-        int nb = B * B * B;
-        for (int b = 0; b < nb; b++) { sa += cs[b]; sb += ss[b]; saa += cs[b] * cs[b]; sbb += ss[b] * ss[b]; sab += cs[b] * ss[b]; }
-        double cov = sab - sa * sb / nb, va = saa - sa * sa / nb, vb = sbb - sb * sb / nb;
-        double corr = (va > 0 && vb > 0) ? cov / sqrt(va * vb) : 0;
-        SMOKE_CHECK(st > 0 && ct > st * 0.7 && ct < st * 1.3, "camera grid %d carries the scene grid's light (%.4g vs %.4g, cells %.2f m vs %.2f m)",
-                    level, ct, st, ccell, scell);
-        SMOKE_CHECK(corr > 0.8, "camera grid %d puts it in the same places (correlation %.3f)", level, corr);
-        lx_free(casc);
-    }
-    SMOKE_CHECK(checked > 0, "the template level uses camera grids");
-    lx_free(scene);
-}
 
 /* safeguards are shown, faded and off, never hidden: an enemy's body (moved by a Character Controller) */
 static void s_static_select(void) {
@@ -1589,8 +1521,7 @@ static const struct { int frame; SmokeFn fn; const char *what; } TPL_STEPS[] = {
     {171, s_static_select, "select an enemy's body"},
     {173, s_static_check, "its Static switch is faded and off"},
     {174, s_gi_view, "look over the arena and let the GI settle"},
-    {240, s_gi_compare, "GPU photon GI matches the CPU tracer"},
-    {241, s_casc_compare, "the camera grids agree with the scene grid"},
+    {240, s_gi_live, "Live GI lights its levels"},
     {242, s_ls_setup, "a point light between two walls"},
     {252, s_ls_shot_off, "picture with its shadows off"},
     {256, s_ls_on, "turn its shadows on"},

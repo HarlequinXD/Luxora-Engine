@@ -67,6 +67,7 @@ layout(set = 0, binding = 10) uniform sampler3D u_gc_b;
 layout(set = 0, binding = 11) uniform sampler3D u_gc_vis_a;  // their cell walls
 layout(set = 0, binding = 12) uniform sampler3D u_gc_vis_b;
 layout(set = 0, binding = 13) uniform sampler2DArray u_lightmap;   // baked lighting: per atlas irradiance, then light direction
+layout(set = 0, binding = 15) uniform sampler3D u_gi_sdf;   // Live GI: the camera levels' distance fields (in half cells, stacked along z)
 layout(set = 0, binding = 14) uniform sampler3D u_bvol;   // Baked Lighting Volumes: SH red, green, blue, shadowmask (each a block along z)
 
 // The engine builds OpenGL-style matrices; convert clip space for Vulkan (y down, z 0..1).

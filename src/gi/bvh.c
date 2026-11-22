@@ -1,5 +1,5 @@
 /* Triangle BVH (binned SAH) over a scene's static geometry.
- * Shared by the virtual-photon GI tracer and the acoustic ray tracer. */
+ * Shared by the GI (its distance fields) and the acoustic ray tracer. */
 #include "../lx_internal.h"
 
 #define BINS 12

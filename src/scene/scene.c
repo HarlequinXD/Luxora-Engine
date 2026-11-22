@@ -262,7 +262,7 @@ void lx_entity_set_name(LxScene *s, LxEntity e, const char *n) {
     LxEntityData *d = lx_entity_data(s, e);
     if (d) lx_strcpy(d->name, sizeof d->name, n);
 }
-/* Static geometry (GI photons + sound) must never move or bend: the photon and sound data is built once from
+/* Static geometry (GI + sound) must never move or bend: the GI and sound data is built once from
  * the mesh as it is. Skinned meshes and anything moved by physics, a character controller or an animator
  * (on itself or a parent) can't be static: GI and sound would keep a frozen copy where it started. */
 bool lx_entity_can_be_static(const LxScene *s, LxEntity e, const char **why) {

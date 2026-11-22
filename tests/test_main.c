@@ -679,8 +679,9 @@ static void test_bvh(void) {
     lx_scene_destroy(s);
 }
 
+#define GI_EYE lx_v3(0, 1.5f, 0)
 static void test_gi(void) {
-    printf("photon gi\n");
+    printf("live gi\n");
     LxScene *s = lx_scene_create("GI");
     LxEntity floor = lx_spawn_primitive(s, LX_PRIM_CUBE, "Floor", lx_v3(0, -0.5f, 0));
     lx_entity_set_scale(s, floor, lx_v3(20, 1, 20));
@@ -692,29 +693,17 @@ static void test_gi(void) {
     lx_add_light(s, sun, LX_LIGHT_DIRECTIONAL)->intensity = 3.0f;
     s->env.ambient_intensity = 0.0f; /* only the sun: every bit of GI must come from bounces */
     LxGraphicsSettings g = lx_graphics_defaults(1);
-    g.gi_photons_per_frame = 40000;
+    g.gi_rays_per_frame = 60000;
     double t0 = lx_time();
-    for (int f = 0; f < 6; f++) lx_gi_update(s, &g);
+    for (int f = 0; f < 6; f++) lx_gi_update(s, &g, GI_EYE);
     double ms = (lx_time() - t0) * 1000.0 / 6.0;
     const LxGiVolume *v = lx_gi_volume();
-    CHECK(v->valid && v->res[0] > 2, "gi volume valid");
-    /* sample in front of the red wall: indirect light should be red-dominant */
-    LxVec3 p = lx_v3(0, 1.5f, -1.45f);
-    int cx = (int)((p.x - v->origin.x) / v->cell_size.x), cy = (int)((p.y - v->origin.y) / v->cell_size.y),
-        cz = (int)((p.z - v->origin.z) / v->cell_size.z);
-    const float *c = lx_gi_cell(cx, cy, cz);
-    CHECK(c && c[0] > 0.0f, "irradiance present near wall (L0 red %g)", c ? c[0] : -1.0f);
-    if (c) {
-        /* irradiance on a surface facing the red wall (normal -Z), as the PBR shader evaluates it */
-        LxVec3 n = lx_v3(0, 0, -1);
-        float e[3];
-        for (int ch = 0; ch < 3; ch++) {
-            const float *k = c + ch * 4;
-            e[ch] = LX_PI * 0.282095f * k[0] + (2.0f * LX_PI / 3.0f) * 0.488603f * (k[1] * n.y + k[2] * n.z + k[3] * n.x);
-        }
-        CHECK(e[0] > e[1] * 1.3f && e[0] > e[2] * 1.3f, "colour bleeding towards the wall: r %g g %g b %g", e[0], e[1], e[2]);
-    }
-    printf("  %d photons/frame in %.1f ms\n", lx_gi_last_photon_count(), ms);
+    CHECK(v->valid && v->res[0] > 2 && v->casc[0].on, "gi volume valid");
+    /* in front of the red wall, a surface facing it: the bounce light is red */
+    LxVec3 e = lx_gi_irradiance(lx_v3(0, 1.5f, -1.45f), lx_v3(0, 0, -1), true);
+    CHECK(e.x > 0, "irradiance present near wall (red %g)", e.x);
+    CHECK(e.x > e.y * 1.3f && e.x > e.z * 1.3f, "colour bleeding towards the wall: r %g g %g b %g", e.x, e.y, e.z);
+    printf("  %d rays/frame in %.1f ms\n", lx_gi_last_ray_count(), ms);
     lx_gi_shutdown();
     lx_scene_destroy(s);
 }
@@ -731,7 +720,7 @@ static float gi_flicker(LxScene *s, const LxGraphicsSettings *g) {
     static float a[4096], b[4096];
     int n;
     gi_floor_layer(a, &n);
-    lx_gi_update(s, g);
+    lx_gi_update(s, g, GI_EYE);
     gi_floor_layer(b, &n);
     double d = 0, m = 0;
     for (int i = 0; i < n; i++) { d += (double)(b[i] - a[i]) * (b[i] - a[i]); m += (double)b[i] * b[i]; }
@@ -739,7 +728,7 @@ static float gi_flicker(LxScene *s, const LxGraphicsSettings *g) {
 }
 
 static void test_gi_convergence(void) {
-    printf("photon gi convergence\n");
+    printf("live gi convergence\n");
     LxScene *s = lx_scene_create("Noise");
     LxEntity floor = lx_spawn_primitive(s, LX_PRIM_CUBE, "Floor", lx_v3(0, -0.5f, 0));
     lx_entity_set_scale(s, floor, lx_v3(20, 1, 20));
@@ -750,16 +739,16 @@ static void test_gi_convergence(void) {
     lx_add_light(s, lamp, LX_LIGHT_POINT)->intensity = 200;
     s->env.ambient_intensity = 0;
     LxGraphicsSettings g = lx_graphics_defaults(1);
-    g.gi_photons_per_frame = 20000;
-    for (int f = 0; f < 8; f++) lx_gi_update(s, &g);
+    g.gi_rays_per_frame = 60000;
+    for (int f = 0; f < 8; f++) lx_gi_update(s, &g, GI_EYE);
     float early = gi_flicker(s, &g);
-    for (int f = 0; f < 300; f++) lx_gi_update(s, &g);
+    for (int f = 0; f < 300; f++) lx_gi_update(s, &g, GI_EYE);
     float late = gi_flicker(s, &g);
     printf("  frame-to-frame noise after 8 frames %.4f, after 308 frames %.4f\n", early, late);
     CHECK(late < early * 0.25f, "static lighting converges (noise %.4f -> %.4f)", early, late);
     /* moving the light must restart accumulation quickly instead of smearing the old result */
     lx_entity_set_position(s, lamp, lx_v3(6, 4, 6));
-    for (int f = 0; f < 30; f++) lx_gi_update(s, &g);
+    for (int f = 0; f < 30; f++) lx_gi_update(s, &g, GI_EYE);
     const LxGiVolume *v = lx_gi_volume();
     int y = (int)((0.6f - v->origin.y) / v->cell_size.y);
     int cx = (int)((6 - v->origin.x) / v->cell_size.x), cz = (int)((6 - v->origin.z) / v->cell_size.z);
@@ -768,7 +757,7 @@ static void test_gi_convergence(void) {
     CHECK(near_l > far_l * 2.0f, "GI follows a moved light within 30 frames (%g vs %g)", near_l, far_l);
     /* a character walking about and a flickering lamp must not keep the whole scene noisy (the game templates did) */
     lx_entity_set_position(s, lamp, lx_v3(0, 4, 0));
-    for (int f = 0; f < 300; f++) lx_gi_update(s, &g);
+    for (int f = 0; f < 300; f++) lx_gi_update(s, &g, GI_EYE);
     float still = gi_flicker(s, &g);
     LxEntity walker = lx_spawn_primitive(s, LX_PRIM_CAPSULE, "Walker", lx_v3(-5, 1, 0));
     lx_add_character(s, walker);
@@ -777,7 +766,7 @@ static void test_gi_convergence(void) {
     for (int f = 0; f < 400; f++) {
         lx_entity_set_position(s, walker, lx_v3(-5 + (float)(f % 200) * 0.05f, 1, 0));
         lx_get_light(s, lamp)->intensity = 200 * (0.995f + 0.005f * sinf((float)f));   /* a slight flicker: the change itself stays small */
-        lx_gi_update(s, &g);
+        lx_gi_update(s, &g, GI_EYE);
         if (f == 399) noisy = gi_flicker(s, &g);
     }
     CHECK(lx_gi_moving_triangles() > 0 && noisy < early * 0.5f, "moving characters and flickering lights don't keep the GI noisy (%.4f; 8 frames in: %.4f)", noisy, early);
@@ -807,8 +796,8 @@ static float leak_ratio(bool walls, float *lit_out) {
     lx_add_light(s, lamp, LX_LIGHT_POINT)->intensity = 200;
     s->env.ambient_intensity = 0;
     LxGraphicsSettings g = lx_graphics_defaults(1);
-    g.gi_photons_per_frame = 40000;
-    for (int f = 0; f < 40; f++) lx_gi_update(s, &g);
+    g.gi_rays_per_frame = 60000;
+    for (int f = 0; f < 40; f++) lx_gi_update(s, &g, GI_EYE);
     /* floor points just either side of the thin wall, and the middle of each room */
     float lit = 0, dark = 0;
     for (int k = 0; k < 5; k++) {
@@ -858,7 +847,7 @@ static void test_static_safeguard(void) {
 /* moving things bounce light with their real triangles: a red cube with a Rigidbody, lit by a lamp, tints the
  * surface facing it red; moved away, the tint goes with it */
 static LxVec3 bleed_at(LxScene *s, const LxGraphicsSettings *g, int frames) {
-    for (int f = 0; f < frames; f++) lx_gi_update(s, g);
+    for (int f = 0; f < frames; f++) lx_gi_update(s, g, GI_EYE);
     LxVec3 e = lx_v3(0, 0, 0);
     for (int k = 0; k < 3; k++) {   /* surfaces facing the cube's lit side, just in front of it */
         LxVec3 v = lx_gi_irradiance(lx_v3(-0.9f, 0.3f + 0.4f * k, 0), lx_v3(-1, 0, 0), true);
@@ -867,7 +856,7 @@ static LxVec3 bleed_at(LxScene *s, const LxGraphicsSettings *g, int frames) {
     return e;
 }
 static void test_gi_moving(void) {
-    printf("photon gi: moving objects\n");
+    printf("live gi: moving objects\n");
     LxScene *s = lx_scene_create("Moving");
     LxEntity floor = lx_spawn_primitive(s, LX_PRIM_CUBE, "Floor", lx_v3(0, -0.5f, 0));
     lx_entity_set_scale(s, floor, lx_v3(20, 1, 20));
@@ -881,7 +870,7 @@ static void test_gi_moving(void) {
     lx_get_mesh(s, cube)->static_geometry = true;   /* ignored: it has a Rigidbody */
     lx_add_rigidbody(s, cube);
     LxGraphicsSettings g = lx_graphics_defaults(1);
-    g.gi_photons_per_frame = 40000;
+    g.gi_rays_per_frame = 60000;
     LxVec3 near_e = bleed_at(s, &g, 60);
     int np = lx_gi_moving_triangles();
     CHECK(np == 12, "the moving cube's triangles are in GI (%d)", np);
@@ -911,8 +900,8 @@ static float self_lit(bool with_object) {
         lx_add_rigidbody(s, body);
     }
     LxGraphicsSettings g = lx_graphics_defaults(1);
-    g.gi_photons_per_frame = 40000;
-    for (int f = 0; f < 40; f++) lx_gi_update(s, &g);
+    g.gi_rays_per_frame = 60000;
+    for (int f = 0; f < 40; f++) lx_gi_update(s, &g, GI_EYE);
     float sum = 0;
     for (int k = 0; k < 4; k++) {   /* the "face", towards the lamp-lit wall: what the bounce light comes from */
         LxVec3 e = lx_gi_irradiance(lx_v3(-0.15f + 0.1f * k, 1.2f + 0.1f * k, -0.18f), lx_v3(0, 0, -1), true);
@@ -923,18 +912,18 @@ static float self_lit(bool with_object) {
     return sum;
 }
 static void test_gi_self_shadow(void) {
-    printf("photon gi: moving objects don't darken themselves\n");
+    printf("live gi: moving objects don't darken themselves\n");
     float open_air = self_lit(false), face = self_lit(true);
     printf("  bounce light on a moving body's face: %.4g, in open air there: %.4g\n", face, open_air);
-    CHECK(open_air > 0, "open air has bounce light (light is recorded along the photons' paths) (%.4g)", open_air);
+    CHECK(open_air > 0, "open air has bounce light (%.4g)", open_air);
     CHECK(face > open_air * 0.6f && face < open_air * 1.3f, "a moving body's face is lit like the air around it (%.4g vs %.4g)", face, open_air);
 }
 
 /* calibration: under an open sky of radiance L, the light arriving at an upward-facing surface is pi x L
  * (exactly what the shader uses as ambient light when GI is off). Floor reflects almost no blue, so the blue
- * channel is the sky alone: near the floor and in mid-air, the photon GI must give pi x L. */
+ * channel is the sky alone: near the floor and in mid-air, the GI must give the L1 reconstruction of an open sky. */
 static void test_gi_sky_calibration(void) {
-    printf("photon gi: sky calibration\n");
+    printf("live gi: sky calibration\n");
     LxScene *s = lx_scene_create("Sky");
     LxEntity floor = lx_spawn_primitive(s, LX_PRIM_CUBE, "Floor", lx_v3(0, -0.5f, 0));
     lx_entity_set_scale(s, floor, lx_v3(40, 1, 40));
@@ -945,24 +934,16 @@ static void test_gi_sky_calibration(void) {
     s->env.sky_horizon = lx_v3(1, 1, 1);
     s->env.ambient_intensity = 0.5f;
     LxGraphicsSettings g = lx_graphics_defaults(1);
-    g.gi_photons_per_frame = 60000;
-    for (int f = 0; f < 60; f++) lx_gi_update(s, &g);
-    /* The sky here is a 40 m square plane at the scene's top (y = 6), so it's a little short of a full sky: the
-     * true irradiance below it is pi L x the plane's share of the cosine-weighted directions. */
+    g.gi_rays_per_frame = 60000;
+    for (int f = 0; f < 60; f++) lx_gi_update(s, &g, GI_EYE);
+    /* An open sky of radiance L over the floor: the probes see L in every direction above the horizon. What the
+     * shader gives an upward surface from that is the L1 reconstruction of a lit upper hemisphere. */
     const float L = 0.5f;
     float lo = 0, hi = 0, want_lo = 0, want_hi = 0;
     for (int pass = 0; pass < 2; pass++) {
-        float y = pass ? 1.6f : 0.02f, h = 6.0f - y, a = 20.0f;
-        float omega = 4.0f * asinf(a * a / (a * a + h * h));
-        double e = 0;
-        const int N = 400;
-        for (int i = 0; i < N; i++)
-            for (int j = 0; j < N; j++) {
-                double x = -a + (i + 0.5) * 2 * a / N, z = -a + (j + 0.5) * 2 * a / N, r2 = x * x + z * z + (double)h * h;
-                e += (double)h * h / (r2 * r2) * (2.0 * a / N) * (2.0 * a / N);
-            }
-        float want = (float)e * L;   /* the integral of L cos over the plane */
-        (void)omega;
+        float y = pass ? 1.6f : 0.02f;
+        float c[4] = {L * 0.282095f * 2.0f * LX_PI, L * 0.488603f * LX_PI, 0, 0};
+        float want = lx_gi_eval_l1(c, lx_v3(0, 1, 0));
         float got = 0;
         for (int k = 0; k < 9; k++) {
             float x = -4.0f + (k % 3) * 4.0f, z = -4.0f + (k / 3) * 4.0f;
@@ -1015,7 +996,7 @@ static void test_moving_refit(void) {
 /* the GI's light reconstruction never goes negative (the hard-edged dark shapes on a character's face were the
  * old one clamping at zero) and is exact for light from a single direction */
 static void test_gi_reconstruction(void) {
-    printf("photon gi: light reconstruction\n");
+    printf("live gi: light reconstruction\n");
     /* all light from straight above, irradiance w at normal incidence: radiance SH of a delta, w x basis */
     const float w = 2.0f;
     float c[4] = {w * 0.282095f, w * 0.488603f, 0, 0};   /* L0, y, z, x */
@@ -1910,7 +1891,7 @@ static void test_bake_volumes(void) {
 }
 
 static void test_gi_headroom(void) {
-    printf("photon gi: room above the ground\n");
+    printf("live gi: room above the ground\n");
     LxScene *s = lx_scene_create("Flat");
     LxEntity ground = lx_spawn_primitive(s, LX_PRIM_PLANE, "Ground", lx_v3(0, 0, 0));
     lx_entity_set_scale(s, ground, lx_v3(4, 1, 4));
@@ -1921,12 +1902,12 @@ static void test_gi_headroom(void) {
     lx_entity_set_scale(s, hero, lx_v3(0.5f, 0.9f, 0.5f));
     lx_add_character(s, hero);
     LxGraphicsSettings g = lx_graphics_defaults(1);
-    g.gi_photons_per_frame = 40000;
+    g.gi_rays_per_frame = 60000;
     float level[3];
     float lifts[3] = {0, 2.0f, 9.0f};   /* standing, mid-jump, lifted high */
     for (int k = 0; k < 3; k++) {
         lx_entity_set_position(s, hero, lx_v3(0, 0.9f + lifts[k], 0));
-        for (int f = 0; f < 40; f++) lx_gi_update(s, &g);
+        for (int f = 0; f < 40; f++) lx_gi_update(s, &g, GI_EYE);
         float y0 = lifts[k];
         LxVec3 low = lx_gi_irradiance(lx_v3(0.3f, y0 + 0.5f, 0), lx_v3(1, 0, 0), true);
         LxVec3 high = lx_gi_irradiance(lx_v3(0.3f, y0 + 1.65f, 0), lx_v3(1, 0, 0), true);
@@ -1941,7 +1922,7 @@ static void test_gi_headroom(void) {
 }
 
 static void test_gi_leaks(void) {
-    printf("photon gi light leaks\n");
+    printf("live gi light leaks\n");
     float lit_old, lit_new;
     float before = leak_ratio(false, &lit_old), after = leak_ratio(true, &lit_new);
     printf("  dark room / lit room next to a thin wall: %.3f before, %.3f with walls\n", before, after);
@@ -2012,13 +1993,13 @@ static void test_project(void) {
     CHECK(lx_project_load(&q, p.root), "load project");
     CHECK(!strcmp(q.name, "Sample Game") && q.build.scene_count == 1, "project fields");
     CHECK(!strcmp(q.build.android_package, "com.mystudio.samplegame"), "package id %s", q.build.android_package);
-    q.graphics.gi_photons_per_frame = 12345;
+    q.graphics.gi_rays_per_frame = 12345;
     q.audio.speed_of_sound = 340.0f;
     q.build.target = LX_PLATFORM_ANDROID;
     lx_project_save(&q);
     LxProject r;
     lx_project_load(&r, p.root);
-    CHECK(r.graphics.gi_photons_per_frame == 12345 && NEAR(r.audio.speed_of_sound, 340.0f, 1e-3f) && r.build.target == LX_PLATFORM_ANDROID,
+    CHECK(r.graphics.gi_rays_per_frame == 12345 && NEAR(r.audio.speed_of_sound, 340.0f, 1e-3f) && r.build.target == LX_PLATFORM_ANDROID,
           "settings round trip");
     char scene_path[LX_PATH_MAX];
     lx_path_join(scene_path, sizeof scene_path, p.assets, "Scenes/Main.lxscene");
@@ -3800,15 +3781,17 @@ static void test_state_graph(void) {
 
 #include "test_fsm.c"
 
+/* LUXORA_TEST=<part of a name> runs only the tests whose names contain it */
+#define RUN(fn) do { const char *only_ = getenv("LUXORA_TEST"); if (!only_ || strstr(#fn, only_)) fn(); } while (0)
 int main(void) {
     lx_jobs_init(0);
     lx_register_builtin_behaviours();
-    test_math();
-    test_jobs();
-    test_scene();
-    test_meshes();
-    test_png();
-    test_png_formats();
+    RUN(test_math);
+    RUN(test_jobs);
+    RUN(test_scene);
+    RUN(test_meshes);
+    RUN(test_png);
+    RUN(test_png_formats);
     {
         printf("material maps\n");
         LxMaterial m = lx_material_default(), r;
@@ -3827,53 +3810,53 @@ int main(void) {
               !r.parallax_shadows && NEAR(r.ao_strength, 0.5f, 1e-5f), "map settings survive");
         lx_path_remove(path);
     }
-    test_bvh();
-    test_gi();
-    test_gi_convergence();
-    test_gi_leaks();
-    test_static_safeguard();
-    test_gi_moving();
-    test_gi_self_shadow();
-    test_moving_refit();
-    test_gi_reconstruction();
-    test_gi_headroom();
-    test_lightmap_uvs();
-    test_lightmapper();
-    test_sky();
-    test_terrain();
-    test_bake_volumes();
-    test_gi_sky_calibration();
-    test_acoustics();
-    test_crowd();
-    test_project();
-    test_wav();
-    test_input();
-    test_reflection_probe();
-    test_icon_images();
-    test_layers();
-    test_physics();
-    test_character_no_sinking();
-    test_character_slopes();
-    test_game_ui();
-    test_gameplay();
-    test_jpeg();
-    test_pose_blend();
-    test_blend_trees();
-    test_ik();
-    test_anim_graph_asset();
-    test_animator_runtime();
-    test_anim_exit_time();
-    test_root_motion();
-    test_models();
-    test_state_graph();
-    test_fsm_fuzz();
-    test_fsm_semantics();
-    test_fsm_nesting();
-    test_fsm_action_library();
-    test_templates();
-    test_axis_into_character_move();
+    RUN(test_bvh);
+    RUN(test_gi);
+    RUN(test_gi_convergence);
+    RUN(test_gi_leaks);
+    RUN(test_static_safeguard);
+    RUN(test_gi_moving);
+    RUN(test_gi_self_shadow);
+    RUN(test_moving_refit);
+    RUN(test_gi_reconstruction);
+    RUN(test_gi_headroom);
+    RUN(test_lightmap_uvs);
+    RUN(test_lightmapper);
+    RUN(test_sky);
+    RUN(test_terrain);
+    RUN(test_bake_volumes);
+    RUN(test_gi_sky_calibration);
+    RUN(test_acoustics);
+    RUN(test_crowd);
+    RUN(test_project);
+    RUN(test_wav);
+    RUN(test_input);
+    RUN(test_reflection_probe);
+    RUN(test_icon_images);
+    RUN(test_layers);
+    RUN(test_physics);
+    RUN(test_character_no_sinking);
+    RUN(test_character_slopes);
+    RUN(test_game_ui);
+    RUN(test_gameplay);
+    RUN(test_jpeg);
+    RUN(test_pose_blend);
+    RUN(test_blend_trees);
+    RUN(test_ik);
+    RUN(test_anim_graph_asset);
+    RUN(test_animator_runtime);
+    RUN(test_anim_exit_time);
+    RUN(test_root_motion);
+    RUN(test_models);
+    RUN(test_state_graph);
+    RUN(test_fsm_fuzz);
+    RUN(test_fsm_semantics);
+    RUN(test_fsm_nesting);
+    RUN(test_fsm_action_library);
+    RUN(test_templates);
+    RUN(test_axis_into_character_move);
 #if LUXORA_SCRIPT_COMPILER
-    test_scripts();
+    RUN(test_scripts);
 #endif
     lx_assets_clear();
     lx_jobs_shutdown();

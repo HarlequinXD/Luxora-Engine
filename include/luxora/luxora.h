@@ -340,7 +340,7 @@ typedef struct LxLight {
     float range;
     float spot_angle_deg;
     bool cast_shadows;
-    bool contribute_gi;    /* emits virtual photons */
+    bool contribute_gi;    /* lights the scene's bounce light (GI) */
     LxLightMode mode;      /* baked lighting */
     float shadow_radius;   /* baked soft shadows: point/spot the light's radius (m), directional its size (degrees) */
     int8_t mask_channel;   /* set by the bake: Mixed lights' shadowmask channel in lighting volumes (-1 none) */
@@ -350,7 +350,7 @@ typedef struct LxMeshRenderer {
     char mesh[LX_REF_MAX];
     char material[LX_REF_MAX];
     bool cast_shadows;
-    bool static_geometry;  /* participates in GI photons + acoustics */
+    bool static_geometry;  /* part of the GI's distance fields + acoustics */
 } LxMeshRenderer;
 
 typedef enum LxAudioBus { LX_BUS_SFX, LX_BUS_MUSIC, LX_BUS_VOICE, LX_BUS_AMBIENT, LX_BUS_COUNT } LxAudioBus;
@@ -1262,10 +1262,11 @@ typedef struct LxGraphicsSettings {
     int shadow_resolution;      /* per cascade */
     int shadow_cascades;        /* 1..4 */
     float shadow_distance;
-    bool gi_enabled;            /* virtual photon global illumination */
-    int gi_photons_per_frame;
-    int gi_max_bounces;
-    int gi_grid_resolution;     /* cells along the longest axis */
+    bool gi_enabled;            /* Live GI: real-time bounce light, sky light and glow */
+    int gi_rays_per_frame;      /* the work budget: rays traced per frame (spread over the probes that need light) */
+    int gi_rays_per_probe;      /* rays each probe traces when it updates */
+    int gi_max_bounces;         /* 1 = one bounce; more = light keeps bouncing */
+    int gi_probe_resolution;    /* probes along each axis of each level (the finest level covers ~12 m) */
     float gi_intensity;
     float gi_responsiveness;    /* 0..1 temporal blend per frame */
     bool lod_enabled;
@@ -1288,7 +1289,7 @@ typedef struct LxGraphicsSettings {
 typedef struct LxRenderStats {
     int draw_calls, instances_drawn, instances_culled;
     int64_t triangles;
-    int gi_photons_traced;
+    int gi_rays_traced;
     float gi_ms, cull_ms, frame_ms;
     int probes_active, probe_faces_rendered;
     int local_shadows;          /* point / spot lights drawn with shadows this frame */
@@ -1320,7 +1321,7 @@ LxRenderTarget *lx_render_target_create(int w, int h);
 void lx_render_target_resize(LxRenderTarget *rt, int w, int h);
 void lx_render_target_destroy(LxRenderTarget *rt);
 uint32_t lx_render_target_texture(const LxRenderTarget *rt); /* GL texture of the final LDR image */
-void lx_gi_reset(void);  /* restart photon accumulation */
+void lx_gi_reset(void);  /* GI forgets what it has and gathers its light again */
 void lx_reflections_refresh(void);  /* re-capture every reflection probe */
 
 /* ===================================================================

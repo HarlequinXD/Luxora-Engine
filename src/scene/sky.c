@@ -7,7 +7,7 @@
  *   - the colour and brightness of the scene's sun light (the first directional light, which this drives:
  *     the sun by day, the moon by night),
  *   - the sky's colour overhead, at the horizon and from the ground, which everything that used the
- *     Gradient sky reads (ambient light, reflections, photon GI, fog) through lx_env_effective.
+ *     Gradient sky reads (ambient light, reflections, GI, fog) through lx_env_effective.
  * Weather: the scene's settings are targets; while playing the live weather moves towards them over the
  * blend time, the ground gets wet in rain and white in snow, and lightning strikes with thunder that
  * arrives as late as sound would.

@@ -8,7 +8,7 @@ A real-time 3D game engine written in **C11**, rendering with **Vulkan 1.3**, wi
 | **Weather** | Presets (clear, cloudy, rain, storm, snow, fog) that blend over time: rain and snow that stay out from under roofs, wet ground with rippling puddles, settling snow, mist, wind, lightning with thunder that arrives as late as sound would. Driven from the Lighting panel or State Graph actions and events |
 | **Terrain** | Endless terrain made of squares of land you add wherever you like; each new square blends into the land beside it. A terrain workshop with five modes: **Shape** (raise, lower, smooth, level, roughen, erode, steps, paths, landforms, holes, sculpt layers you can hide, fade or rub out), **Paint** (up to six ground textures from any image, blended by their height, that can cover slopes and high ground by themselves), **Plants** (swaying grass and scattered trees, rocks or any prefab), **Expand** and **Settings**. Land near the player streams in with collision; distant land is drawn simpler. Each square is its own file |
 | **Baked lighting** | A GPU lightmapper in the spirit of Bakery for Unity: static objects are path traced into lightmap atlases (direct light with soft shadows, sky, multi-bounce) in plain Vulkan compute - no ray-tracing hardware - or on all CPU cores. Automatic lightmap UVs, Mixed / Realtime / Baked light modes, a direction map so normal maps respond to baked light, denoising and leak-free filling |
-| **Global illumination** | *Virtual photons* traced from every light and the sky through a SAH BVH on all CPU cores, accumulated into an L1 spherical-harmonics irradiance volume (colour bleeding, sky occlusion, progressive convergence) |
+| **Global illumination** | **Live GI**: fully real-time bounce light, sky light and glow with no baking and no ray-tracing hardware. Rays are traced through nested distance-field levels that follow the camera into a lit surface cache (direct light with soft shadows, plus infinite bounces), feeding irradiance probes, with distance-field contact occlusion in the shader. A fixed ray budget on all CPU cores goes only where the light is changing, so a still scene costs nothing |
 | **Sound** | Ray-traced acoustics: real speed of sound (delay lines, natural Doppler), occlusion and transmission through materials, early reflections, RT60-driven reverb. WinMM / ALSA / AAudio |
 | **Scale** | Automatic LOD chains, frustum culling, instanced batching (one draw per mesh/LOD/material), data-oriented multithreaded crowds |
 | **Animation** | Skinned meshes on imported skeletons, humanoid avatars that retarget any humanoid clip, and an **Animator graph** (.lxanim): a state machine over animation, with states that play clips or blend trees (1D, 2D directional, 2D cartesian, direct), transitions driven by typed parameters (float/int/bool/trigger) and cross-faded, layers with humanoid bone masks and additive blending, two-bone IK, foot grounding and look-at |
@@ -91,7 +91,7 @@ include/luxora/   public API (luxora.h) + math library
 src/core/         memory, files, logging, job system
 src/platform/     Win32, X11, Android windowing + Vulkan surfaces
 src/gfx/          Vulkan renderer, meshes/LODs, images (PNG/TGA/BMP), assets
-src/gi/           BVH, virtual photon GI, lightmapper
+src/gi/           BVH, Live GI, lightmapper
 src/audio/        mixer, acoustics, device backends
 src/input/        Input Manager + gamepads + touch controls
 src/crowd/        crowd simulation

@@ -11,7 +11,7 @@
  *
  * Objects. In each scene the terrain object gets a child object per chunk (made here, never saved, hidden from the
  * hierarchy): a mesh with four levels of detail and skirts that hide the cracks between levels, the terrain
- * material, and a mesh collider. So shadows, photon GI, picking, physics, sound and the weather's roof map see the
+ * material, and a mesh collider. So shadows, GI, picking, physics, sound and the weather's roof map see the
  * terrain like any other static object. Chunks near the focus (the player, or the editor's camera) are loaded in
  * full; the rest are drawn from their simplified copy, without collision.
  *
@@ -929,7 +929,7 @@ static void refresh_layers(TData *d) {
     d->gpu.a = d->gpu_a;
     d->gpu.b = d->gpu_b;
     d->gpu.version++;
-    /* the terrain's material: what photon GI and baking see is the layers' average colour */
+    /* the terrain's material: what GI and baking see is the layers' average colour */
     d->material = lx_material_default();
     snprintf(d->material.name, sizeof d->material.name, "Terrain %d", d->id);
     LxVec3 a = lx_scale3(total, 1.0f / (float)(count + 1));

@@ -630,8 +630,8 @@ static void viewport_draw(UiNode *n, UiCtx *ui) {
     if (ED.show_stats) {
         const LxRenderStats *st = lx_render_stats();
         char buf[256];
-        snprintf(buf, sizeof buf, "%.0f fps   %d draws   %lld tris   %d instances (%d culled)   GI %d photons %.1f ms", (double)ED.fps, st->draw_calls,
-                 (long long)st->triangles, st->instances_drawn, st->instances_culled, st->gi_photons_traced, (double)st->gi_ms);
+        snprintf(buf, sizeof buf, "%.0f fps   %d draws   %lld tris   %d instances (%d culled)   GI %d rays %.1f ms", (double)ED.fps, st->draw_calls,
+                 (long long)st->triangles, st->instances_drawn, st->instances_culled, st->gi_rays_traced, (double)st->gi_ms);
         ui_draw_rect(ui, n->x + 8 * ui_scale(ui), n->y + 8 * ui_scale(ui), ui_text_width(ui, UI_FONT_MONO, buf) + 16 * ui_scale(ui), 24 * ui_scale(ui), UI_RGBA(22, 13, 12, 200), 4 * ui_scale(ui));
         ui_draw_text(ui, UI_FONT_MONO, n->x + 16 * ui_scale(ui), n->y + 8 * ui_scale(ui) + (24 * ui_scale(ui) - ui_line_height(ui, UI_FONT_MONO)) * 0.5f, buf, t->text);
     }

@@ -1003,8 +1003,8 @@ static void status_frame(UiNode *n) {
     char tris[32];
     if (st->triangles > 1000000) snprintf(tris, sizeof tris, "%.2fM", (double)st->triangles / 1e6);
     else snprintf(tris, sizeof tris, "%.1fK", (double)st->triangles / 1e3);
-    ui_set_text(stats, "%.0f FPS   %d draws   %s tris   %d photons   %d entities   %s", (double)ED.fps, st->draw_calls, tris,
-                st->gi_photons_traced, ED.scene ? lx_scene_entity_count(ED.scene) : 0, lx_audio_backend_name());
+    ui_set_text(stats, "%.0f FPS   %d draws   %s tris   %d GI rays   %d entities   %s", (double)ED.fps, st->draw_calls, tris,
+                st->gi_rays_traced, ED.scene ? lx_scene_entity_count(ED.scene) : 0, lx_audio_backend_name());
 }
 
 static UiNode *tool(UiNode *parent, UiIcon icon, const char *tip, void (*cb)(UiNode *), intptr_t tag) {

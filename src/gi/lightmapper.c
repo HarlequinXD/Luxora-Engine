@@ -197,7 +197,7 @@ static LxVec3 lm_sphere(uint32_t *s) {
     float z = 1.0f - 2.0f * lm_rnd(s), r = sqrtf(lx_maxf(0.0f, 1.0f - z * z)), ph = 2.0f * LX_PI * lm_rnd(s);
     return lx_v3(r * cosf(ph), r * sinf(ph), z);
 }
-/* adds light from direction d into L1 SH (L0, y, z, x per channel), as the photon GI stores it */
+/* adds light from direction d into L1 SH (L0, y, z, x per channel), as the GI stores it */
 static void sh_add(float *sh, LxVec3 d, LxVec3 c) {
     float y[4] = {0.282095f, 0.488603f * d.y, 0.488603f * d.z, 0.488603f * d.x};
     for (int k = 0; k < 4; k++) { sh[k] += c.x * y[k]; sh[4 + k] += c.y * y[k]; sh[8 + k] += c.z * y[k]; }
