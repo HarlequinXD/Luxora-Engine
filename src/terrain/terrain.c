@@ -903,6 +903,7 @@ static void refresh_layers(TData *d) {
         if (m) h = hash_bytes(h, m, sizeof *m);   /* a material edited in its inspector shows at once */
     }
     for (int l = 0; l < NL; l++) d->gpu.tiling[l] = l < count && t->layers[l].tiling > 0.05f ? t->layers[l].tiling : 4.0f;
+    d->gpu.parallax_depth = lx_clampf(t->parallax_depth, 0.0f, 0.5f);
     if (h == d->layers_hash && d->gpu_a) return;
     d->layers_hash = h;
     int S = TEX;
@@ -1032,6 +1033,7 @@ LxTerrainComponent *lx_terrain_component_ensure(LxScene *s, LxEntity e) {
         t->grass_height = 0.45f;
         t->grass_color = lx_v3(0.32f, 0.5f, 0.16f);
         t->grass_distance = 60;
+        t->parallax_depth = 0.06f;
         t->edit_layer_count = 1;
         lx_strcpy(t->edit_layers[0].name, sizeof t->edit_layers[0].name, "Base");
         t->edit_layers[0].visible = true;

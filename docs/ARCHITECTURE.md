@@ -6,7 +6,7 @@ This document explains how each system works today, its real limits, and what co
 
 ```
 platform pump → input update → scene simulate (behaviours, crowds) → audio update
-→ renderer.begin_frame → render_scene (GI update, cull, shadows, PBR, tonemap) → UI → end_frame
+→ renderer.begin_frame → render_scene (GI update, cull, shadows, PBR, AO, bloom, sun shafts, final image) → UI → end_frame
 ```
 
 Two frames are in flight. Per-frame resources (UBO slices, the instance stream, UI buffers and GI staging) are ring-buffered, so the CPU never writes data the GPU is still reading.
@@ -19,6 +19,11 @@ Two frames are in flight. Per-frame resources (UBO slices, the instance stream, 
 - **Lightmapper** (`src/gi/lightmapper.c`, `shaders/lm_bake.comp`): each Static object with lightmap UVs gets a square tile in a lightmap atlas, sized by its surface area and the scene's texels per unit. Every texel is placed on its mesh (closest point of the nearest triangle, so edge texels are covered) and path traced through the static-geometry BVH: Baked lights straight onto the texel (with soft shadows from the light's radius or the sun's size), then a path collecting sky light, glow and the light of Mixed and Baked lights at every bounce. Texels that mostly see the back of geometry are inside something; they are thrown away and filled from their neighbours. Results are irradiance plus the main light direction (a Unity-style directional map); a joint bilateral filter guided by normals, positions and luminance denoises. Atlases are saved as half-float `.lxlm` files under `Assets/Lightmaps/<scene>/`, and each object stores its tile. One sample per texel per pass, on the GPU (compute, one thread per texel) or on all CPU cores with the same code; the editor bakes a slice per frame. In shading, lightmapped surfaces take their diffuse indirect (and all of a Baked light's light) from the lightmap; Mixed lights still light them in real time.
 - **Shadows**: up to four cascades, practical split scheme, bounding spheres, texel snapping to remove shimmer, 3×3 PCF on a `sampler2DArrayShadow`.
 - **Shading**: GGX + Smith + Schlick Cook-Torrance. Normal maps use per-vertex tangents. Indirect diffuse comes from the GI volume; indirect specular is an analytic env-BRDF on the sky, attenuated by GI occlusion.
+- **Ambient occlusion** (`shaders/ao.frag`, `ao_apply.frag`): when on, the main pass also writes the ambient light (diffuse bounce and sky light plus half of the probe reflections) to a fourth target. A half-resolution pass samples 12 points in the hemisphere above each pixel against the depth buffer; a full-resolution pass blurs it with depth-aware weights and subtracts `ambient × occlusion` from the picture, so direct light from the sun and lamps is never darkened.
+- **Bloom** (`bloom_down.frag`, `bloom_up.frag`): up to six half-size levels made with a 13-tap filter (the first averages by brightness so lone hot pixels don't flicker), then added back up level by level with a 3×3 tent. The final image mixes in the average of the levels, with no threshold, as a lens would.
+- **Sun shafts** (`godrays.frag`): the sun's position on screen is worked out on the CPU, faded as it leaves the screen, turns away or sets. At half resolution each pixel marches 40 steps towards it and gathers the open sky near the sun (depth at the far plane), so leaves, clouds and window frames leave streaks.
+- **Final image** (`tonemap.frag`): shafts and bloom, exposure, white balance, vignette and colour fringes, ACES, contrast and saturation, then film grain. Asset thumbnails skip the lens effects. All of these are project graphics settings (Camera & Lens).
+- **The sun's disc** is drawn four times its real angular size (0.0372 rad radius), at a brightness that blooms without swamping the picture.
 - **Shaders** are GLSL 450 compiled to SPIR-V by `tools/compile_shaders.py`. The result is committed, so builds need no shader compiler.
 
 ## Day-night sky and weather
@@ -46,6 +51,7 @@ Two frames are in flight. Per-frame resources (UBO slices, the instance stream, 
 - **Edit layers** ("Sculpt Layers" in the editor): each chunk keeps one height field per layer on top of the Base; what shows is the Base plus each visible layer times its strength. Brushes write to the active layer; Collapse merges them.
 - **Undo**: a stroke (begin … end) stores the chunks it touched. The component's `revision` is saved with the scene, so the editor's text-snapshot undo restores it, and the terrain seeks its history to match.
 - **Paint**: six layers, each from a plain image (plus an optional normal map) or a material. Weights ride in the vertex (uv: 0-1, uv2: 2-3, tangent.w: 4; layer 5 is the remainder) and slope or height rules are applied as meshes are built. The shader (`MF_TERRAIN`) samples each layer's maps from texture arrays (set bindings 6 and 7) triplanar and blends by height.
+- **Relief (parallax)**: seen from above, the ground is ray-marched through the height of the layers that show at that point (each layer's height map, or its brightness when it has none), up to the terrain's relief depth in metres, then marched towards the sun for its own small shadows. It fades out past 25-45 m and on steep slopes.
 - **Grass and scatter** are made per loaded chunk from the paint: grass as instanced tufts that sway (instance `lm.w = -2`), scatter as prefab instances. Both are generated objects like the chunks.
 - Live GI builds its distance fields from LOD2 of each chunk.
 

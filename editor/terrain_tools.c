@@ -743,6 +743,10 @@ static void paint_mode(UiNode *sec, LxTerrainComponent *t) {
     } else {
         small_hint(c, "The first texture covers all the ground nothing else does.");
     }
+    UiNode *rc = card(sec, "Relief");
+    slide_row(rc, "Depth (m)", &t->parallax_depth, 0, 0.3f, true);
+    small_hint(rc, "How deep the textures look up close: stones stand out of the soil and cracks sink in, with their own "
+                   "little shadows. The lighter parts of each texture (or its height map) are the high parts. 0 = flat.");
     if (g_tool == TT_PAINT) brush_card(sec, true);
 }
 

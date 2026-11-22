@@ -8,8 +8,11 @@
  *   5. HDR forward PBR pass: sky, opaque geometry (+ normal/roughness/reflection-weight targets for SSR)
  *   6. screen-space reflections: half-res trace, then a composite that replaces probe reflections where
  *      the ray hit something on screen; editor grid and selection outline go on top
- *   7. ACES tonemap into an LDR target (editor viewport) or straight into the swapchain
- *   8. UI pass on the swapchain (editor)
+ *   7. screen-space ambient occlusion (half res, taken off the ambient light only), bloom (a chain of half-size
+ *      levels down and back up), sun shafts (half res, marched towards the sun on screen)
+ *   8. the final image: shafts + bloom, exposure, lens, ACES, colour grading, grain - into an LDR target (editor
+ *      viewport) or straight into the swapchain
+ *   9. UI pass on the swapchain (editor)
  */
 #include "../lx_internal.h"
 #include "vk.h"
@@ -25,6 +28,7 @@
 #define PROBE_SLOTS 5            /* 0: automatic environment probe, 1..4: Reflection Probe objects */
 #define PROBE_MAX_MIPS 7
 #define MAX_UI_TEXTURES 1024
+#define BLOOM_LEVELS 6           /* the first at half resolution, each next half again */
 
 /* ------------------------------------------------------------------ types */
 typedef struct GpuBuffer { VkBuffer buf; VkDeviceMemory mem; VkDeviceSize size; void *mapped; } GpuBuffer;
@@ -55,6 +59,10 @@ struct LxRenderTarget {
     int sw, sh;                     /* half-res size */
     VkDescriptorSet hdr_set, ssr_trace_set, ssr_comp_set;
     uint32_t ui_tex;
+    /* after the main pass: ambient light (what AO darkens), occlusion and sun shafts (half res), bloom levels */
+    GpuImage gamb, ao, rays, bloom[BLOOM_LEVELS];
+    int bw[BLOOM_LEVELS], bh[BLOOM_LEVELS], bloom_n;
+    VkDescriptorSet ao_set, ao_apply_set, rays_set, tone_set, bloom_down_set[BLOOM_LEVELS], bloom_up_set[BLOOM_LEVELS];
 };
 
 typedef struct UiTex { bool used, owned; GpuImage img; VkDescriptorSet set; int mode; } UiTex;
@@ -164,7 +172,10 @@ static struct {
     VkPipelineLayout pbr_layout, shadow_layout, scene_only_layout, outline_layout, tonemap_layout, ui_layout, ssr_pipe_layout,
         filter_layout;
     VkSampler linear_repeat, linear_clamp, shadow_sampler, point_clamp, cube_sampler;
-    VkFormat gnormal_format, gspec_format;
+    VkFormat gnormal_format, gspec_format, gamb_format;
+    VkDescriptorSetLayout post_set_layout;   /* four input pictures */
+    VkPipelineLayout post_layout;            /* scene + inputs, 64 bytes of numbers */
+    VkPipeline ao, ao_apply, bloom_down, bloom_up, godrays;
     /* pipelines */
     VkPipeline pbr, shadow, sky, grid, outline, tonemap_ldr, tonemap_swap, ui, precip;
     VkPipeline pbr_mrt, sky_mrt, pbr_probe, probe_filter, ssr_trace, ssr_composite;
@@ -454,7 +465,7 @@ typedef struct PipeDesc {
     VkFormat color, depth;
     bool depth_test, depth_write, blend, depth_bias;
     bool additive;           /* ONE + ONE (signed: the SSR composite subtracts too) */
-    int color_count;         /* 3 = main-pass MRT (colour, normal, reflection weight) */
+    int color_count;         /* 4 = main-pass MRT (colour, normal, reflection weight, ambient light) */
     VkCompareOp compare;
     VkCullModeFlags cull;
 } PipeDesc;
@@ -522,7 +533,7 @@ static VkPipeline pipeline_create(const PipeDesc *d) {
     ds.depthTestEnable = d->depth_test;
     ds.depthWriteEnable = d->depth_write;
     ds.depthCompareOp = d->compare ? d->compare : VK_COMPARE_OP_LESS_OR_EQUAL;
-    VkPipelineColorBlendAttachmentState cbs_arr[3];
+    VkPipelineColorBlendAttachmentState cbs_arr[4];
     memset(cbs_arr, 0, sizeof cbs_arr);
     VkPipelineColorBlendAttachmentState cb;
     memset(&cb, 0, sizeof cb);
@@ -543,7 +554,7 @@ static VkPipeline pipeline_create(const PipeDesc *d) {
         cb.alphaBlendOp = VK_BLEND_OP_ADD;
     }
     uint32_t ncolor = d->color ? (d->color_count > 1 ? (uint32_t)d->color_count : 1u) : 0u;
-    VkFormat formats[3] = {d->color, R.gnormal_format, R.gspec_format};
+    VkFormat formats[4] = {d->color, R.gnormal_format, R.gspec_format, R.gamb_format};
     cbs_arr[0] = cb;
     /* every attachment must use identical blend state (no independentBlend requirement) */
     for (uint32_t i = 1; i < ncolor; i++) cbs_arr[i] = cb;
@@ -1524,6 +1535,14 @@ static void create_static_resources(void) {
     if (!format_supports(R.gnormal_format, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))
         R.gnormal_format = VK_FORMAT_R16G16B16A16_SFLOAT;
     R.gspec_format = VK_FORMAT_R8G8B8A8_UNORM;
+    R.gamb_format = VK_FORMAT_B10G11R11_UFLOAT_PACK32;   /* the ambient light, for ambient occlusion */
+    if (!format_supports(R.gamb_format, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))
+        R.gamb_format = R.hdr_format;
+    VkDescriptorSetLayoutBinding qb[4];
+    for (uint32_t i = 0; i < 4; i++) qb[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+    R.post_set_layout = set_layout(qb, 4);
+    VkDescriptorSetLayout post_sets[2] = {R.scene_layout, R.post_set_layout};
+    R.post_layout = pipe_layout(post_sets, 2, 64, VK_SHADER_STAGE_FRAGMENT_BIT);
 
     VkDescriptorSetLayout pbr_sets[3] = {R.scene_layout, R.material_layout, R.probe_layout};
     R.pbr_layout = pipe_layout(pbr_sets, 3, 96, VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -1554,7 +1573,7 @@ static void create_static_resources(void) {
     R.pbr_probe = pipeline_create(&p);
     p.cull = VK_CULL_MODE_BACK_BIT;
     p.fs = lx_spv_pbr_mrt_frag; p.fs_size = sizeof lx_spv_pbr_mrt_frag;
-    p.color_count = 3;
+    p.color_count = 4;
     R.pbr_mrt = pipeline_create(&p);
 
     memset(&p, 0, sizeof p);
@@ -1588,7 +1607,7 @@ static void create_static_resources(void) {
     p.depth_test = true; p.compare = VK_COMPARE_OP_LESS_OR_EQUAL;
     R.sky = pipeline_create(&p);
     p.fs = lx_spv_sky_mrt_frag; p.fs_size = sizeof lx_spv_sky_mrt_frag;
-    p.color_count = 3;   /* writes "no reflection" into the SSR targets */
+    p.color_count = 4;   /* writes "no reflection" and "no ambient light" into the extra targets */
     R.sky_mrt = pipeline_create(&p);
 
     memset(&p, 0, sizeof p);
@@ -1615,8 +1634,19 @@ static void create_static_resources(void) {
     memset(&p, 0, sizeof p);
     p.vs = lx_spv_fullscreen_vert; p.vs_size = sizeof lx_spv_fullscreen_vert;
     p.fs = lx_spv_tonemap_frag; p.fs_size = sizeof lx_spv_tonemap_frag;
-    p.layout = R.tonemap_layout; p.color = VK_FORMAT_R8G8B8A8_UNORM;
+    p.layout = R.post_layout; p.color = VK_FORMAT_R8G8B8A8_UNORM;
     R.tonemap_ldr = pipeline_create(&p);
+    /* ambient occlusion, bloom, sun shafts */
+    p.fs = lx_spv_ao_frag; p.fs_size = sizeof lx_spv_ao_frag; p.color = VK_FORMAT_R8_UNORM;
+    R.ao = pipeline_create(&p);
+    p.fs = lx_spv_bloom_down_frag; p.fs_size = sizeof lx_spv_bloom_down_frag; p.color = R.hdr_format;
+    R.bloom_down = pipeline_create(&p);
+    p.fs = lx_spv_godrays_frag; p.fs_size = sizeof lx_spv_godrays_frag;
+    R.godrays = pipeline_create(&p);
+    p.fs = lx_spv_bloom_up_frag; p.fs_size = sizeof lx_spv_bloom_up_frag; p.additive = true;
+    R.bloom_up = pipeline_create(&p);
+    p.fs = lx_spv_ao_apply_frag; p.fs_size = sizeof lx_spv_ao_apply_frag; p.depth = R.depth_format;   /* inside the overlay pass */
+    R.ao_apply = pipeline_create(&p);
 
     /* white + flat normal defaults */
     ImageDesc d = {1, 1, 1, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
@@ -1670,7 +1700,7 @@ static void create_swap_pipelines(void) {
     memset(&p, 0, sizeof p);
     p.vs = lx_spv_fullscreen_vert; p.vs_size = sizeof lx_spv_fullscreen_vert;
     p.fs = lx_spv_tonemap_frag; p.fs_size = sizeof lx_spv_tonemap_frag;
-    p.layout = R.tonemap_layout; p.color = R.swap_format;
+    p.layout = R.post_layout; p.color = R.swap_format;
     R.tonemap_swap = pipeline_create(&p);
     memset(&p, 0, sizeof p);
     p.vs = lx_spv_ui_vert; p.vs_size = sizeof lx_spv_ui_vert;
@@ -1737,12 +1767,13 @@ void lx_renderer_shutdown(void) {
     probes_destroy();
     image_destroy(&R.dummy_cube);
     VkPipeline pipes[] = {R.pbr, R.shadow, R.sky, R.grid, R.outline, R.tonemap_ldr, R.tonemap_swap, R.ui, R.precip,
-                          R.pbr_mrt, R.sky_mrt, R.pbr_probe, R.probe_filter, R.ssr_trace, R.ssr_composite};
+                          R.pbr_mrt, R.sky_mrt, R.pbr_probe, R.probe_filter, R.ssr_trace, R.ssr_composite,
+                          R.ao, R.ao_apply, R.bloom_down, R.bloom_up, R.godrays};
     for (size_t i = 0; i < sizeof pipes / sizeof pipes[0]; i++) if (pipes[i]) vkDestroyPipeline(R.device, pipes[i], NULL);
     VkPipelineLayout layouts[] = {R.pbr_layout, R.shadow_layout, R.scene_only_layout, R.outline_layout, R.tonemap_layout, R.ui_layout,
-                                  R.ssr_pipe_layout, R.filter_layout};
+                                  R.ssr_pipe_layout, R.filter_layout, R.post_layout};
     for (size_t i = 0; i < sizeof layouts / sizeof layouts[0]; i++) vkDestroyPipelineLayout(R.device, layouts[i], NULL);
-    VkDescriptorSetLayout set_layouts[] = {R.scene_layout, R.material_layout, R.tex_layout, R.probe_layout, R.ssr_layout};
+    VkDescriptorSetLayout set_layouts[] = {R.scene_layout, R.material_layout, R.tex_layout, R.probe_layout, R.ssr_layout, R.post_set_layout};
     for (size_t i = 0; i < sizeof set_layouts / sizeof set_layouts[0]; i++) vkDestroyDescriptorSetLayout(R.device, set_layouts[i], NULL);
     vkDestroyDescriptorPool(R.device, R.desc_pool, NULL);
     VkSampler samplers[] = {R.linear_repeat, R.linear_clamp, R.shadow_sampler, R.point_clamp, R.cube_sampler};
@@ -2033,6 +2064,112 @@ void lx_ui_texture_free(uint32_t id) {
 }
 
 /* ------------------------------------------------------------------ render targets */
+static void post_set(VkDescriptorSet set, VkImageView a, VkSampler sa, VkImageLayout la, VkImageView b, VkSampler sb, VkImageLayout lb,
+                     VkImageView c, VkSampler sc, VkImageLayout lc) {
+    const VkImageLayout RO = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    write_image(set, 0, a ? a : R.white.view, a ? sa : R.linear_clamp, a ? la : RO);
+    write_image(set, 1, b ? b : R.white.view, b ? sb : R.linear_clamp, b ? lb : RO);
+    write_image(set, 2, c ? c : R.white.view, c ? sc : R.linear_clamp, c ? lc : RO);
+    write_image(set, 3, R.white.view, R.linear_clamp, RO);
+}
+/* the pictures after the main pass: ambient light, occlusion, sun shafts, the bloom levels, and their input sets */
+static void post_alloc(LxRenderTarget *rt) {
+    const VkImageLayout RO = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, DRO = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    VkImageUsageFlags use = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ImageDesc d = {(uint32_t)rt->iw, (uint32_t)rt->ih, 1, 1, 1, R.gamb_format, use, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_2D, false, 0};
+    image_create(&rt->gamb, &d);
+    d.w = (uint32_t)rt->sw; d.h = (uint32_t)rt->sh; d.fmt = VK_FORMAT_R8_UNORM;
+    image_create(&rt->ao, &d);
+    d.fmt = R.hdr_format;
+    image_create(&rt->rays, &d);
+    int w = rt->iw, h = rt->ih;
+    rt->bloom_n = 0;
+    for (int i = 0; i < BLOOM_LEVELS; i++) {
+        w = w > 1 ? w / 2 : 1;
+        h = h > 1 ? h / 2 : 1;
+        rt->bw[i] = w; rt->bh[i] = h;
+        d.w = (uint32_t)w; d.h = (uint32_t)h;
+        image_create(&rt->bloom[i], &d);
+        rt->bloom_n++;
+        if (w <= 4 || h <= 4) break;
+    }
+    rt->ao_set = alloc_set(R.post_set_layout);
+    post_set(rt->ao_set, rt->depth.view, R.point_clamp, DRO, rt->gnormal.view, R.point_clamp, RO, 0, 0, 0);
+    rt->ao_apply_set = alloc_set(R.post_set_layout);
+    post_set(rt->ao_apply_set, rt->ao.view, R.linear_clamp, RO, rt->depth.view, R.point_clamp, DRO, rt->gamb.view, R.point_clamp, RO);
+    rt->rays_set = alloc_set(R.post_set_layout);
+    post_set(rt->rays_set, rt->hdr.view, R.linear_clamp, RO, rt->depth.view, R.point_clamp, DRO, 0, 0, 0);
+    rt->tone_set = alloc_set(R.post_set_layout);
+    post_set(rt->tone_set, rt->hdr.view, R.linear_clamp, RO, rt->bloom[0].view, R.linear_clamp, RO, rt->rays.view, R.linear_clamp, RO);
+    for (int i = 0; i < rt->bloom_n; i++) {
+        rt->bloom_down_set[i] = alloc_set(R.post_set_layout);
+        post_set(rt->bloom_down_set[i], i ? rt->bloom[i - 1].view : rt->hdr.view, R.linear_clamp, RO, 0, 0, 0, 0, 0, 0);
+        rt->bloom_up_set[i] = alloc_set(R.post_set_layout);
+        post_set(rt->bloom_up_set[i], rt->bloom[i].view, R.linear_clamp, RO, 0, 0, 0, 0, 0, 0);
+    }
+    /* sampled before their first pass writes them (the final image reads shafts and bloom even when they're off) */
+    VkCommandBuffer cmd = one_shot_begin();
+    GpuImage *all[3 + BLOOM_LEVELS] = {&rt->ao, &rt->rays, &rt->gamb};
+    int n = 3;
+    for (int i = 0; i < rt->bloom_n; i++) all[n++] = &rt->bloom[i];
+    VkClearColorValue zero = {{0, 0, 0, 0}};
+    VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    for (int i = 0; i < n; i++) {
+        image_barrier(cmd, all[i]->img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, 0, 1, 1);
+        vkCmdClearColorImage(cmd, all[i]->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &range);
+        image_barrier(cmd, all[i]->img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, RO, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                      VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, 0, 1, 1);
+    }
+    one_shot_end(cmd);
+}
+static void post_free(LxRenderTarget *rt) {
+    image_destroy(&rt->gamb);
+    image_destroy(&rt->ao);
+    image_destroy(&rt->rays);
+    for (int i = 0; i < rt->bloom_n; i++) {
+        image_destroy(&rt->bloom[i]);
+        VkDescriptorSet two[2] = {rt->bloom_down_set[i], rt->bloom_up_set[i]};
+        for (int k = 0; k < 2; k++) if (two[k]) vkFreeDescriptorSets(R.device, R.desc_pool, 1, &two[k]);
+        rt->bloom_down_set[i] = rt->bloom_up_set[i] = VK_NULL_HANDLE;
+    }
+    rt->bloom_n = 0;
+    VkDescriptorSet sets[4] = {rt->ao_set, rt->ao_apply_set, rt->rays_set, rt->tone_set};
+    for (int i = 0; i < 4; i++) if (sets[i]) vkFreeDescriptorSets(R.device, R.desc_pool, 1, &sets[i]);
+    rt->ao_set = rt->ao_apply_set = rt->rays_set = rt->tone_set = VK_NULL_HANDLE;
+}
+/* one full-screen pass into `dst` (w x h): load keeps what's there (for adding) */
+static void post_pass(VkCommandBuffer cmd, GpuImage *dst, int w, int h, bool load, VkPipeline pipe, VkDescriptorSet scene, uint32_t ubo_off,
+                      VkDescriptorSet in, const float pc[16]) {
+    image_barrier(cmd, dst->img, VK_IMAGE_ASPECT_COLOR_BIT, load ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT, 0, 1, 1);
+    VkRenderingAttachmentInfo a = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    a.imageView = dst->view;
+    a.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    a.loadOp = load ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo ri = {VK_STRUCTURE_TYPE_RENDERING_INFO};
+    ri.renderArea.extent.width = (uint32_t)w;
+    ri.renderArea.extent.height = (uint32_t)h;
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = 1;
+    ri.pColorAttachments = &a;
+    vkCmdBeginRendering(cmd, &ri);
+    VkViewport vp = {0, 0, (float)w, (float)h, 0, 1};
+    VkRect2D sc = {{0, 0}, {(uint32_t)w, (uint32_t)h}};
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    VkDescriptorSet sets[2] = {scene, in};
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.post_layout, 0, 2, sets, 1, &ubo_off);
+    vkCmdPushConstants(cmd, R.post_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 64, pc);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRendering(cmd);
+    image_barrier(cmd, dst->img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                  VK_ACCESS_SHADER_READ_BIT, 0, 1, 1);
+}
 static void target_alloc(LxRenderTarget *rt, bool with_ldr) {
     float scale = lx_clampf(R.settings.render_scale, 0.25f, 2.0f);
     rt->iw = (int)((float)rt->w * scale); if (rt->iw < 1) rt->iw = 1;
@@ -2067,6 +2204,7 @@ static void target_alloc(LxRenderTarget *rt, bool with_ldr) {
     }
     write_image(rt->ssr_trace_set, 0, rt->hdr.view, R.linear_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     write_image(rt->ssr_comp_set, 4, rt->ssr.view, R.linear_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    post_alloc(rt);
     if (with_ldr) {
         ImageDesc ld = {(uint32_t)rt->w, (uint32_t)rt->h, 1, 1, 1, VK_FORMAT_R8G8B8A8_UNORM,
                         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
@@ -2087,6 +2225,7 @@ static void target_alloc(LxRenderTarget *rt, bool with_ldr) {
 }
 
 static void target_free(LxRenderTarget *rt) {
+    post_free(rt);
     image_destroy(&rt->hdr);
     image_destroy(&rt->depth);
     image_destroy(&rt->ldr);
@@ -2393,6 +2532,7 @@ static void draw_batches(VkCommandBuffer cmd, const DrawList *dl, VkBuffer inst,
             if (tl) {   /* each layer's tiling (metres a repeat covers), how many layers */
                 for (int l = 0; l < 6; l++) pc[16 + l] = tl->tiling[l] > 0.05f ? tl->tiling[l] : 4.0f;
                 pc[22] = (float)tl->count;
+                pc[23] = tl->parallax_depth;
             }
             vkCmdPushConstants(cmd, R.pbr_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 96, pc);
         }
@@ -2929,7 +3069,13 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
         }
     } else lx_render_target_resize(target, target->w, target->h); /* picks up render-scale changes */
     LxRenderTarget *rt = target ? target : R.backbuffer;
-    LxGraphicsSettings *gs = &R.settings;
+    LxGraphicsSettings *gs = &R.settings, plain;
+    if (R.preview) {   /* asset thumbnails: no lens on them */
+        plain = R.settings;
+        plain.vignette = plain.film_grain = plain.chromatic_aberration = 0;
+        plain.godrays_enabled = false;
+        gs = &plain;
+    }
     if (gs->shadow_resolution != R.shadow_res || gs->shadow_cascades != R.shadow_layers) {
         vkDeviceWaitIdle(R.device);
         int layers = gs->shadow_cascades < 1 ? 1 : (gs->shadow_cascades > MAX_CASCADES ? MAX_CASCADES : gs->shadow_cascades);
@@ -3310,12 +3456,16 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     for (int i = 0; i < PROBE_SLOTS; i++) R.stats.probes_active += (gs->reflections_enabled && R.probes[i].used && R.probes[i].valid) ? 1 : 0;
 
     /* ---- main HDR pass ---- */
-    bool ssr = gs->ssr_enabled && view->proj.m[15] < 0.5f;              /* perspective views only */
+    bool persp = view->proj.m[15] < 0.5f;
+    bool ssr = gs->ssr_enabled && persp;              /* perspective views only */
+    bool ao = gs->ao_enabled && gs->ao_intensity > 0.0f && persp;
+    bool mrt = ssr || ao;                               /* the extra targets: normals, reflection weight, ambient light */
     bool precip = precip_drops + precip_flakes > 0;
-    bool post = ssr || view->highlight || view->draw_grid || precip;
-    if (ssr) {
-        GpuImage *g[2] = {&rt->gnormal, &rt->gspec};
-        for (int i = 0; i < 2; i++)
+    bool shafts_on = gs->godrays_enabled && gs->godrays_intensity > 0.0f && persp;   /* they read the depth buffer too */
+    bool post = mrt || shafts_on || view->highlight || view->draw_grid || precip;
+    if (mrt) {
+        GpuImage *g[3] = {&rt->gnormal, &rt->gspec, &rt->gamb};
+        for (int i = 0; i < 3; i++)
             image_barrier(cmd, g[i]->img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                           VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0, 1, 1);
@@ -3327,7 +3477,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
                   VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, 0,
                   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT, 0, 1, 1);
-    VkRenderingAttachmentInfo cas[3];
+    VkRenderingAttachmentInfo cas[4];
     memset(cas, 0, sizeof cas);
     VkRenderingAttachmentInfo ca = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     ca.imageView = rt->hdr.view;
@@ -3345,9 +3495,9 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     da.storeOp = post ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
     da.clearValue.depthStencil.depth = 1.0f;
     cas[0] = ca;
-    for (int i = 1; i < 3; i++) {
+    for (int i = 1; i < 4; i++) {
         cas[i].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        cas[i].imageView = i == 1 ? rt->gnormal.view : rt->gspec.view;
+        cas[i].imageView = i == 1 ? rt->gnormal.view : i == 2 ? rt->gspec.view : rt->gamb.view;
         cas[i].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         cas[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;   /* zero = "no reflection" (sky) */
         cas[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -3356,7 +3506,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     ri.renderArea.extent.width = (uint32_t)rt->iw;
     ri.renderArea.extent.height = (uint32_t)rt->ih;
     ri.layerCount = 1;
-    ri.colorAttachmentCount = ssr ? 3 : 1;
+    ri.colorAttachmentCount = mrt ? 4 : 1;
     ri.pColorAttachments = cas;
     ri.pDepthAttachment = &da;
     vkCmdBeginRendering(cmd, &ri);
@@ -3364,11 +3514,11 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     VkRect2D sc = {{0, 0}, {(uint32_t)rt->iw, (uint32_t)rt->ih}};
     vkCmdSetViewport(cmd, 0, 1, &vp);
     vkCmdSetScissor(cmd, 0, 1, &sc);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ssr ? R.pbr_mrt : R.pbr);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mrt ? R.pbr_mrt : R.pbr);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.pbr_layout, 2, 1, &R.probe_set, 0, NULL);
     draw_batches(cmd, &R.main_list, fr->inst.buf, true, fr->scene_set, ubo_off);
     /* the sky last, at the far plane: its pixels are the ones nothing covered */
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ssr ? R.sky_mrt : R.sky);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mrt ? R.sky_mrt : R.sky);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.scene_only_layout, 0, 1, &fr->scene_set, 1, &ubo_off);
     vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdEndRendering(cmd);
@@ -3382,13 +3532,21 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
         float ssr_pc[8] = {gs->ssr_max_distance > 0.5f ? gs->ssr_max_distance : 30.0f, gs->ssr_thickness > 0.01f ? gs->ssr_thickness : 0.35f,
                            (float)(gs->ssr_steps > 4 ? gs->ssr_steps : 24), gs->ssr_max_roughness > 0.05f ? gs->ssr_max_roughness : 0.6f,
                            (float)rt->iw, (float)rt->ih, (float)rt->sw, (float)rt->sh};
-        if (ssr) {
-            /* ---- SSR trace (half resolution) ---- */
-            GpuImage *in[3] = {&rt->hdr, &rt->gnormal, &rt->gspec};
+        if (mrt) {
+            GpuImage *in[3] = {&rt->gnormal, &rt->gspec, &rt->gamb};
             for (int i = 0; i < 3; i++)
                 image_barrier(cmd, in[i]->img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, 0, 1, 1);
+        }
+        float ao_pc[16] = {lx_clampf(gs->ao_radius, 0.05f, 10.0f), 0, 0, 0};
+        if (ao)   /* ---- ambient occlusion (half resolution) ---- */
+            post_pass(cmd, &rt->ao, rt->sw, rt->sh, false, R.ao, fr->scene_set, ubo_off, rt->ao_set, ao_pc);
+        if (ssr) {
+            /* ---- SSR trace (half resolution) ---- */
+            image_barrier(cmd, rt->hdr.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, 0, 1, 1);
             image_barrier(cmd, rt->ssr.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                           VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0, 1, 1);
@@ -3449,6 +3607,14 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
             vkCmdPushConstants(cmd, R.ssr_pipe_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, ssr_pc);
             vkCmdDraw(cmd, 3, 1, 0, 0);
         }
+        if (ao) {   /* the occlusion taken off the ambient light */
+            float pc[16] = {lx_clampf(gs->ao_intensity, 0.0f, 4.0f), 1.0f / (float)rt->sw, 1.0f / (float)rt->sh, 0};
+            VkDescriptorSet sets[2] = {fr->scene_set, rt->ao_apply_set};
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.ao_apply);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.post_layout, 0, 2, sets, 1, &ubo_off);
+            vkCmdPushConstants(cmd, R.post_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 64, pc);
+            vkCmdDraw(cmd, 3, 1, 0, 0);
+        }
         if (precip) {   /* rain and snow, depth-tested against the scene, blended over it */
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.precip);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.scene_only_layout, 0, 1, &fr->scene_set, 1, &ubo_off);
@@ -3487,8 +3653,53 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                   VK_ACCESS_SHADER_READ_BIT, 0, 1, 1);
 
-    /* ---- tonemap ---- */
-    float exposure[4] = {gs->exposure * env->exposure, 0, 0, 0};
+    /* ---- bloom: down to small levels and back up, each level adding the wider glow below it ---- */
+    bool bloom = gs->bloom_enabled && gs->bloom_intensity > 0.0f && rt->bloom_n > 0;
+    if (bloom) {
+        for (int i = 0; i < rt->bloom_n; i++) {
+            int sw = i ? rt->bw[i - 1] : rt->iw, sh = i ? rt->bh[i - 1] : rt->ih;
+            float pc[16] = {1.0f / (float)sw, 1.0f / (float)sh, i == 0 ? 1.0f : 0.0f, 0};
+            post_pass(cmd, &rt->bloom[i], rt->bw[i], rt->bh[i], false, R.bloom_down, fr->scene_set, ubo_off, rt->bloom_down_set[i], pc);
+        }
+        for (int i = rt->bloom_n - 1; i > 0; i--) {
+            float pc[16] = {1.0f / (float)rt->bw[i], 1.0f / (float)rt->bh[i], 0, 0};
+            post_pass(cmd, &rt->bloom[i - 1], rt->bw[i - 1], rt->bh[i - 1], true, R.bloom_up, fr->scene_set, ubo_off, rt->bloom_up_set[i], pc);
+        }
+    }
+    /* ---- sun shafts: where the sun is on screen, and how much of it shows ---- */
+    float shafts = 0;
+    float sun_uv[2] = {0, 0};
+    if (shafts_on && (ubo.sun_color[3] > 0.5f || ubo.sky_params[0] > 0.5f)) {
+        LxVec3 to_sun = ubo.sky_params[0] > 0.5f ? lx_v3(ubo.sky_sun[0], ubo.sky_sun[1], ubo.sky_sun[2])
+                                                 : lx_v3(-ubo.sun_dir[0], -ubo.sun_dir[1], -ubo.sun_dir[2]);
+        to_sun = lx_norm3(to_sun);
+        const float *m = ubo.view_proj.m;
+        float cx = m[0] * to_sun.x + m[4] * to_sun.y + m[8] * to_sun.z;
+        float cy = m[1] * to_sun.x + m[5] * to_sun.y + m[9] * to_sun.z;
+        float cw = m[3] * to_sun.x + m[7] * to_sun.y + m[11] * to_sun.z;
+        LxVec3 fwd = lx_v3(-view->view.m[2], -view->view.m[6], -view->view.m[10]);
+        float facing = lx_dot3(lx_norm3(fwd), to_sun);
+        if (cw > 1e-4f && facing > 0.0f) {
+            sun_uv[0] = cx / cw * 0.5f + 0.5f;
+            sun_uv[1] = 0.5f - cy / cw * 0.5f;
+            float out = fmaxf(fmaxf(-sun_uv[0], sun_uv[0] - 1.0f), fmaxf(-sun_uv[1], sun_uv[1] - 1.0f));   /* how far off screen */
+            float vis = lx_clampf(1.0f - out / 0.35f, 0.0f, 1.0f) * lx_clampf(facing * 3.0f, 0.0f, 1.0f);
+            vis *= lx_clampf(to_sun.y * 12.0f + 0.3f, 0.0f, 1.0f);   /* fades as it sets */
+            shafts = vis * lx_clampf(gs->godrays_intensity, 0.0f, 4.0f) * 0.25f;
+        }
+    }
+    if (shafts > 0.0f) {
+        float pc[16] = {sun_uv[0], sun_uv[1], shafts, (float)rt->iw / (float)(rt->ih > 0 ? rt->ih : 1)};
+        post_pass(cmd, &rt->rays, rt->sw, rt->sh, false, R.godrays, fr->scene_set, ubo_off, rt->rays_set, pc);
+    }
+
+    /* ---- the final image ---- */
+    float tone_pc[16] = {gs->exposure * env->exposure, bloom ? lx_clampf(gs->bloom_intensity, 0.0f, 1.0f) * 0.15f : 0.0f,
+                         shafts > 0.0f ? 1.0f : 0.0f, (float)fmod(lx_time() - R.start_time, 1000.0),
+                         lx_clampf(gs->vignette, 0.0f, 1.0f), lx_clampf(gs->film_grain, 0.0f, 1.0f),
+                         lx_clampf(gs->chromatic_aberration, 0.0f, 1.0f), (float)rt->w / (float)(rt->h > 0 ? rt->h : 1),
+                         gs->contrast > 0.0f ? lx_clampf(gs->contrast, 0.5f, 2.0f) : 1.0f, lx_clampf(gs->saturation, 0.0f, 2.0f),
+                         lx_clampf(gs->temperature, -1.0f, 1.0f), 0, 0, 0, 0, 0};
     if (target) {
         image_barrier(cmd, rt->ldr.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -3510,8 +3721,9 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
         vkCmdSetViewport(cmd, 0, 1, &lvp);
         vkCmdSetScissor(cmd, 0, 1, &lsc);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.tonemap_ldr);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.tonemap_layout, 0, 1, &rt->hdr_set, 0, NULL);
-        vkCmdPushConstants(cmd, R.tonemap_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, exposure);
+        VkDescriptorSet tsets[2] = {fr->scene_set, rt->tone_set};
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.post_layout, 0, 2, tsets, 1, &ubo_off);
+        vkCmdPushConstants(cmd, R.post_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 64, tone_pc);
         vkCmdDraw(cmd, 3, 1, 0, 0);
         vkCmdEndRendering(cmd);
         image_barrier(cmd, rt->ldr.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -3520,8 +3732,9 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     } else {
         begin_swap_pass(cmd, false, lx_v4(0, 0, 0, 1));
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.tonemap_swap);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.tonemap_layout, 0, 1, &rt->hdr_set, 0, NULL);
-        vkCmdPushConstants(cmd, R.tonemap_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, exposure);
+        VkDescriptorSet tsets[2] = {fr->scene_set, rt->tone_set};
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.post_layout, 0, 2, tsets, 1, &ubo_off);
+        vkCmdPushConstants(cmd, R.post_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 64, tone_pc);
         vkCmdDraw(cmd, 3, 1, 0, 0);
         vkCmdEndRendering(cmd);
     }

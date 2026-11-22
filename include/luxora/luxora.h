@@ -615,6 +615,7 @@ typedef struct LxTerrainComponent {
     float grass_height;           /* metres */
     LxVec3 grass_color;
     float grass_distance;         /* metres from the camera */
+    float parallax_depth;         /* metres the ground's relief reaches down (stones, cracks; 0 = flat) */
     int scatter_count;
     LxTerrainScatter scatter[LX_TERRAIN_SCATTERS];
     int edit_layer_count;         /* edit layers stack on the Base (layer 0): sculpt a road on its own layer, hide or erase it later */
@@ -1284,6 +1285,21 @@ typedef struct LxGraphicsSettings {
     float ssr_max_distance;     /* world units */
     float ssr_thickness;        /* how thick on-screen surfaces are assumed to be */
     float ssr_max_roughness;    /* rougher surfaces use probes only */
+    /* screen-space ambient occlusion: small creases and contact darkening (only the bounce and sky light darkens) */
+    bool ao_enabled;
+    float ao_radius;            /* world units */
+    float ao_intensity;         /* 0..2 */
+    /* camera and lens */
+    bool bloom_enabled;         /* bright light glows over its surroundings */
+    float bloom_intensity;      /* 0..1 */
+    bool godrays_enabled;       /* shafts of light from the sun through gaps (trees, clouds, windows) */
+    float godrays_intensity;    /* 0..2 */
+    float vignette;             /* 0..1: darker corners */
+    float film_grain;           /* 0..1 */
+    float chromatic_aberration; /* 0..1: colour fringes towards the edges */
+    float contrast;             /* 1 = unchanged */
+    float saturation;           /* 1 = unchanged */
+    float temperature;          /* -1 cool .. +1 warm */
 } LxGraphicsSettings;
 
 typedef struct LxRenderStats {

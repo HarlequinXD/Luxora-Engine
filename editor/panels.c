@@ -1404,7 +1404,7 @@ static const char *PROBE_RES[] = {"64", "128", "256", "512"};
 static int g_quality, g_shadow_res_idx, g_probe_res_idx;
 static bool g_open_refl = true;
 static LxScene *g_lighting_scene;
-static bool g_open_env = true, g_open_gi = true, g_open_shadow = true;
+static bool g_open_env = true, g_open_gi = true, g_open_shadow = true, g_open_post = true;
 
 static void graphics_changed(UiNode *n) {
     LX_UNUSED(n);
@@ -1749,6 +1749,21 @@ static void lighting_frame(UiNode *body) {
     UiNode *rr = ui_button(ui, sec, "Re-capture Probes", probe_recapture);
     rr->icon = UI_ICON_REFRESH;
     rr->h = 26;
+
+    sec = ed_section(body, UI_ICON_CAMERA, "Camera & Lens (project)", &g_open_post, NULL);
+    bool_row(sec, "Ambient Occlusion", &g->ao_enabled)->on_change = graphics_changed;
+    float_row(sec, "AO Radius", &g->ao_radius, 0.05f, 0.05f, 10)->on_change = graphics_changed;
+    slider_row(sec, "AO Strength", &g->ao_intensity, 0, 2)->on_change = graphics_changed;
+    bool_row(sec, "Bloom", &g->bloom_enabled)->on_change = graphics_changed;
+    slider_row(sec, "Bloom Strength", &g->bloom_intensity, 0, 1)->on_change = graphics_changed;
+    bool_row(sec, "Sun Shafts", &g->godrays_enabled)->on_change = graphics_changed;
+    slider_row(sec, "Sun Shaft Strength", &g->godrays_intensity, 0, 2)->on_change = graphics_changed;
+    slider_row(sec, "Vignette", &g->vignette, 0, 1)->on_change = graphics_changed;
+    slider_row(sec, "Colour Fringes", &g->chromatic_aberration, 0, 1)->on_change = graphics_changed;
+    slider_row(sec, "Film Grain", &g->film_grain, 0, 1)->on_change = graphics_changed;
+    slider_row(sec, "Contrast", &g->contrast, 0.5f, 2)->on_change = graphics_changed;
+    slider_row(sec, "Saturation", &g->saturation, 0, 2)->on_change = graphics_changed;
+    slider_row(sec, "Temperature", &g->temperature, -1, 1)->on_change = graphics_changed;
 
     sec = ed_section(body, UI_ICON_LAYERS, "Shadows & Detail (project)", &g_open_shadow, NULL);
     row = ed_prop_row(sec, "Resolution");

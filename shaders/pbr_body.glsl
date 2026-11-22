@@ -13,6 +13,7 @@ layout(location = 0) out vec4 o_color;
 #if LX_MRT
 layout(location = 1) out vec4 o_normal;  // world normal * 0.5 + 0.5
 layout(location = 2) out vec4 o_spec;    // rgb: weight of the reflected light, a: roughness
+layout(location = 3) out vec4 o_ambient; // the bounce and sky light on screen: what ambient occlusion darkens
 #endif
 
 layout(set = 1, binding = 0) uniform sampler2D u_albedo_map;
@@ -30,15 +31,27 @@ layout(push_constant) uniform Material {
     vec4 emissive;  // rgb, strength
     vec4 params2;   // height scale (0 = no parallax), ao strength, flags, -
     vec4 tile_a;    // terrain: metres one repeat of layers 0-3 covers
-    vec4 tile_b;    // terrain: layers 4-5, how many layers, -
+    vec4 tile_b;    // terrain: layers 4-5, how many layers, parallax depth (m, 0 = off)
 } m;
 
 const int MF_ROUGH_MAP = 1, MF_METAL_MAP = 2, MF_AO_MAP = 4, MF_SMOOTHNESS = 8, MF_PARALLAX_SHADOWS = 16, MF_TERRAIN = 32;
 
 /* Terrain: the vertices carry six layer weights (uv: 0-1, uv2: 2-3, tangent.w: 4, the rest: 5). Each layer is
    sampled from above in world space (or from three sides on steep slopes), and they are blended by height so rock
-   shows between grass rather than smearing into it. */
-void terrain_surface(vec3 ng, inout vec3 albedo, inout float rough, inout float ao, inout vec3 n) {
+   shows between grass rather than smearing into it.
+   Parallax: the ground seen from above is ray-marched through the blended layers' heights (stones stand out of the
+   soil, cracks sink in) and the result shadows itself from the sun. */
+float terrain_height(vec2 xz, float tb[6], float tiles[6], int count, vec2 gx, vec2 gy) {
+    float h = 0.0, wt = 0.0;
+    for (int l = 0; l < 6; l++) {
+        if (l >= count || tb[l] <= 0.0) continue;
+        float s = 1.0 / tiles[l];
+        h += textureGrad(u_layer_b, vec3(xz * s, float(l)), gx * s, gy * s).b * tb[l];
+        wt += tb[l];
+    }
+    return wt > 0.0 ? h / wt : 1.0;
+}
+void terrain_surface(vec3 ng, vec3 v, inout vec3 albedo, inout float rough, inout float ao, inout vec3 n, inout float shadow) {
     float w[6];
     w[0] = v_uv.x; w[1] = v_uv.y; w[2] = v_uv2.x; w[3] = v_uv2.y; w[4] = v_tangent.w;
     w[5] = max(1.0 - (w[0] + w[1] + w[2] + w[3] + w[4]), 0.0);
@@ -60,14 +73,56 @@ void terrain_surface(vec3 ng, inout vec3 albedo, inout float rough, inout float 
         score[l] = h * 0.6 + w[l];
         best = max(best, score[l]);
     }
+    float tb[6];
+    for (int l = 0; l < 6; l++) tb[l] = max(score[l] - (best - 0.25), 0.0);
+    // parallax on the ground seen from above: where the eye's ray meets the height field
+    vec2 top = p.xz;
+    float depth_m = m.tile_b.w * (1.0 - smoothstep(25.0, 45.0, v_view_depth)) * smoothstep(0.6, 0.9, bl.y);
+    float hit = 0.0;
+    if (depth_m > 0.001 && v.y > 0.02) {
+        float vy = max(v.y, 0.12);
+        float steps = mix(24.0, 8.0, clamp(v.y, 0.0, 1.0));
+        float layer = 1.0 / steps;
+        vec2 delta = -(v.xz / vy) * depth_m * layer;   // metres across per step down
+        vec2 cur = top, prev = top;
+        float d = 0.0, pd = 0.0;
+        float surf = 1.0 - terrain_height(cur, tb, tiles, count, dpx.xz, dpy.xz), psurf = surf;
+        for (int i = 0; i < 32 && d < surf; i++) {
+            prev = cur; psurf = surf; pd = d;
+            cur += delta;
+            d += layer;
+            surf = 1.0 - terrain_height(cur, tb, tiles, count, dpx.xz, dpy.xz);
+        }
+        float after = surf - d, before = psurf - pd;
+        float t = clamp(before / max(before - after, 1e-5), 0.0, 1.0);
+        hit = mix(pd, d, t);
+        top = mix(prev, cur, t);
+        // the bumps shadow each other from the sun
+        vec3 ls = -u.sun_dir.xyz;   // the same sun the lighting and shadow maps use
+        if (u.sun_color.w > 0.5 && ls.y > 0.0 && hit > 0.001) {
+            const int SS = 10;
+            float sl = hit / float(SS);
+            vec2 sd = (ls.xz / max(ls.y, 0.1)) * depth_m * sl;
+            float occl = 0.0;
+            vec2 q = top;
+            float dd = hit;
+            for (int i = 1; i <= SS; i++) {
+                q += sd;
+                dd -= sl;
+                float above = dd - (1.0 - terrain_height(q, tb, tiles, count, dpx.xz, dpy.xz));
+                occl = max(occl, above * (1.0 - float(i) / float(SS)) * 10.0);
+            }
+            shadow = 1.0 - clamp(occl, 0.0, 1.0) * bl.y;
+        }
+    }
     vec3 col = vec3(0.0), nrm = vec3(0.0);
     float r = 0.0, occ = 0.0, total = 0.0;
     for (int l = 0; l < 6; l++) {
-        float b = max(score[l] - (best - 0.25), 0.0);
+        float b = tb[l];
         if (b <= 0.0) continue;
         float s = 1.0 / tiles[l];
-        vec4 A = textureGrad(u_layer_a, vec3(p.xz * s, float(l)), dpx.xz * s, dpy.xz * s);
-        vec4 B = textureGrad(u_layer_b, vec3(p.xz * s, float(l)), dpx.xz * s, dpy.xz * s);
+        vec4 A = textureGrad(u_layer_a, vec3(top * s, float(l)), dpx.xz * s, dpy.xz * s);
+        vec4 B = textureGrad(u_layer_b, vec3(top * s, float(l)), dpx.xz * s, dpy.xz * s);
         vec3 lc = A.rgb * bl.y, ln = vec3(B.x * 2.0 - 1.0, 0.0, B.y * 2.0 - 1.0) * bl.y;
         float lr = A.a * bl.y, lo = B.a * bl.y;
         if (tri) {   // from the x and z sides
@@ -86,7 +141,7 @@ void terrain_surface(vec3 ng, inout vec3 albedo, inout float rough, inout float 
     if (total <= 0.0) return;
     albedo = col / total * v_tint.rgb;
     rough = clamp(r / total, 0.04, 1.0);
-    ao = occ / total;
+    ao = occ / total * (1.0 - hit * 0.35);   // deep cracks get less ambient light
     n = normalize(ng + nrm / total);
 }
 
@@ -451,7 +506,7 @@ void main() {
 
     vec3 n = ng;
     float nstrength = m.params.w;
-    if ((flags & MF_TERRAIN) != 0) { terrain_surface(ng, albedo, rough, ao, n); metallic = 0.0; nstrength = 0.0; }
+    if ((flags & MF_TERRAIN) != 0) { terrain_surface(ng, v, albedo, rough, ao, n, self_shadow); metallic = 0.0; nstrength = 0.0; }
     if (nstrength != 0.0) {
         vec3 tn = textureGrad(u_normal_map, uv, uv_dx, uv_dy).xyz * 2.0 - 1.0;
         if (nstrength < 0.0) tn.y = -tn.y;     // DirectX-style normal map
@@ -602,7 +657,8 @@ void main() {
     vec3 spec_env = env_brdf_approx(f0, rough, ndv);
     vec3 kd = (1.0 - spec_env) * (1.0 - metallic);
     if (u.sky_misc.z > 0.0) irradiance += vec3(0.7, 0.75, 0.9) * u.sky_misc.z * 1.5 * (0.45 + 0.55 * max(n.y, 0.0));   // lightning
-    color += kd * albedo / PI * irradiance * ao;
+    vec3 ambient_diffuse = kd * albedo / PI * irradiance * ao;
+    color += ambient_diffuse;
     // specular ambient: probes (or the sky), pre-filtered by roughness
     vec3 r = reflect(-v, n);
     float local_w;
@@ -637,5 +693,6 @@ void main() {
 #if LX_MRT
     o_normal = vec4(n * 0.5 + 0.5, 1.0);
     o_spec = vec4(spec_weight * (1.0 - fog), rough);
+    o_ambient = vec4((ambient_diffuse + spec_weight * env * 0.5) * (1.0 - fog), 1.0);
 #endif
 }

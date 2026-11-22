@@ -5,6 +5,7 @@ layout(location = 0) out vec4 o_color;
 #if LX_MRT
 layout(location = 1) out vec4 o_normal;
 layout(location = 2) out vec4 o_spec;
+layout(location = 3) out vec4 o_ambient;
 #endif
 
 /* ---- Day-night: the air lit by sun and moon in one march ---- */
@@ -203,11 +204,11 @@ vec3 dn_sky(vec3 dir) {
         space += dn_stars(dir) * u.sky_params.w * u.sky_misc.y;
         space += dn_moon(dir);
         float sc = dot(dir, u.sky_sun.xyz);
-        const float SR = 0.0093;
+        const float SR = 0.0372;   // the disc's angular radius: four times the real sun, it reads better on screen
         if (sc > cos(SR)) {
             float x = acos(clamp(sc, -1.0, 1.0)) / SR;
             float limb = 1.0 - 0.6 * (1.0 - sqrt(max(1.0 - x * x, 0.0)));
-            space += vec3(1.0) * 60.0 * limb * (u.sky_params.y / 3.5);
+            space += vec3(1.0) * 24.0 * limb * (u.sky_params.y / 3.5);   // bright enough to bloom, not to swamp the screen
         }
     }
     c += space * trans * cl.a * cl.a;   // a thin veil of cloud already hides a disc's edge
@@ -228,7 +229,7 @@ void main() {
         c = lx_sky_radiance(dir);
         if (u.sun_color.w > 0.5) {
             float s = max(dot(dir, -u.sun_dir.xyz), 0.0);
-            c += u.sun_color.rgb * (pow(s, 2000.0) * 40.0 + pow(s, 12.0) * 0.08);
+            c += u.sun_color.rgb * (pow(s, 125.0) * 16.0 + pow(s, 12.0) * 0.08);   // a disc four times the real sun's size
         }
     }
     if (lx_day_night() && u.weather_b.z > 0.0) {   // mist hides the horizon
@@ -239,5 +240,6 @@ void main() {
 #if LX_MRT
     o_normal = vec4(0.0);
     o_spec = vec4(0.0);   // the sky reflects nothing
+    o_ambient = vec4(0.0);   // nor does ambient occlusion darken it
 #endif
 }

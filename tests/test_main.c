@@ -1601,6 +1601,23 @@ static void test_terrain(void) {
     lx_terrain_height(s, 32, 32, &top);
     CHECK(top > 1.0f && lx_terrain_has_chunk(s, te, 1, 0) && t->revision == r_after, "redo brings it all back");
 
+    /* relief (parallax) depth: on by default, saved with the scene, handed to the renderer */
+    {
+        CHECK(t->parallax_depth > 0.01f, "the ground has relief by default (%.2f m)", t->parallax_depth);
+        t->parallax_depth = 0.12f;
+        lx_terrain_update(s, lx_v3(32, 0, 32), true);
+        LxEntityData *ed = lx_entity_data(s, te);
+        char *text = lx_scene_serialize(s);
+        CHECK(text && strstr(text, "terrain.parallax = 0.12"), "relief depth is saved");
+        LxScene *c = lx_scene_deserialize(text);
+        lx_free(text);
+        LxEntity ce = c ? lx_entity_find(c, lx_entity_data(s, te)->name) : 0;
+        LxTerrainComponent *ct = ce ? lx_get_terrain(c, ce) : NULL;
+        CHECK(ct && NEAR(ct->parallax_depth, 0.12f, 1e-4f), "...and loaded");
+        if (c) lx_scene_destroy(c);
+        (void)ed;
+    }
+
     /* paint, holes */
     LxTerrainBrush p = {LX_TERRAIN_PAINT, 6, 1, 0.3f, 0, 0, 2};
     for (int i = 0; i < 20; i++) lx_terrain_brush(s, te, lx_v3(100, 0, 10), &p, 0.05f);
@@ -2082,6 +2099,8 @@ static void test_project(void) {
     CHECK(!strcmp(q.name, "Sample Game") && q.build.scene_count == 1, "project fields");
     CHECK(!strcmp(q.build.android_package, "com.mystudio.samplegame"), "package id %s", q.build.android_package);
     q.graphics.gi_rays_per_frame = 12345;
+    q.graphics.ao_radius = 1.25f; q.graphics.bloom_intensity = 0.6f; q.graphics.godrays_enabled = false; q.graphics.temperature = -0.4f;
+    q.graphics.vignette = 0.5f; q.graphics.contrast = 1.2f;
     q.audio.speed_of_sound = 340.0f;
     q.build.target = LX_PLATFORM_ANDROID;
     lx_project_save(&q);
@@ -2089,6 +2108,11 @@ static void test_project(void) {
     lx_project_load(&r, p.root);
     CHECK(r.graphics.gi_rays_per_frame == 12345 && NEAR(r.audio.speed_of_sound, 340.0f, 1e-3f) && r.build.target == LX_PLATFORM_ANDROID,
           "settings round trip");
+    CHECK(NEAR(r.graphics.ao_radius, 1.25f, 1e-4f) && NEAR(r.graphics.bloom_intensity, 0.6f, 1e-4f) && !r.graphics.godrays_enabled &&
+          NEAR(r.graphics.temperature, -0.4f, 1e-4f) && NEAR(r.graphics.vignette, 0.5f, 1e-4f) && NEAR(r.graphics.contrast, 1.2f, 1e-4f),
+          "camera and lens settings round trip");
+    LxGraphicsSettings d = lx_graphics_defaults(2);
+    CHECK(d.ao_enabled && d.bloom_enabled && d.godrays_enabled && d.contrast == 1.0f && d.saturation == 1.0f, "High: AO, bloom and sun shafts on");
     char scene_path[LX_PATH_MAX];
     lx_path_join(scene_path, sizeof scene_path, p.assets, "Scenes/Main.lxscene");
     LxScene *s = lx_scene_load(scene_path);

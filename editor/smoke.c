@@ -883,8 +883,22 @@ static float g_ls_ambient;
 static LxEntity g_ls_suns[8];
 static int g_ls_nsun;
 static const LxVec3 LS_O = {1000, 0, 0};
+/* the picture checks compare brightness at points: lens effects (glow, darker corners, AO) stay out of them */
+static LxGraphicsSettings g_plain_keep;
+static void pictures_plain(bool on) {
+    LxGraphicsSettings *g = lx_graphics_settings();
+    if (on) {
+        g_plain_keep = *g;
+        g->ao_enabled = g->bloom_enabled = g->godrays_enabled = false;
+        g->vignette = g->film_grain = g->chromatic_aberration = 0;
+    } else {
+        g->ao_enabled = g_plain_keep.ao_enabled; g->bloom_enabled = g_plain_keep.bloom_enabled; g->godrays_enabled = g_plain_keep.godrays_enabled;
+        g->vignette = g_plain_keep.vignette; g->film_grain = g_plain_keep.film_grain; g->chromatic_aberration = g_plain_keep.chromatic_aberration;
+    }
+}
 static void s_ls_setup(void) {
     LxScene *s = ED.scene;
+    pictures_plain(true);
     ED.game_view = false;
     ED.selected = 0;
     LxGraphicsSettings *g = lx_graphics_settings();
@@ -1449,6 +1463,7 @@ static void s_bake_check(void) {
     lx_free(px);
     lx_graphics_settings()->gi_enabled = true;
 }
+static void s_bake_done(void) { pictures_plain(false); }
 
 /* ---- the asset picker: slots open it, tiles show what fits, Apply fills the slot ---- */
 static UiNode *find_slot(UiNode *n, const char *buf) {
@@ -1535,6 +1550,7 @@ static const struct { int frame; SmokeFn fn; const char *what; } TPL_STEPS[] = {
     {364, s_bake_apply, "bake it"},
     {376, s_bake_shot, "picture of the baked scene"},
     {380, s_bake_check, "the baked shadow shows"},
+    {381, s_bake_done, "lens effects back on"},
     {382, s_pick_setup, "a cube to fill slots on"},
     {386, s_pick_open, "click its Material slot"},
     {400, s_pick_shot, "picture of the material picker"},

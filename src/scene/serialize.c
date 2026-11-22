@@ -139,6 +139,7 @@ static void write_entity(LxStrBuf *sb, const LxScene *s, LxEntity e, int id_of_p
         }
         lx_sb_printf(sb, "terrain.grass = %d %g %g %g %g %g %g\n", t->grass_layer, t->grass_density, t->grass_height, t->grass_color.x,
                      t->grass_color.y, t->grass_color.z, t->grass_distance);
+        lx_sb_printf(sb, "terrain.parallax = %g\n", t->parallax_depth);
         for (int k = 0; k < t->scatter_count && k < LX_TERRAIN_SCATTERS; k++) {
             const LxTerrainScatter *S = &t->scatter[k];
             clean_value(t->scatter[k].prefab);
@@ -444,6 +445,7 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
             else if (!strcmp(f, "chunk")) { sscanf(v, "%f %d", &t->chunk_size, &t->resolution); }
             else if (!strcmp(f, "load_radius")) t->load_radius = (float)atof(v);
             else if (!strcmp(f, "lod")) t->lod_distance = (float)atof(v);
+            else if (!strcmp(f, "parallax")) t->parallax_depth = (float)atof(v);
             else if (!strcmp(f, "revision")) t->revision = (uint32_t)strtoul(v, NULL, 10);
             else if (!strcmp(f, "active_edit")) t->active_edit_layer = atoi(v);
             else if (!strcmp(f, "grass")) {

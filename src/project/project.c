@@ -30,6 +30,8 @@ void lx_graphics_apply_preset(LxGraphicsSettings *g, int preset) {
     static const int probe_res[] = {64, 128, 256, 256};
     static const bool ssr[] = {false, true, true, true};
     static const int ssr_steps[] = {16, 24, 32, 48};
+    static const bool ao[] = {false, true, true, true};
+    static const bool godrays[] = {false, true, true, true};
     g->quality_preset = preset;
     g->shadow_resolution = shadow_res[preset];
     g->shadow_cascades = cascades[preset];
@@ -42,6 +44,8 @@ void lx_graphics_apply_preset(LxGraphicsSettings *g, int preset) {
     g->reflection_resolution = probe_res[preset];
     g->ssr_enabled = ssr[preset];
     g->ssr_steps = ssr_steps[preset];
+    g->ao_enabled = ao[preset];
+    g->godrays_enabled = godrays[preset];
 }
 
 LxGraphicsSettings lx_graphics_defaults(int preset) {
@@ -59,6 +63,17 @@ LxGraphicsSettings lx_graphics_defaults(int preset) {
     g.ssr_max_distance = 30.0f;
     g.ssr_thickness = 0.35f;
     g.ssr_max_roughness = 0.6f;
+    g.ao_radius = 0.8f;
+    g.ao_intensity = 1.0f;
+    g.bloom_enabled = true;
+    g.bloom_intensity = 0.35f;
+    g.godrays_intensity = 1.0f;
+    g.vignette = 0.25f;
+    g.film_grain = 0.0f;
+    g.chromatic_aberration = 0.0f;
+    g.contrast = 1.0f;
+    g.saturation = 1.0f;
+    g.temperature = 0.0f;
     lx_graphics_apply_preset(&g, preset);
     return g;
 }
@@ -119,6 +134,10 @@ bool lx_project_save(const LxProject *p) {
     lx_sb_printf(&sb, "reflections = %d\nreflection_resolution = %d\nssr = %d\nssr_steps = %d\nssr_distance = %g\nssr_thickness = %g\nssr_roughness = %g\n",
                  g->reflections_enabled, g->reflection_resolution, g->ssr_enabled, g->ssr_steps, g->ssr_max_distance, g->ssr_thickness,
                  g->ssr_max_roughness);
+    lx_sb_printf(&sb, "ao = %d\nao_radius = %g\nao_intensity = %g\nbloom = %d\nbloom_intensity = %g\ngodrays = %d\ngodrays_intensity = %g\n",
+                 g->ao_enabled, g->ao_radius, g->ao_intensity, g->bloom_enabled, g->bloom_intensity, g->godrays_enabled, g->godrays_intensity);
+    lx_sb_printf(&sb, "vignette = %g\nfilm_grain = %g\nchromatic_aberration = %g\ncontrast = %g\nsaturation = %g\ntemperature = %g\n",
+                 g->vignette, g->film_grain, g->chromatic_aberration, g->contrast, g->saturation, g->temperature);
     const LxPhysicsSettings *ph = &p->physics;
     lx_sb_printf(&sb, "\n[physics]\ngravity = %g %g %g\nfixed_timestep = %g\nsolver_iterations = %d\n", ph->gravity.x, ph->gravity.y,
                  ph->gravity.z, ph->fixed_timestep, ph->solver_iterations);
@@ -194,6 +213,19 @@ bool lx_project_load(LxProject *p, const char *root) {
             else if (!strcmp(k, "ssr_distance")) g->ssr_max_distance = f;
             else if (!strcmp(k, "ssr_thickness")) g->ssr_thickness = f;
             else if (!strcmp(k, "ssr_roughness")) g->ssr_max_roughness = f;
+            else if (!strcmp(k, "ao")) g->ao_enabled = lx_parse_bool(v);
+            else if (!strcmp(k, "ao_radius")) g->ao_radius = f;
+            else if (!strcmp(k, "ao_intensity")) g->ao_intensity = f;
+            else if (!strcmp(k, "bloom")) g->bloom_enabled = lx_parse_bool(v);
+            else if (!strcmp(k, "bloom_intensity")) g->bloom_intensity = f;
+            else if (!strcmp(k, "godrays")) g->godrays_enabled = lx_parse_bool(v);
+            else if (!strcmp(k, "godrays_intensity")) g->godrays_intensity = f;
+            else if (!strcmp(k, "vignette")) g->vignette = f;
+            else if (!strcmp(k, "film_grain")) g->film_grain = f;
+            else if (!strcmp(k, "chromatic_aberration")) g->chromatic_aberration = f;
+            else if (!strcmp(k, "contrast")) g->contrast = f;
+            else if (!strcmp(k, "saturation")) g->saturation = f;
+            else if (!strcmp(k, "temperature")) g->temperature = f;
         } else if (!strcmp(section, "physics")) {
             LxPhysicsSettings *ph = &p->physics;
             if (!strcmp(k, "gravity")) ph->gravity = lx_parse_vec3(v);

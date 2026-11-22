@@ -352,6 +352,7 @@ typedef struct LxTerrainGpuLayers {
     int count, size;           /* layers, texels along an edge */
     const uint8_t *a, *b;      /* count x size x size RGBA8: albedo (sRGB) + roughness; normal xy, height, ao */
     float tiling[LX_TERRAIN_LAYERS];
+    float parallax_depth;      /* metres (0 = off) */
     uint32_t version;          /* changes when the layers change */
 } LxTerrainGpuLayers;
 const LxTerrainGpuLayers *lx_terrain_gpu_layers(const LxMaterial *m);   /* NULL: not a terrain material */

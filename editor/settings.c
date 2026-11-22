@@ -149,6 +149,25 @@ static void build_graphics(UiNode *b) {
     row_slider(s, "SSR Max Roughness", &g->ssr_max_roughness, 0.05f, 1);
     note(s, UI_ICON_INFO, "Probes reflect the whole surroundings (an automatic one follows the camera; place Reflection Probe "
                           "objects for rooms). Screen-space reflections add exact detail for what is on screen.");
+    s = ed_section(b, UI_ICON_LAYERS, "Ambient Occlusion", &g_dummy_open, NULL);
+    row_bool(s, "Enabled", &g->ao_enabled);
+    row_num(s, "Radius (m)", &g->ao_radius, 0.05f, 0.05f, 10);
+    row_slider(s, "Strength", &g->ao_intensity, 0, 2);
+    note(s, UI_ICON_INFO, "Darkens creases, corners and where things touch the ground. It only takes away bounce and sky "
+                          "light, never direct sunlight, so lit surfaces stay bright.");
+    s = ed_section(b, UI_ICON_CAMERA, "Camera & Lens", &g_dummy_open, NULL);
+    row_bool(s, "Bloom", &g->bloom_enabled);
+    row_slider(s, "Bloom Strength", &g->bloom_intensity, 0, 1);
+    row_bool(s, "Sun Shafts", &g->godrays_enabled);
+    row_slider(s, "Sun Shaft Strength", &g->godrays_intensity, 0, 2);
+    row_slider(s, "Vignette", &g->vignette, 0, 1);
+    row_slider(s, "Colour Fringes", &g->chromatic_aberration, 0, 1);
+    row_slider(s, "Film Grain", &g->film_grain, 0, 1);
+    row_slider(s, "Contrast", &g->contrast, 0.5f, 2);
+    row_slider(s, "Saturation", &g->saturation, 0, 2);
+    row_slider(s, "Temperature (cool - warm)", &g->temperature, -1, 1);
+    note(s, UI_ICON_INFO, "Bloom: bright light glows over its surroundings, like a real lens. Sun shafts: light streaks "
+                          "through gaps in trees, clouds and windows when the sun is in view.");
     s = ed_section(b, UI_ICON_LAYERS, "Shadows", &g_dummy_open, NULL);
     row_int(s, "Resolution", &g->shadow_resolution, 256, 8192)->step = 64;
     row_int(s, "Cascades", &g->shadow_cascades, 1, 4);
