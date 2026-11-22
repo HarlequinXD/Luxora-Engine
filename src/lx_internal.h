@@ -554,6 +554,15 @@ typedef struct LxHit {
 } LxHit;
 
 void lx_bvh_build_from_scene(LxBvh *bvh, LxScene *s);
+void lx_bvh_build_gi(LxBvh *bvh, LxScene *s);   /* without terrain chunks */
+/* terrain heights for threads (GI): prepared on the main thread, read-only afterwards */
+typedef struct LxTerrainQuery {
+    int n;
+    struct { void *data; LxMat4 world, inv; LxVec3 albedo; float cell; } t[8];
+} LxTerrainQuery;
+int lx_terrain_query_prepare(LxScene *s, LxTerrainQuery *q);
+bool lx_terrain_query(const LxTerrainQuery *q, float x, float z, float *y, LxVec3 *normal, LxVec3 *albedo);
+uint64_t lx_terrain_signature(LxScene *s);   /* changes when any terrain's heights (or chunks) change */
 void lx_bvh_build_moving(LxBvh *b, LxScene *s);
 bool lx_gi_moving_takes(LxScene *s, int entity_index);   /* a moving object big enough (and not a camera's view model) for GI */
 bool lx_bvh_refit_moving(LxBvh *b, LxScene *s);   /* same objects, new poses: refit (false: build again) */   /* moving objects' current triangles (GI, rebuilt as they move) */
@@ -651,6 +660,7 @@ int lx_gi_moving_triangles(void);   /* moving objects' triangles in GI this fram
 LxVec3 lx_gi_irradiance(LxVec3 p, LxVec3 n, bool walls);   /* the shader's GI lookup on the CPU (tests) */
 float lx_gi_eval_l1(const float *c, LxVec3 n);   /* one channel's irradiance from L1 SH (never negative) */
 void lx_gi_set_walls(bool on);   /* tests: false = no walls between probes */
+float lx_gi_dfao(LxVec3 p, LxVec3 n);   /* the shader's contact occlusion on the CPU (tests) */
 float lx_gi_last_ms(void);
 
 /* ---------- builtin behaviours / crowd rendering ---------- */

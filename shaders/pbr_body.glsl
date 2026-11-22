@@ -300,15 +300,15 @@ float gi_dfao(vec3 p, vec3 n) {
     float cell = u.gi_casc[level].w, half_cell = cell * 0.5, r2 = u.gi_casc_res.x * 2.0;
     float occ = 0.0, wsum = 0.0;
     for (int i = 1; i <= 4; i++) {
-        float d = half_cell * float(i) * 1.2;
+        float d = half_cell * (0.6 + 0.9 * float(i));
         vec3 g = (p + n * d - u.gi_casc[level].xyz) / half_cell;   // in voxels
         g = clamp(g, vec3(0.5), vec3(r2 - 0.5));
         float s = texture(u_gi_sdf, vec3(g.xy / r2, (g.z + float(level) * r2) / (2.0 * r2))).r * half_cell;
         float w = 1.0 / float(i);
-        occ += w * clamp((d - s) / d, 0.0, 1.0);
+        occ += w * clamp((d - s - 0.4 * half_cell) / d, 0.0, 1.0);   // a little slack: the field is only half a cell fine
         wsum += w;
     }
-    return clamp(1.0 - 0.85 * occ / wsum, 0.15, 1.0);
+    return clamp(1.0 - 0.7 * occ / wsum, 0.3, 1.0);
 }
 vec3 gi_eval(GiSH sh, vec3 n) {
     vec3 e = vec3(gi_eval_l1(sh.r, n), gi_eval_l1(sh.g, n), gi_eval_l1(sh.b, n)) * u.fog_color.w;

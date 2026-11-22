@@ -1115,6 +1115,57 @@ static bool local_height(TData *d, float x, float z, float *y) {
     *y = lx_lerpf(lx_lerpf(h[z0 * FAR + x0], h[z0 * FAR + x0 + 1], tx), lx_lerpf(h[(z0 + 1) * FAR + x0], h[(z0 + 1) * FAR + x0 + 1], tx), tz);
     return true;
 }
+int lx_terrain_query_prepare(LxScene *s, LxTerrainQuery *q) {
+    q->n = 0;
+    for (int i = 1; s && i < s->count && q->n < 8; i++) {
+        LxEntityData *ed = &s->entities[i];
+        if (!ed->alive || !ed->active || ed->generated || !(ed->comps & LX_COMP_TERRAIN) || !ed->terrain) continue;
+        Ctx c;
+        if (!ctx_of(s, lx_entity_make((uint32_t)i, ed->generation & ((1u << (32 - LX_INDEX_BITS)) - 1u)), &c)) continue;
+        q->t[q->n].data = c.d;
+        q->t[q->n].world = c.world;
+        q->t[q->n].inv = c.inv;
+        q->t[q->n].cell = cell(c.d);
+        LxVec4 a = c.d->material.albedo;
+        q->t[q->n].albedo = c.d->material.name[0] ? lx_v3(a.x, a.y, a.z) : lx_v3(0.35f, 0.4f, 0.25f);
+        q->n++;
+    }
+    return q->n;
+}
+/* the highest terrain under (x, z): its height, normal and colour */
+bool lx_terrain_query(const LxTerrainQuery *q, float x, float z, float *y, LxVec3 *normal, LxVec3 *albedo) {
+    bool any = false;
+    for (int k = 0; k < q->n; k++) {
+        TData *d = q->t[k].data;
+        LxVec3 lp = lx_mat4_point(q->t[k].inv, lx_v3(x, 0, z));
+        float ly;
+        if (!local_height(d, lp.x, lp.z, &ly)) continue;
+        float wy = lx_mat4_point(q->t[k].world, lx_v3(lp.x, ly, lp.z)).y;
+        if (any && wy <= *y) continue;
+        any = true;
+        *y = wy;
+        if (normal) {
+            float e = q->t[k].cell, hx = ly, hz = ly, hx0 = ly, hz0 = ly;
+            local_height(d, lp.x + e, lp.z, &hx); local_height(d, lp.x - e, lp.z, &hx0);
+            local_height(d, lp.x, lp.z + e, &hz); local_height(d, lp.x, lp.z - e, &hz0);
+            *normal = lx_norm3(lx_mat4_dir(q->t[k].world, lx_v3(hx0 - hx, 2 * e, hz0 - hz)));
+        }
+        if (albedo) *albedo = q->t[k].albedo;
+    }
+    return any;
+}
+uint64_t lx_terrain_signature(LxScene *s) {
+    uint64_t h = 1469598103934665603ull;
+    for (int i = 1; s && i < s->count; i++) {
+        LxEntityData *ed = &s->entities[i];
+        if (!ed->alive || !ed->active || ed->generated || !(ed->comps & LX_COMP_TERRAIN) || !ed->terrain) continue;
+        TData *d = data_for(ed->terrain);
+        uint32_t v[3] = {d->rev, (uint32_t)d->nch, (uint32_t)i};
+        for (int k = 0; k < 3; k++) h = (h ^ v[k]) * 1099511628211ull;
+        for (int k = 0; k < 16; k++) { uint32_t b; memcpy(&b, &ed->world.m[k], 4); h = (h ^ b) * 1099511628211ull; }
+    }
+    return h;
+}
 bool lx_terrain_sample(LxScene *s, float x, float z, float *y, LxVec3 *normal, int *layer) {
     if (!s) return false;
     for (int i = 1; i < s->count; i++) {

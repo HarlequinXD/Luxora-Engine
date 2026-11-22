@@ -819,6 +819,51 @@ static void test_gi_no_dark_sweep(void) {
     lx_scene_destroy(s);
 }
 
+/* rough terrain: the GI measures its distance to the ground from the terrain's own heights, so the ground under
+ * the camera isn't covered in dark blotches (it used a 2 m simplified mesh, which the real ground dips under) */
+static void test_gi_terrain_ground(void) {
+    printf("live gi: rough terrain without blotches\n");
+    char dir[LX_PATH_MAX];
+    snprintf(dir, sizeof dir, "%s", "luxora_test_gi_terrain");
+    lx_path_remove(dir);
+    lx_mkdir_p(dir);
+    lx_assets_set_root(dir);
+    LxScene *s = lx_scene_create("Rough");
+    LxEntity te = lx_entity_create(s, "T");
+    LxTerrainComponent *t = lx_add_terrain(s, te, "");
+    t->grass_layer = -1;
+    lx_entity_set_position(s, te, lx_v3(-32, 0, -32));
+    lx_terrain_generate(s, te, LX_TERRAIN_HILLS, 30, 3);
+    LxTerrainBrush nb = {LX_TERRAIN_NOISE, 30, 1, 0.3f, 0, 4, 0};
+    lx_terrain_begin_stroke(s, te);
+    for (int i = 0; i < 30; i++) lx_terrain_brush(s, te, lx_v3(0, 0, 0), &nb, 0.1f);
+    lx_terrain_end_stroke(s, te);
+    lx_terrain_update(s, lx_v3(0, 0, 0), true);
+    LxEntity sun = lx_entity_create(s, "Sun");
+    lx_entity_set_euler(s, sun, lx_v3(45, 30, 0));
+    lx_add_light(s, sun, LX_LIGHT_DIRECTIONAL)->intensity = 3;
+    s->env.ambient_intensity = 0.5f;
+    LxGraphicsSettings g = lx_graphics_defaults(1);
+    g.gi_rays_per_frame = 60000;
+    float y0 = 0;
+    lx_terrain_height(s, 0, 0, &y0);
+    for (int f = 0; f < 300; f++) lx_gi_update(s, &g, lx_v3(0, y0 + 1.7f, 0));
+    int dark = 0, n = 0;
+    for (int z = 0; z < 40; z++)
+        for (int x = 0; x < 40; x++) {
+            float wx = -5 + x * 0.25f, wz = -5 + z * 0.25f, h;
+            LxVec3 nn;
+            if (!lx_terrain_sample(s, wx, wz, &h, &nn, NULL)) continue;
+            n++;
+            if (lx_gi_dfao(lx_v3(wx, h + 0.01f, wz), nn) < 0.7f) dark++;
+        }
+    CHECK(n > 1000 && dark < n / 10, "contact shadows darken under a tenth of rough ground (%d of %d points)", dark, n);
+    lx_gi_shutdown();
+    lx_scene_destroy(s);
+    lx_terrain_shutdown();
+    lx_path_remove(dir);
+}
+
 /* two rooms side by side, a wall much thinner than a GI cell between them, a lamp in only one:
  * the dark room must stay dark (before the fix, the cells straddling the wall carried light through it) */
 static float leak_ratio(bool walls, float *lit_out) {
@@ -3858,6 +3903,7 @@ int main(void) {
     RUN(test_gi);
     RUN(test_gi_convergence);
     RUN(test_gi_no_dark_sweep);
+    RUN(test_gi_terrain_ground);
     RUN(test_gi_leaks);
     RUN(test_static_safeguard);
     RUN(test_gi_moving);

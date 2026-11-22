@@ -155,13 +155,14 @@ static const LxMeshLod *build_lod(LxEntityData *d, bool moving) {
 }
 #define MOVING_TRI_MAX 400000   /* the most moving triangles GI takes in one frame */
 
+static bool g_skip_terrain;
 static void build(LxBvh *b, LxScene *s, bool moving) {
     lx_bvh_free(b);
     lx_scene_update_transforms(s);
     /* count */
     int tris = 0;
     for (int i = 1; i < s->count; i++) {
-        if (!takes(s, i, moving)) continue;
+        if (!takes(s, i, moving) || (g_skip_terrain && s->entities[i].generated == LX_GEN_TERRAIN_CHUNK)) continue;
         const LxMeshLod *l = build_lod(&s->entities[i], moving);
         int n = l ? l->index_count / 3 : 0;
         if (moving && tris + n > MOVING_TRI_MAX) continue;
@@ -181,7 +182,7 @@ static void build(LxBvh *b, LxScene *s, bool moving) {
     int mat_cap = 0;
     int t = 0;
     for (int i = 1; i < s->count; i++) {
-        if (!takes(s, i, moving)) continue;
+        if (!takes(s, i, moving) || (g_skip_terrain && s->entities[i].generated == LX_GEN_TERRAIN_CHUNK)) continue;
         LxEntityData *d = &s->entities[i];
         const LxMeshLod *l0 = build_lod(d, moving);
         if (!l0 || t + l0->index_count / 3 > tris) continue;
@@ -238,6 +239,12 @@ static void build(LxBvh *b, LxScene *s, bool moving) {
 }
 
 void lx_bvh_build_from_scene(LxBvh *b, LxScene *s) { build(b, s, false); }
+/* without terrain chunks: GI measures its distance to the terrain from the height data itself (exact) */
+void lx_bvh_build_gi(LxBvh *b, LxScene *s) {
+    g_skip_terrain = true;
+    build(b, s, false);
+    g_skip_terrain = false;
+}
 
 /* Moving objects keep their triangles from frame to frame (an animated character just moves its vertices), so
  * the BVH built for them is refitted instead of rebuilt: new triangle positions, then every node's box from the

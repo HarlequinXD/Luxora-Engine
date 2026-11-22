@@ -29,6 +29,7 @@
 #define TARGET_AIR 3          /* ...and one out in the open (its light is smooth, and only characters pass through it) */
 #define BRICK 4               /* voxels per side of an empty-space brick */
 #define VIS_MAX 1.5f
+#define TERRAIN_TRI 0x7fffffff  /* a voxel whose nearest surface is a terrain (measured from its height data) */
 
 typedef struct Light {
     int kind;                 /* LxLightType */
@@ -74,6 +75,8 @@ static struct {
     LxScene *built_scene;
     uint32_t built_version;
     uint64_t geo_hash;        /* the static geometry's content: a copy of the scene (pressing Play) keeps the light */
+    LxTerrainQuery tq;        /* the scene's terrains, read straight from their height data */
+    uint64_t terrain_sig;
     float sky_sh[12];         /* the sky alone, as probes would see it in the open (new probes start from it) */
     uint64_t moving_hash, moving_set;
     float moving_built_area;
@@ -382,8 +385,17 @@ static void sdf_job(void *user, int begin, int end, int thread) {
         bvh_closest(&G.moving, p, &best2, &mtri, &sign);
         int i = vidx(L, x, y, z);
         float dist = sqrtf(best2);
-        L->sdf[i] = best2 < far * far ? sign * dist : far;
-        L->tri[i] = (mtri >= 0 && best2 < b2) ? -(mtri + 1) : tri >= 0 ? tri + 1 : 0;
+        float sd = best2 < far * far ? sign * dist : far;
+        int32_t id = (mtri >= 0 && best2 < b2) ? -(mtri + 1) : tri >= 0 ? tri + 1 : 0;
+        /* terrain: exact, from its heights (its meshes are only an approximation further away) */
+        float h;
+        LxVec3 tn;
+        if (G.tq.n && lx_terrain_query(&G.tq, p.x, p.z, &h, &tn, NULL)) {
+            float st = (p.y - h) * lx_maxf(tn.y, 0.05f);
+            if (st < sd) { sd = lx_maxf(st, -far); id = st < far ? TERRAIN_TRI : 0; }
+        }
+        L->sdf[i] = lx_minf(sd, far);
+        L->tri[i] = id;
     }
 }
 static void rebuild_surfaces(Level *L) {
@@ -550,13 +562,21 @@ static void light_job(void *user, int begin, int end, int thread) {
         int i = j->idx[k];
         int32_t t = L->tri[i];
         if (!t) continue;
-        const LxBvh *b = t > 0 ? &G.bvh : &G.moving;
-        int ti = t > 0 ? t - 1 : -t - 1;
-        if (ti >= b->tri_count) continue;
-        LxVec3 n = b->normals[ti];
-        const LxTriMaterial *m = &b->materials[b->mat_index[ti]];
         int x = i % L->sres[0], y = (i / L->sres[0]) % L->sres[1], z = i / (L->sres[0] * L->sres[1]);
         LxVec3 c = lx_add3(L->origin, lx_v3((x + 0.5f) * L->scell, (y + 0.5f) * L->scell, (z + 0.5f) * L->scell));
+        LxVec3 n, albedo, glow = lx_v3(0, 0, 0);
+        if (t == TERRAIN_TRI) {
+            float h;
+            if (!lx_terrain_query(&G.tq, c.x, c.z, &h, &n, &albedo)) continue;
+        } else {
+            const LxBvh *b = t > 0 ? &G.bvh : &G.moving;
+            int ti = t > 0 ? t - 1 : -t - 1;
+            if (ti >= b->tri_count) continue;
+            n = b->normals[ti];
+            const LxTriMaterial *mt = &b->materials[b->mat_index[ti]];
+            albedo = mt->albedo;
+            glow = mt->emissive;
+        }
         if (L->sdf[i] < 0) n = lx_neg3(n);   /* seen from behind: light its back */
         LxVec3 p = lx_madd3(c, n, -fabsf(L->sdf[i]));   /* onto the surface */
         LxVec3 from = lx_madd3(p, n, L->scell * 1.2f);
@@ -591,7 +611,7 @@ static void light_job(void *user, int begin, int end, int thread) {
             e = lx_add3(e, lx_scale3(lt->color, ndl * att * sh));
         }
         if (G.bounces > 1) e = lx_add3(e, probe_irradiance(L, lx_madd3(p, n, L->pcell * 0.5f), n));
-        LxVec3 r = lx_add3(lx_scale3(lx_mul3(m->albedo, e), 1.0f / LX_PI), m->emissive);
+        LxVec3 r = lx_add3(lx_scale3(lx_mul3(albedo, e), 1.0f / LX_PI), glow);
         L->rad[i * 3] = r.x; L->rad[i * 3 + 1] = r.y; L->rad[i * 3 + 2] = r.z;
     }
 }
@@ -905,7 +925,7 @@ void lx_gi_update(LxScene *s, const LxGraphicsSettings *g, LxVec3 eye) {
     /* geometry */
     bool rebuilt = false;
     if (G.built_scene != s || G.built_version != s->static_version) {
-        lx_bvh_build_from_scene(&G.bvh, s);
+        lx_bvh_build_gi(&G.bvh, s);
         G.built_scene = s;
         G.built_version = s->static_version;
         G.moving_hash = G.moving_set = 0;
@@ -919,6 +939,9 @@ void lx_gi_update(LxScene *s, const LxGraphicsSettings *g, LxVec3 eye) {
         rebuilt = h != G.geo_hash;
         G.geo_hash = h;
     }
+    lx_terrain_query_prepare(s, &G.tq);
+    uint64_t tsig = lx_terrain_signature(s);
+    if (tsig != G.terrain_sig) { G.terrain_sig = tsig; rebuilt = true; }   /* sculpted, grown, moved: build again */
     lx_env_effective(s, &G.env);
     sky_sh_update();
     /* levels: probe count per axis from the setting; the finest covers ~12 m, each next one twice (the far one 3x) */
@@ -936,7 +959,7 @@ void lx_gi_update(LxScene *s, const LxGraphicsSettings *g, LxVec3 eye) {
         level_build(&G.lv[l]);
         seed_fresh(l);
     }
-    if (!G.bvh.tri_count && !G.moving.tri_count) {   /* nothing to bounce off: sky only, the shader's ambient does that */
+    if (!G.bvh.tri_count && !G.moving.tri_count && !G.tq.n) {   /* nothing to bounce off: sky only, the shader's ambient does that */
         G.volume.valid = false;
         G.ms_last = (float)((lx_time() - t0) * 1000.0);
         return;
@@ -1100,4 +1123,26 @@ float lx_gi_eval_l1(const float *c, LxVec3 n) {
     float p = 1.0f + 2.0f * rho;
     float k = (1.0f - rho) / (1.0f + rho);
     return a * (k + (1.0f - k) * (p + 1.0f) * powf(lx_maxf(q, 0.0f), p));
+}
+
+/* the shader's distance-field occlusion (gi_dfao), on the CPU (tests) */
+float lx_gi_dfao(LxVec3 p, LxVec3 n) {
+    int level = -1;
+    for (int l = 0; l < LX_GI_CASCADES && level < 0; l++) {
+        const Level *L = &G.lv[l];
+        if (!L->on) continue;
+        LxVec3 g = lx_scale3(lx_sub3(p, L->origin), 1.0f / L->pcell);
+        if (g.x > 1.5f && g.y > 1.5f && g.z > 1.5f && g.x < L->pres[0] - 1.5f && g.y < L->pres[1] - 1.5f && g.z < L->pres[2] - 1.5f) level = l;
+    }
+    if (level < 0) return 1.0f;
+    const Level *L = &G.lv[level];
+    float occ = 0, wsum = 0;
+    for (int i = 1; i <= 4; i++) {
+        float d = L->scell * (0.6f + 0.9f * (float)i);
+        float s = lx_clampf(sdf_at(L, lx_madd3(p, n, d)), -3.0f * L->scell, 3.0f * L->scell);
+        float w = 1.0f / (float)i;
+        occ += w * lx_clampf((d - s - 0.4f * L->scell) / d, 0, 1);   /* a little slack: the field is only half a cell fine */
+        wsum += w;
+    }
+    return lx_clampf(1.0f - 0.7f * occ / wsum, 0.3f, 1.0f);
 }
