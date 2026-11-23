@@ -482,7 +482,7 @@ LxLightmapBake *lx_lightmap_prepare(LxScene *s) {
     b->eps = lx_maxf(1e-3f, scene_ext * 2e-5f);
 
     /* what the light hits: the level's static geometry */
-    lx_bvh_build_from_scene(&b->bvh, s);
+    lx_bvh_build_light(&b->bvh, s);   /* without see-through materials: light passes glass */
     /* lights */
     for (int i = 1; i < s->count; i++) {
         LxEntityData *d = &s->entities[i];

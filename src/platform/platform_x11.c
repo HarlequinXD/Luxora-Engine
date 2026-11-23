@@ -245,6 +245,12 @@ void lx_platform_set_cursor(int c) {
     if (!g_lx_input.mouse_hidden) XDefineCursor(X.dpy, X.win, X.cursors[c]);
 }
 
+/* colour cursors need the Xcursor extension; without it the game UI draws the picture */
+bool lx_platform_cursor_image(const uint8_t *rgba, int w, int h, int hx, int hy) {
+    LX_UNUSED(rgba); LX_UNUSED(w); LX_UNUSED(h); LX_UNUSED(hx); LX_UNUSED(hy);
+    return false;
+}
+
 const char *lx_platform_clipboard_get(void) { return X.clipboard; }
 void lx_platform_clipboard_set(const char *t) { lx_strcpy(X.clipboard, sizeof X.clipboard, t); }
 

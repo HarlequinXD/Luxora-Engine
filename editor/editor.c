@@ -744,6 +744,7 @@ void ed_play(void) {
     lx_fsm_breakpoints_clear();   /* a hit left over from the last run must not pause this one */
     ED.game_view_before_play = ED.game_view;
     ED.game_view = lx_scene_main_camera(ED.scene) != 0; /* play shows the game; Stop restores the previous view */
+    lx_mouse_apply_project_cursor(&ED.project.build);   /* the game's pointer over the game view */
     LX_INFO("Play mode started");
     ed_update_title();
 }

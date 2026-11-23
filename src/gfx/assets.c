@@ -94,8 +94,15 @@ LxMaterial lx_material_default(void) {
     m.parallax_shadows = true;
     m.acoustic_absorption = 0.1f;
     m.acoustic_transmission = 0.02f;
+    m.alpha_cutoff = 0.5f;
     return m;
 }
+
+const char *lx_blend_mode_name(LxBlendMode b) {
+    static const char *N[] = {"Opaque", "Cutout", "Fade", "Glass", "Additive"};
+    return (unsigned)b < LX_BLEND_COUNT ? N[b] : "Opaque";
+}
+bool lx_blend_see_through(LxBlendMode b) { return b == LX_BLEND_FADE || b == LX_BLEND_GLASS || b == LX_BLEND_ADDITIVE; }
 
 bool lx_material_save(const LxMaterial *m, const char *path) {
     LxStrBuf sb = {0};
@@ -110,6 +117,7 @@ bool lx_material_save(const LxMaterial *m, const char *path) {
     lx_sb_printf(&sb, "ao_map = %s\nao_strength = %g\n", m->ao_map, m->ao_strength);
     lx_sb_printf(&sb, "height_map = %s\nheight_scale = %g\nparallax_shadows = %d\n", m->height_map, m->height_scale, m->parallax_shadows);
     lx_sb_printf(&sb, "acoustic_absorption = %g\nacoustic_transmission = %g\n", m->acoustic_absorption, m->acoustic_transmission);
+    lx_sb_printf(&sb, "blend = %s\nalpha_cutoff = %g\ndouble_sided = %d\n", lx_blend_mode_name(m->blend_mode), m->alpha_cutoff, m->double_sided);
     bool ok = lx_file_write(path, sb.data, sb.len);
     lx_free(sb.data);
     return ok;
@@ -145,6 +153,11 @@ bool lx_material_load(LxMaterial *m, const char *path) {
         else if (!strcmp(k, "parallax_shadows")) m->parallax_shadows = atoi(v) != 0;
         else if (!strcmp(k, "acoustic_absorption")) m->acoustic_absorption = (float)atof(v);
         else if (!strcmp(k, "acoustic_transmission")) m->acoustic_transmission = (float)atof(v);
+        else if (!strcmp(k, "blend")) {
+            for (int b = 0; b < LX_BLEND_COUNT; b++)
+                if (!strcmp(v, lx_blend_mode_name((LxBlendMode)b))) m->blend_mode = (LxBlendMode)b;
+        } else if (!strcmp(k, "alpha_cutoff")) m->alpha_cutoff = lx_clampf((float)atof(v), 0.0f, 1.0f);
+        else if (!strcmp(k, "double_sided")) m->double_sided = atoi(v) != 0;
     }
     lx_free(text);
     return true;

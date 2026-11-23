@@ -18,6 +18,8 @@ static struct {
     PFN_vkGetInstanceProcAddr gipa;
     HCURSOR cursors[7];
     int cursor;
+    HCURSOR custom;      /* the game's pointer picture (Set Cursor), a real system cursor with its transparency */
+    bool custom_on;
     bool quit;
     bool borderless, intercept_close, close_requested;
     WCHAR high_surrogate;
@@ -122,7 +124,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         } else g_lx_input.mouse_pos = lx_v2((float)GET_X_LPARAM(lp), (float)GET_Y_LPARAM(lp));
         return 0;
     case WM_SETCURSOR:
-        if (LOWORD(lp) == HTCLIENT) { SetCursor(g_lx_input.mouse_hidden ? NULL : W.cursors[W.cursor]); return TRUE; }
+        if (LOWORD(lp) == HTCLIENT) { SetCursor(g_lx_input.mouse_hidden ? NULL : W.custom_on ? W.custom : W.cursors[W.cursor]); return TRUE; }
         break;
     case WM_SETFOCUS: g_lx_input.focused = true; return 0;
     case WM_KILLFOCUS:
@@ -226,7 +228,54 @@ void lx_platform_set_title(const char *title) {
 }
 
 void lx_platform_set_cursor(int c) {
-    if (c >= 0 && c < 7 && c != W.cursor) { W.cursor = c; if (!g_lx_input.mouse_hidden) SetCursor(W.cursors[c]); }
+    if (c >= 0 && c < 7 && c != W.cursor) { W.cursor = c; if (!g_lx_input.mouse_hidden && !W.custom_on) SetCursor(W.cursors[c]); }
+}
+
+/* a 32-bit colour cursor: BGRA with its own alpha (soft edges and see-through parts stay), hotspot where it clicks */
+bool lx_platform_cursor_image(const uint8_t *rgba, int w, int h, int hx, int hy) {
+    if (!rgba || w <= 0 || h <= 0) return false;
+    BITMAPV5HEADER bi;
+    memset(&bi, 0, sizeof bi);
+    bi.bV5Size = sizeof bi;
+    bi.bV5Width = w;
+    bi.bV5Height = -h;   /* top-down */
+    bi.bV5Planes = 1;
+    bi.bV5BitCount = 32;
+    bi.bV5Compression = BI_BITFIELDS;
+    bi.bV5RedMask = 0x00ff0000;
+    bi.bV5GreenMask = 0x0000ff00;
+    bi.bV5BlueMask = 0x000000ff;
+    bi.bV5AlphaMask = 0xff000000;
+    HDC dc = GetDC(NULL);
+    void *bits = NULL;
+    HBITMAP color = CreateDIBSection(dc, (BITMAPINFO *)&bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    ReleaseDC(NULL, dc);
+    if (!color || !bits) return false;
+    uint8_t *dst = (uint8_t *)bits;
+    for (int i = 0; i < w * h; i++) {
+        dst[i * 4 + 0] = rgba[i * 4 + 2];
+        dst[i * 4 + 1] = rgba[i * 4 + 1];
+        dst[i * 4 + 2] = rgba[i * 4 + 0];
+        dst[i * 4 + 3] = rgba[i * 4 + 3];
+    }
+    HBITMAP mask = CreateBitmap(w, h, 1, 1, NULL);
+    ICONINFO ii;
+    memset(&ii, 0, sizeof ii);
+    ii.fIcon = FALSE;
+    ii.xHotspot = (DWORD)hx;
+    ii.yHotspot = (DWORD)hy;
+    ii.hbmMask = mask;
+    ii.hbmColor = color;
+    HCURSOR cur = (HCURSOR)CreateIconIndirect(&ii);
+    DeleteObject(color);
+    DeleteObject(mask);
+    if (!cur) return false;
+    if (W.custom) {
+        if (W.custom_on && !g_lx_input.mouse_hidden) SetCursor(cur);
+        DestroyCursor(W.custom);
+    }
+    W.custom = cur;
+    return true;
 }
 
 void lx_platform_set_intercept_close(bool on) { W.intercept_close = on; }
@@ -432,9 +481,13 @@ bool lx_platform_pump(void) {
     /* the game's pointer: locked (hidden, held still) or hidden (a custom image is drawn instead) */
     bool blocked = g_lx_input.mouse_lock_blocked || !g_lx_input.focused || GetForegroundWindow() != W.hwnd || g_lx_input.width <= 0;
     bool lock = g_lx_input.mouse_lock_want && !blocked;
-    bool hide = !g_lx_input.mouse_lock_blocked && (lock || g_lx_input.mouse_hide_want || g_lx_input.mouse_image[0]);
-    if (hide != g_lx_input.mouse_hidden) {
+    bool image = g_lx_input.mouse_image[0] != 0;
+    bool native = image && g_lx_input.mouse_native && W.custom;   /* the picture is a real cursor: shown, not hidden */
+    bool hide = !g_lx_input.mouse_lock_blocked && (lock || g_lx_input.mouse_hide_want || (image && !native));
+    bool custom_on = native && !g_lx_input.mouse_lock_blocked && !hide;
+    if (hide != g_lx_input.mouse_hidden || custom_on != W.custom_on) {
         g_lx_input.mouse_hidden = hide;
+        W.custom_on = custom_on;
         POINT p;
         GetCursorPos(&p);
         SetCursorPos(p.x, p.y);   /* makes Windows ask for the cursor again (WM_SETCURSOR) */

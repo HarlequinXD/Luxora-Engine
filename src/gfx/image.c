@@ -600,3 +600,18 @@ bool lx_ico_write(const char *path, const uint8_t *rgba, int w, int h) {
     lx_free(f);
     return ok;
 }
+
+/* What an image's alpha is for: 0 none (all opaque), 1 a cut-out mask (pixels are either there or not: leaves,
+ * fences), 2 real see-through (soft edges and part-transparent areas: glass, smoke). */
+int lx_image_alpha_kind(const uint8_t *rgba, int w, int h) {
+    if (!rgba || w <= 0 || h <= 0) return 0;
+    size_t n = (size_t)w * (size_t)h, step = n > 262144 ? n / 262144 : 1, seen = 0, clear = 0, soft = 0;
+    for (size_t i = 0; i < n; i += step) {
+        uint8_t a = rgba[i * 4 + 3];
+        seen++;
+        if (a < 250) clear++;
+        if (a > 24 && a < 232) soft++;
+    }
+    if (!seen || clear * 400 < seen) return 0;   /* under 0.25 % see-through: opaque (a stray edge pixel) */
+    return soft * 4 > clear ? 2 : 1;             /* mostly in-between values: blended, else a mask with soft edges */
+}

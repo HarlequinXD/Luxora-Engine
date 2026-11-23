@@ -348,6 +348,18 @@ static void make_material(Ctx *c, Obj *mat, char *out_ref, size_t cap) {
     if (abs[0]) { asset_ref_of(c, abs, m.metallic_map, sizeof m.metallic_map); m.metallic = 1; }
     texture_ref(c, material_texture(c, mat, emis_slots), abs, sizeof abs);
     if (abs[0] && !m.emissive_strength) { m.emissive = lx_v3(1, 1, 1); m.emissive_strength = 1; }
+    /* see-through: an opacity below 1 is glass-like; a colour map with alpha is a cut-out mask or blended */
+    if (m.albedo.w < 0.99f) m.blend_mode = LX_BLEND_GLASS;
+    if (m.albedo_map[0]) {
+        char ap[LX_PATH_MAX];
+        lx_asset_path(ap, sizeof ap, m.albedo_map);
+        int iw, ih;
+        uint8_t *px = lx_image_load(ap, &iw, &ih);
+        int kind = lx_image_alpha_kind(px, iw, ih);
+        if (kind == 1) { m.blend_mode = LX_BLEND_CUTOUT; m.double_sided = true; }
+        else if (kind == 2) m.blend_mode = LX_BLEND_FADE;
+        lx_free(px);
+    }
     lx_mkdir_p(dir);
     lx_material_save(&m, path);
 }

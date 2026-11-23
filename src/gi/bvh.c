@@ -155,14 +155,21 @@ static const LxMeshLod *build_lod(LxEntityData *d, bool moving) {
 }
 #define MOVING_TRI_MAX 400000   /* the most moving triangles GI takes in one frame */
 
-static bool g_skip_terrain;
+static bool g_skip_terrain, g_skip_see_through;
+/* GI skips terrain chunks (it reads the height data instead); light (GI, baking) skips see-through materials:
+ * glass, smoke and fire let it through. Sound still bounces off glass. */
+static bool gi_skips(LxScene *s, int i) {
+    LxEntityData *d = &s->entities[i];
+    if (g_skip_terrain && d->generated == LX_GEN_TERRAIN_CHUNK) return true;
+    return g_skip_see_through && (d->comps & LX_COMP_MESH) && lx_blend_see_through(lx_asset_material(d->mesh.material)->blend_mode);
+}
 static void build(LxBvh *b, LxScene *s, bool moving) {
     lx_bvh_free(b);
     lx_scene_update_transforms(s);
     /* count */
     int tris = 0;
     for (int i = 1; i < s->count; i++) {
-        if (!takes(s, i, moving) || (g_skip_terrain && s->entities[i].generated == LX_GEN_TERRAIN_CHUNK)) continue;
+        if (!takes(s, i, moving) || gi_skips(s, i)) continue;
         const LxMeshLod *l = build_lod(&s->entities[i], moving);
         int n = l ? l->index_count / 3 : 0;
         if (moving && tris + n > MOVING_TRI_MAX) continue;
@@ -182,7 +189,7 @@ static void build(LxBvh *b, LxScene *s, bool moving) {
     int mat_cap = 0;
     int t = 0;
     for (int i = 1; i < s->count; i++) {
-        if (!takes(s, i, moving) || (g_skip_terrain && s->entities[i].generated == LX_GEN_TERRAIN_CHUNK)) continue;
+        if (!takes(s, i, moving) || gi_skips(s, i)) continue;
         LxEntityData *d = &s->entities[i];
         const LxMeshLod *l0 = build_lod(d, moving);
         if (!l0 || t + l0->index_count / 3 > tris) continue;
@@ -241,9 +248,14 @@ static void build(LxBvh *b, LxScene *s, bool moving) {
 void lx_bvh_build_from_scene(LxBvh *b, LxScene *s) { build(b, s, false); }
 /* without terrain chunks: GI measures its distance to the terrain from the height data itself (exact) */
 void lx_bvh_build_gi(LxBvh *b, LxScene *s) {
-    g_skip_terrain = true;
+    g_skip_terrain = g_skip_see_through = true;
     build(b, s, false);
-    g_skip_terrain = false;
+    g_skip_terrain = g_skip_see_through = false;
+}
+void lx_bvh_build_light(LxBvh *b, LxScene *s) {
+    g_skip_see_through = true;
+    build(b, s, false);
+    g_skip_see_through = false;
 }
 
 /* Moving objects keep their triangles from frame to frame (an animated character just moves its vertices), so

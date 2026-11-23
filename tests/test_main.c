@@ -677,6 +677,28 @@ static void test_bvh(void) {
     CHECK(mismatches == 0, "bvh vs brute force mismatches %d", mismatches);
     lx_bvh_free(&b);
     lx_scene_destroy(s);
+
+    /* see-through materials: light (GI, baking) passes them, sound still bounces */
+    s = make_room(true);
+    LxMaterial glass = lx_material_default();
+    glass.blend_mode = LX_BLEND_GLASS;
+    glass.albedo.w = 0.2f;
+    char gp[LX_PATH_MAX];
+    lx_path_join(gp, sizeof gp, tmpdir(), "luxora_glass_test.lxmat");
+    lx_material_save(&glass, gp);
+    int panes = 0;
+    for (int i = 1; i < s->count && !panes; i++)
+        if (s->entities[i].alive && (s->entities[i].comps & LX_COMP_MESH)) { lx_strcpy(s->entities[i].mesh.material, LX_REF_MAX, gp); panes = 1; }
+    LxBvh all, light;
+    memset(&all, 0, sizeof all);
+    memset(&light, 0, sizeof light);
+    lx_bvh_build_from_scene(&all, s);
+    lx_bvh_build_light(&light, s);
+    CHECK(panes && all.tri_count == 7 * 12 && light.tri_count == 6 * 12, "glass blocks sound (%d) but not light (%d)", all.tri_count, light.tri_count);
+    lx_bvh_free(&all);
+    lx_bvh_free(&light);
+    lx_scene_destroy(s);
+    lx_path_remove(gp);
 }
 
 #define GI_EYE lx_v3(0, 1.5f, 0)
@@ -2111,6 +2133,20 @@ static void test_project(void) {
     CHECK(NEAR(r.graphics.ao_radius, 1.25f, 1e-4f) && NEAR(r.graphics.bloom_intensity, 0.6f, 1e-4f) && !r.graphics.godrays_enabled &&
           NEAR(r.graphics.temperature, -0.4f, 1e-4f) && NEAR(r.graphics.vignette, 0.5f, 1e-4f) && NEAR(r.graphics.contrast, 1.2f, 1e-4f),
           "camera and lens settings round trip");
+    CHECK(!r.build.cursor[0] && NEAR(r.build.cursor_size, 32, 1e-4f) && r.build.cursor_mode == 0, "games start with the system arrow");
+    lx_strcpy(r.build.cursor, sizeof r.build.cursor, "Textures/Pointer.png");
+    r.build.cursor_hotspot[0] = 0.25f; r.build.cursor_hotspot[1] = 0.1f; r.build.cursor_size = 48; r.build.cursor_mode = 1;
+    lx_project_save(&r);
+    LxProject cu;
+    lx_project_load(&cu, p.root);
+    CHECK(!strcmp(cu.build.cursor, "Textures/Pointer.png") && NEAR(cu.build.cursor_hotspot[0], 0.25f, 1e-5f) &&
+          NEAR(cu.build.cursor_hotspot[1], 0.1f, 1e-5f) && NEAR(cu.build.cursor_size, 48, 1e-4f) && cu.build.cursor_mode == 1, "game cursor saved");
+    lx_mouse_apply_project_cursor(&cu.build);
+    CHECK(!strcmp(lx_mouse_image(), "Textures/Pointer.png") && !lx_mouse_shown() && !lx_mouse_lock_wanted(), "and applied when the game starts");
+    cu.build.cursor[0] = 0; cu.build.cursor_mode = 2;
+    lx_mouse_apply_project_cursor(&cu.build);
+    CHECK(!lx_mouse_image()[0] && lx_mouse_lock_wanted(), "locked, the arrow back");
+    lx_mouse_reset();
     LxGraphicsSettings d = lx_graphics_defaults(2);
     CHECK(d.ao_enabled && d.bloom_enabled && d.godrays_enabled && d.contrast == 1.0f && d.saturation == 1.0f, "High: AO, bloom and sun shafts on");
     char scene_path[LX_PATH_MAX];
@@ -3921,6 +3957,36 @@ int main(void) {
         CHECK(NEAR(r.normal_strength, 1.5f, 1e-5f) && r.normal_flip_green && r.roughness_is_smoothness && NEAR(r.height_scale, 0.07f, 1e-5f) &&
               !r.parallax_shadows && NEAR(r.ao_strength, 0.5f, 1e-5f), "map settings survive");
         lx_path_remove(path);
+
+        printf("transparency\n");
+        m = lx_material_default();
+        CHECK(m.blend_mode == LX_BLEND_OPAQUE && NEAR(m.alpha_cutoff, 0.5f, 1e-6f) && !m.double_sided, "materials start solid");
+        m.blend_mode = LX_BLEND_CUTOUT; m.alpha_cutoff = 0.3f; m.double_sided = true; m.albedo.w = 0.8f;
+        CHECK(lx_material_save(&m, path) && lx_material_load(&r, path), "saves");
+        CHECK(r.blend_mode == LX_BLEND_CUTOUT && NEAR(r.alpha_cutoff, 0.3f, 1e-5f) && r.double_sided && NEAR(r.albedo.w, 0.8f, 1e-5f),
+              "Cutout, its cutoff, both faces and opacity survive");
+        for (int b = 0; b < LX_BLEND_COUNT; b++) {
+            m.blend_mode = (LxBlendMode)b;
+            lx_material_save(&m, path);
+            lx_material_load(&r, path);
+            CHECK(r.blend_mode == (LxBlendMode)b, "%s survives", lx_blend_mode_name((LxBlendMode)b));
+        }
+        lx_file_write(path, "name = Old\nalbedo = 1 1 1 0.5\n", 30);
+        CHECK(lx_material_load(&r, path) && r.blend_mode == LX_BLEND_OPAQUE && NEAR(r.alpha_cutoff, 0.5f, 1e-6f), "older materials stay solid");
+        lx_path_remove(path);
+        CHECK(!lx_blend_see_through(LX_BLEND_OPAQUE) && !lx_blend_see_through(LX_BLEND_CUTOUT) && lx_blend_see_through(LX_BLEND_FADE) &&
+              lx_blend_see_through(LX_BLEND_GLASS) && lx_blend_see_through(LX_BLEND_ADDITIVE), "which modes are drawn see-through");
+        /* what a picture's alpha is for */
+        int W = 64;
+        uint8_t *img = lx_alloc((size_t)W * W * 4);
+        for (int i = 0; i < W * W; i++) { img[i * 4] = img[i * 4 + 1] = img[i * 4 + 2] = 200; img[i * 4 + 3] = 255; }
+        CHECK(lx_image_alpha_kind(img, W, W) == 0, "all solid: opaque");
+        for (int i = 0; i < W * W; i++) img[i * 4 + 3] = (i % W) < W / 2 ? 0 : 255;
+        img[3] = 128;   /* a soft edge pixel or two doesn't make it blended */
+        CHECK(lx_image_alpha_kind(img, W, W) == 1, "holes and solid: a cut-out mask");
+        for (int i = 0; i < W * W; i++) img[i * 4 + 3] = (uint8_t)(40 + (i % W) * 2);
+        CHECK(lx_image_alpha_kind(img, W, W) == 2, "in-between alpha: see-through");
+        lx_free(img);
     }
     RUN(test_bvh);
     RUN(test_gi);

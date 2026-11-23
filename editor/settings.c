@@ -98,6 +98,19 @@ static void build_general(UiNode *b) {
     row_int(s, "Width", &ED.project.build.window_width, 320, 16384);
     row_int(s, "Height", &ED.project.build.window_height, 240, 16384);
     row_bool(s, "Fullscreen", &ED.project.build.fullscreen);
+    s = ed_section(b, UI_ICON_SELECT, "Game Cursor", &g_dummy_open, NULL);
+    static const char *CURSOR_MODES[] = {"Visible", "Hidden", "Locked (mouse look)"};
+    UiNode *ci = row_text(s, "Image", ED.project.build.cursor, sizeof ED.project.build.cursor);
+    ci->accept = "texture";
+    ci->icon = UI_ICON_TEXTURE;
+    lx_strcpy(ci->hint, sizeof ci->hint, "System arrow");
+    row_slider(s, "Hotspot X", &ED.project.build.cursor_hotspot[0], 0, 1);
+    row_slider(s, "Hotspot Y", &ED.project.build.cursor_hotspot[1], 0, 1);
+    row_num(s, "Size", &ED.project.build.cursor_size, 1, 8, 256);
+    row_drop(s, "At Start", &ED.project.build.cursor_mode, CURSOR_MODES, 3);
+    note(s, UI_ICON_INFO, "The mouse pointer your game starts with. Drag a PNG with a transparent background onto Image. "
+                          "Hotspot is the point that clicks (0, 0 = top-left corner). Size is in screen units (the screen is "
+                          "1080 tall). The Set Cursor action changes it while playing.");
     s = ed_section(b, UI_ICON_FOLDER, "Locations", &g_dummy_open, NULL);
     UiNode *l = ui_label(ED.ui, s, ED.project.root);
     l->icon = UI_ICON_FOLDER;

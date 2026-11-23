@@ -81,6 +81,7 @@ void lx_platform_set_cursor(int cursor); /* 0 arrow, 1 text, 2 resize-h, 3 resiz
 enum { LX_EDGE_LEFT = 1, LX_EDGE_RIGHT = 2, LX_EDGE_TOP = 4, LX_EDGE_BOTTOM = 8 };
 void lx_platform_set_intercept_close(bool on); /* close button / Alt+F4 become a request (see below) instead of quitting */
 bool lx_platform_take_close_request(void);
+bool lx_platform_cursor_image(const uint8_t *rgba, int w, int h, int hot_x, int hot_y);   /* the system shows this pointer (true), or the engine draws it */
 void lx_platform_set_icon(const uint8_t *rgba, int w, int h);  /* taskbar/window icon (Windows uses the .exe's) */
 void lx_platform_window_minimize(void);
 void lx_platform_window_toggle_maximize(void);
@@ -110,6 +111,7 @@ typedef struct LxInputState {
     float lock_cx, lock_cy;                                   /* where a locked pointer is held (< 0: window centre) */
     char mouse_image[LX_REF_MAX];
     float mouse_hot_x, mouse_hot_y, mouse_size;
+    bool mouse_native;                                        /* the image above is the system's pointer now (no lag); else drawn by the game UI */
     bool focused;
     float wheel;
     uint32_t text[64];
@@ -268,6 +270,7 @@ uint8_t *lx_png_encode(const uint8_t *rgba, int w, int h, size_t *out_size);
 uint8_t *lx_zlib_inflate(const uint8_t *data, size_t size, size_t *out_len);   /* zlib stream (2-byte header) */
 uint8_t *lx_image_resize(const uint8_t *rgba, int sw, int sh, int dw, int dh);   /* area-averaged */
 uint8_t *lx_image_square(const uint8_t *rgba, int w, int h, int size);           /* centre-crop + resize */
+int lx_image_alpha_kind(const uint8_t *rgba, int w, int h);   /* 0 opaque, 1 cut-out mask, 2 see-through */
 bool lx_ico_write(const char *path, const uint8_t *rgba, int w, int h);            /* multi-size Windows icon */
 void lx_renderer_texture_release(LxTexture *t);
 
@@ -556,6 +559,7 @@ typedef struct LxHit {
 
 void lx_bvh_build_from_scene(LxBvh *bvh, LxScene *s);
 void lx_bvh_build_gi(LxBvh *bvh, LxScene *s);   /* without terrain chunks */
+void lx_bvh_build_light(LxBvh *bvh, LxScene *s);   /* without see-through materials (glass, smoke): what light can't pass */
 /* terrain heights for threads (GI): prepared on the main thread, read-only afterwards */
 typedef struct LxTerrainQuery {
     int n;

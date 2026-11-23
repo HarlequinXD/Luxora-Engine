@@ -1080,12 +1080,58 @@ static UiNode *mat_tip(UiNode *n, const char *tip) {
     return n;
 }
 
+/* a new Color Map on an Opaque material: if the picture has see-through pixels, use them (cut-out mask or blended) */
+static void mat_color_map_changed(UiNode *n) {
+    LxMaterial *m = lx_asset_material(n->path);
+    if (m->blend_mode == LX_BLEND_OPAQUE && m->albedo_map[0]) {
+        char p[LX_PATH_MAX];
+        lx_asset_path(p, sizeof p, m->albedo_map);
+        int w, h;
+        uint8_t *px = lx_image_load(p, &w, &h);
+        int kind = lx_image_alpha_kind(px, w, h);
+        lx_free(px);
+        if (kind) {
+            m->blend_mode = kind == 1 ? LX_BLEND_CUTOUT : LX_BLEND_FADE;
+            if (kind == 1) m->double_sided = true;
+            ui_notify(ED.ui, "This picture has see-through parts: Transparency set to %s", lx_blend_mode_name(m->blend_mode));
+        }
+    }
+    material_changed(n);
+    ED.inspector_dirty = true;
+}
+static void mat_blend_changed(UiNode *n) { material_changed(n); ED.inspector_dirty = true; }
+
 static void build_material_editor(UiNode *parent, const char *ref) {
     LxMaterial *m = lx_asset_material(ref);
 
     mat_group(parent, "BASE COLOR", true);
     mat_bind(color_row(parent, "Color", &m->albedo.x, 1), ref);
-    mat_bind(asset_field(parent, "Color Map", m->albedo_map, sizeof m->albedo_map, "texture"), ref);
+    mat_bind(asset_field(parent, "Color Map", m->albedo_map, sizeof m->albedo_map, "texture"), ref)->on_change = mat_color_map_changed;
+
+    mat_group(parent, "TRANSPARENCY", false);
+    static const char *BLEND[] = {"Opaque", "Cutout", "Fade", "Glass", "Additive"};
+    UiNode *brow = ed_prop_row(parent, "Transparency");
+    UiNode *bd = ui_dropdown(ED.ui, brow, (int *)&m->blend_mode, BLEND, LX_BLEND_COUNT);
+    bd->grow = 1;
+    lx_strcpy(bd->path, sizeof bd->path, ref);
+    bd->on_change = mat_blend_changed;
+    static const char *BLEND_TIP[] = {
+        "Solid: the picture's alpha is ignored.",
+        "Pixels below Alpha Cutoff are cut away (leaves, grass cards, fences, chains). Sharp edges, shadows follow the cut.",
+        "See-through by Opacity x the picture's alpha, reflections too (ghosts, fading out, smoke and dust cards).",
+        "See-through, but keeps its reflections and shine (windows, water, bottles, visors). Light passes it.",
+        "Adds light on top of what's behind (fire, glows, magic, lasers). Black = invisible. Casts no shadow."};
+    UiNode *bt = ui_label(ED.ui, parent, BLEND_TIP[(unsigned)m->blend_mode < LX_BLEND_COUNT ? m->blend_mode : 0]);
+    bt->font = UI_FONT_SMALL;
+    bt->wrap = true;
+    bt->fg = ui_theme(ED.ui)->text_dim;
+    if (m->blend_mode != LX_BLEND_OPAQUE)
+        mat_tip(mat_bind(slider_row(parent, "Opacity", &m->albedo.w, 0, 1), ref), "Multiplies the Color Map's alpha");
+    if (m->blend_mode == LX_BLEND_CUTOUT)
+        mat_tip(mat_bind(slider_row(parent, "Alpha Cutoff", &m->alpha_cutoff, 0.01f, 0.99f), ref),
+                "Pixels with less alpha than this are cut away. Lower keeps more of thin edges");
+    mat_tip(mat_bind(bool_row(parent, "Double Sided", &m->double_sided), ref),
+            "Draw the back faces too: leaves, cloth, paper, glass panes and anything seen from both sides");
 
     mat_group(parent, "METALLIC", false);
     mat_bind(slider_row(parent, "Metallic", &m->metallic, 0, 1), ref);

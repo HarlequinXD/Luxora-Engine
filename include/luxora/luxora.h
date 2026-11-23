@@ -251,9 +251,21 @@ typedef enum LxPrimitive {
     LX_PRIM_CUBE, LX_PRIM_SPHERE, LX_PRIM_PLANE, LX_PRIM_CYLINDER, LX_PRIM_CAPSULE, LX_PRIM_COUNT
 } LxPrimitive;
 
+/* How a material treats see-through pixels. Alpha is the Color's alpha x the Color Map's alpha (x a crowd tint's). */
+typedef enum LxBlendMode {
+    LX_BLEND_OPAQUE,         /* alpha ignored */
+    LX_BLEND_CUTOUT,         /* pixels under Alpha Cutoff are not there at all (leaves, fences, hair cards); sharp, sorted for free */
+    LX_BLEND_FADE,           /* see-through by alpha, reflections and all (ghosts, fading out, smoke cards) */
+    LX_BLEND_GLASS,          /* see-through by alpha but keeps its reflections and shine (windows, water, bottles) */
+    LX_BLEND_ADDITIVE,       /* adds light (fire, glows, magic, lasers); casts no shadow */
+    LX_BLEND_COUNT
+} LxBlendMode;
+const char *lx_blend_mode_name(LxBlendMode m);
+bool lx_blend_see_through(LxBlendMode m);   /* Fade, Glass, Additive: drawn after the solid world, back to front */
+
 typedef struct LxMaterial {
     char name[LX_NAME_MAX];
-    LxVec4 albedo;           /* linear RGB + alpha */
+    LxVec4 albedo;           /* linear RGB + alpha (see blend_mode) */
     float metallic;
     float roughness;
     LxVec3 emissive;
@@ -271,6 +283,9 @@ typedef struct LxMaterial {
     float ao_strength;               /* 0..1 */
     float height_scale;              /* parallax depth in UV units (0.02 - 0.1 typical) */
     bool parallax_shadows;           /* the height field shadows itself from the sun */
+    LxBlendMode blend_mode;
+    float alpha_cutoff;              /* Cutout: alpha below this is cut away (0.5) */
+    bool double_sided;               /* both faces drawn (leaves, cloth, glass panes); the back faces are lit as their own side */
     /* acoustics: fraction of sound energy absorbed on reflection (0..1) and blocked on transmission */
     float acoustic_absorption;
     float acoustic_transmission;
@@ -1409,6 +1424,11 @@ typedef struct LxBuildSettings {
     int android_orientation;    /* 0 landscape, 1 portrait */
     char output_dir[LX_PATH_MAX];
     char icon[LX_REF_MAX];      /* game icon image in Assets (PNG/TGA/BMP); empty = default game-controller icon */
+    /* the game's mouse pointer when it starts (Set Cursor / lx_mouse_* change it while playing) */
+    char cursor[LX_REF_MAX];    /* image in Assets (transparent PNG); empty = the system arrow */
+    float cursor_hotspot[2];    /* 0..1 across and down the image: the point that clicks */
+    float cursor_size;          /* canvas units (the screen is 1080 tall) */
+    int cursor_mode;            /* 0 visible, 1 hidden, 2 locked (mouse look) */
 } LxBuildSettings;
 
 typedef struct LxProject {
@@ -1430,6 +1450,8 @@ typedef enum LxProjectTemplate { LX_TEMPLATE_EMPTY_3D, LX_TEMPLATE_SAMPLE_3D, LX
 bool lx_project_create(LxProject *p, const char *parent_dir, const char *name, LxProjectTemplate tpl);
 bool lx_project_load(LxProject *p, const char *root_dir);
 bool lx_project_save(const LxProject *p);
+/* the project's starting mouse pointer (Project Settings > General > Game Cursor); games start with it */
+void lx_mouse_apply_project_cursor(const LxBuildSettings *b);
 const char *lx_platform_name(LxPlatform p);
 LxPlatform lx_platform_current(void);
 /* the platform the game should behave as: lx_platform_current(), except in the editor's Play mode with Android as the

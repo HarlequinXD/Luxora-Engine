@@ -108,7 +108,7 @@ typedef struct SceneUBO {
 } SceneUBO;
 _Static_assert(sizeof(SceneUBO) <= 4096, "SceneUBO must fit its 4 KB slot");
 
-typedef struct Batch { LxMesh *mesh; int lod; const LxMaterial *mat; uint32_t first, count; } Batch;
+typedef struct Batch { LxMesh *mesh; int lod; const LxMaterial *mat; uint32_t first, count; float key; } Batch;
 typedef struct DrawList {
     Batch *batches; int nb, cb;
     float *inst; int *item_batch; int ni, ci;
@@ -179,6 +179,10 @@ static struct {
     /* pipelines */
     VkPipeline pbr, shadow, sky, grid, outline, tonemap_ldr, tonemap_swap, ui, precip;
     VkPipeline pbr_mrt, sky_mrt, pbr_probe, probe_filter, ssr_trace, ssr_composite;
+    /* material variants: [normal, MRT, probe face][solid, cutout][one-sided, double-sided] ([x][0][0] are the three above),
+     * see-through ones [one-sided, double-sided], and cut-out / dithered shadows */
+    VkPipeline pbr_var[3][2][2], pbr_blend[2], shadow_cut;
+    VkPipelineLayout shadow_cut_layout;
     /* reflection probes */
     ProbeSlot probes[PROBE_SLOTS];
     int probe_res, probe_mips;
@@ -211,7 +215,7 @@ static struct {
     /* settings & stats */
     LxGraphicsSettings settings;
     LxRenderStats stats;
-    DrawList main_list, shadow_lists[MAX_CASCADES], precip_list;
+    DrawList main_list, shadow_lists[MAX_CASCADES], precip_list, trans_list;
     char screenshot_path[LX_PATH_MAX];
     int validation_errors;
     double start_time;
@@ -465,6 +469,7 @@ typedef struct PipeDesc {
     VkFormat color, depth;
     bool depth_test, depth_write, blend, depth_bias;
     bool additive;           /* ONE + ONE (signed: the SSR composite subtracts too) */
+    bool premul;             /* ONE + ONE_MINUS_SRC_ALPHA: premultiplied see-through (alpha 0 = adds light) */
     int color_count;         /* 4 = main-pass MRT (colour, normal, reflection weight, ambient light) */
     VkCompareOp compare;
     VkCullModeFlags cull;
@@ -543,6 +548,13 @@ static VkPipeline pipeline_create(const PipeDesc *d) {
         cb.srcColorBlendFactor = cb.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
         cb.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
         cb.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        cb.colorBlendOp = cb.alphaBlendOp = VK_BLEND_OP_ADD;
+    } else if (d->premul) {
+        cb.blendEnable = VK_TRUE;
+        cb.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        cb.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        cb.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        cb.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
         cb.colorBlendOp = cb.alphaBlendOp = VK_BLEND_OP_ADD;
     } else if (d->blend) {
         cb.blendEnable = VK_TRUE;
@@ -1575,6 +1587,27 @@ static void create_static_resources(void) {
     p.fs = lx_spv_pbr_mrt_frag; p.fs_size = sizeof lx_spv_pbr_mrt_frag;
     p.color_count = 4;
     R.pbr_mrt = pipeline_create(&p);
+    /* material variants (see-through pixels, both faces) */
+    R.pbr_var[0][0][0] = R.pbr; R.pbr_var[1][0][0] = R.pbr_mrt; R.pbr_var[2][0][0] = R.pbr_probe;
+    for (int kind = 0; kind < 3; kind++)
+        for (int cut = 0; cut < 2; cut++)
+            for (int two = 0; two < 2; two++) {
+                if (!cut && !two) continue;
+                p.color_count = kind == 1 ? 4 : 1;
+                if (kind == 1) { p.fs = cut ? lx_spv_pbr_mrt_cut_frag : lx_spv_pbr_mrt_frag; p.fs_size = cut ? sizeof lx_spv_pbr_mrt_cut_frag : sizeof lx_spv_pbr_mrt_frag; }
+                else { p.fs = cut ? lx_spv_pbr_cut_frag : lx_spv_pbr_frag; p.fs_size = cut ? sizeof lx_spv_pbr_cut_frag : sizeof lx_spv_pbr_frag; }
+                p.cull = two ? VK_CULL_MODE_NONE : kind == 2 ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_BACK_BIT;
+                R.pbr_var[kind][cut][two] = pipeline_create(&p);
+            }
+    /* see-through: after the solid world, tested against its depth, not written; premultiplied colour */
+    p.fs = lx_spv_pbr_blend_frag; p.fs_size = sizeof lx_spv_pbr_blend_frag;
+    p.color_count = 1;
+    p.depth_write = false;
+    p.premul = true;
+    for (int two = 0; two < 2; two++) {
+        p.cull = two ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT;
+        R.pbr_blend[two] = pipeline_create(&p);
+    }
 
     memset(&p, 0, sizeof p);
     p.vs = lx_spv_fullscreen_vert; p.vs_size = sizeof lx_spv_fullscreen_vert;
@@ -1599,6 +1632,19 @@ static void create_static_resources(void) {
     p.layout = R.shadow_layout; p.vertex = VTX_MESH_POS_ONLY; p.depth = R.depth_format;
     p.depth_test = p.depth_write = true; p.depth_bias = true; p.cull = VK_CULL_MODE_NONE;
     R.shadow = pipeline_create(&p);
+    {   /* see-through shadows: the material's colour map (set 0), the light's matrix + the material's alpha numbers */
+        VkPushConstantRange pr = {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 80};
+        VkPipelineLayoutCreateInfo li = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        li.setLayoutCount = 1;
+        li.pSetLayouts = &R.material_layout;
+        li.pushConstantRangeCount = 1;
+        li.pPushConstantRanges = &pr;
+        VK_CHECK(vkCreatePipelineLayout(R.device, &li, NULL, &R.shadow_cut_layout));
+    }
+    p.vs = lx_spv_shadow_cut_vert; p.vs_size = sizeof lx_spv_shadow_cut_vert;
+    p.fs = lx_spv_shadow_cut_frag; p.fs_size = sizeof lx_spv_shadow_cut_frag;
+    p.layout = R.shadow_cut_layout; p.vertex = VTX_MESH;
+    R.shadow_cut = pipeline_create(&p);
 
     memset(&p, 0, sizeof p);
     p.vs = lx_spv_sky_vert; p.vs_size = sizeof lx_spv_sky_vert;   /* at the far plane: only where no geometry is */
@@ -1768,10 +1814,14 @@ void lx_renderer_shutdown(void) {
     image_destroy(&R.dummy_cube);
     VkPipeline pipes[] = {R.pbr, R.shadow, R.sky, R.grid, R.outline, R.tonemap_ldr, R.tonemap_swap, R.ui, R.precip,
                           R.pbr_mrt, R.sky_mrt, R.pbr_probe, R.probe_filter, R.ssr_trace, R.ssr_composite,
-                          R.ao, R.ao_apply, R.bloom_down, R.bloom_up, R.godrays};
+                          R.ao, R.ao_apply, R.bloom_down, R.bloom_up, R.godrays, R.pbr_blend[0], R.pbr_blend[1], R.shadow_cut};
     for (size_t i = 0; i < sizeof pipes / sizeof pipes[0]; i++) if (pipes[i]) vkDestroyPipeline(R.device, pipes[i], NULL);
+    for (int k = 0; k < 3; k++)
+        for (int c = 0; c < 2; c++)
+            for (int t = 0; t < 2; t++)
+                if ((c || t) && R.pbr_var[k][c][t]) vkDestroyPipeline(R.device, R.pbr_var[k][c][t], NULL);
     VkPipelineLayout layouts[] = {R.pbr_layout, R.shadow_layout, R.scene_only_layout, R.outline_layout, R.tonemap_layout, R.ui_layout,
-                                  R.ssr_pipe_layout, R.filter_layout, R.post_layout};
+                                  R.ssr_pipe_layout, R.filter_layout, R.post_layout, R.shadow_cut_layout};
     for (size_t i = 0; i < sizeof layouts / sizeof layouts[0]; i++) vkDestroyPipelineLayout(R.device, layouts[i], NULL);
     VkDescriptorSetLayout set_layouts[] = {R.scene_layout, R.material_layout, R.tex_layout, R.probe_layout, R.ssr_layout, R.post_set_layout};
     for (size_t i = 0; i < sizeof set_layouts / sizeof set_layouts[0]; i++) vkDestroyDescriptorSetLayout(R.device, set_layouts[i], NULL);
@@ -1788,6 +1838,7 @@ void lx_renderer_shutdown(void) {
     for (int i = 0; i < LOCAL_SHADOW_LIGHTS; i++) { lx_free(R.local_lists[i].batches); lx_free(R.local_lists[i].inst); lx_free(R.local_lists[i].item_batch); }
     for (int i = 0; i < MAX_CASCADES; i++) { lx_free(R.shadow_lists[i].batches); lx_free(R.shadow_lists[i].inst); lx_free(R.shadow_lists[i].item_batch); }
     lx_free(R.main_list.batches); lx_free(R.main_list.inst); lx_free(R.main_list.item_batch);
+    lx_free(R.trans_list.batches); lx_free(R.trans_list.inst); lx_free(R.trans_list.item_batch);
     lx_free(R.precip_list.batches); lx_free(R.precip_list.inst); lx_free(R.precip_list.item_batch);
     lx_free(R.probe_list.batches); lx_free(R.probe_list.inst); lx_free(R.probe_list.item_batch);
     lx_gi_shutdown();
@@ -2456,12 +2507,14 @@ static void dl_add_lm(DrawList *dl, LxMesh *mesh, int lod, const LxMaterial *mat
 static void dl_add(DrawList *dl, LxMesh *mesh, int lod, const LxMaterial *mat, const float *model, LxVec4 tint) {
     dl_add_lm(dl, mesh, lod, mat, model, tint, NO_LIGHTMAP);
 }
+static float g_dl_key = -1;   /* >= 0: the next item gets a batch of its own with this sort key (see-through, by distance) */
 static void dl_add_lm(DrawList *dl, LxMesh *mesh, int lod, const LxMaterial *mat, const float *model, LxVec4 tint, const float *lm) {
     int b = -1;
-    for (int i = dl->nb - 1; i >= 0; i--)
-        if (dl->batches[i].mesh == mesh && dl->batches[i].lod == lod && dl->batches[i].mat == mat) { b = i; break; }
+    if (g_dl_key < 0)
+        for (int i = dl->nb - 1; i >= 0; i--)
+            if (dl->batches[i].mesh == mesh && dl->batches[i].lod == lod && dl->batches[i].mat == mat) { b = i; break; }
     if (b < 0) {
-        Batch nb = {mesh, lod, mat, 0, 0};
+        Batch nb = {mesh, lod, mat, 0, 0, g_dl_key};
         LX_VEC_PUSH(dl->batches, dl->nb, dl->cb, nb);
         b = dl->nb - 1;
     }
@@ -2499,6 +2552,11 @@ static bool dl_upload(DrawList *dl, FrameData *fr) {
     return true;
 }
 
+/* see-through draws, furthest first (after dl_upload: each batch keeps its place in the stream) */
+static int batch_far_first(const void *a, const void *b) {
+    float ka = ((const Batch *)a)->key, kb = ((const Batch *)b)->key;
+    return ka < kb ? 1 : ka > kb ? -1 : 0;
+}
 static int pick_lod(const LxMesh *m, float screen_size) {
     if (!R.settings.lod_enabled) return 0;
     float bias = R.settings.lod_bias > 0.05f ? R.settings.lod_bias : 1.0f;
@@ -2507,28 +2565,66 @@ static int pick_lod(const LxMesh *m, float screen_size) {
     return m->lod_count - 1;
 }
 
-static void draw_batches(VkCommandBuffer cmd, const DrawList *dl, VkBuffer inst, bool shading, VkDescriptorSet scene_set, uint32_t ubo_off) {
+enum { DRAW_DEPTH, DRAW_MAIN, DRAW_MRT, DRAW_PROBE, DRAW_SEE_THROUGH };
+static int mat_flags(const LxMaterial *m) {
+    int flags = (m->roughness_map[0] ? 1 : 0) | (m->metallic_map[0] ? 2 : 0) | (m->ao_map[0] ? 4 : 0) |
+                (m->roughness_is_smoothness ? 8 : 0) | (m->parallax_shadows ? 16 : 0);
+    if (lx_terrain_gpu_layers(m)) flags |= 32;   /* MF_TERRAIN: blend the layers the vertices carry */
+    if (m->blend_mode == LX_BLEND_GLASS) flags |= 256;
+    if (m->blend_mode == LX_BLEND_ADDITIVE) flags |= 512;
+    return flags;
+}
+/* Draws a list. DRAW_DEPTH: shadows and the precipitation map (the caller pushes the light's matrix as `light_vp`);
+ * solid materials share R.shadow, Cutout / Fade / Glass use R.shadow_cut with their colour map, Additive casts none.
+ * The shading modes pick each batch's pipeline from its material (cut-out pixels, both faces). */
+static void draw_batches(VkCommandBuffer cmd, const DrawList *dl, VkBuffer inst, int mode, VkDescriptorSet scene_set, uint32_t ubo_off,
+                         const float *light_vp) {
+    VkPipeline bound = VK_NULL_HANDLE;
     for (int b = 0; b < dl->nb; b++) {
         const Batch *bt = &dl->batches[b];
         if (!bt->count) continue;
+        const LxMaterial *m = bt->mat;
+        if (mode == DRAW_DEPTH) {
+            if (m->blend_mode == LX_BLEND_ADDITIVE) continue;
+            bool cut = m->blend_mode != LX_BLEND_OPAQUE && (m->albedo_map[0] || m->albedo.w < 0.999f) && !lx_terrain_gpu_layers(m);
+            VkPipeline want = cut ? R.shadow_cut : R.shadow;
+            if (want != bound) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, want);
+                if (light_vp) {
+                    if (cut) vkCmdPushConstants(cmd, R.shadow_cut_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 64, light_vp);
+                    else vkCmdPushConstants(cmd, R.shadow_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 64, light_vp);
+                }
+                bound = want;
+            }
+            if (cut) {
+                VkDescriptorSet ms = material_set(m);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.shadow_cut_layout, 0, 1, &ms, 0, NULL);
+                float mp[4] = {m->albedo.w, m->alpha_cutoff, m->uv_scale > 0 ? m->uv_scale : 1.0f, m->blend_mode == LX_BLEND_CUTOUT ? 0.0f : 1.0f};
+                vkCmdPushConstants(cmd, R.shadow_cut_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 64, 16, mp);
+            }
+        } else {
+            VkPipeline want;
+            int two = m->double_sided ? 1 : 0;
+            if (mode == DRAW_SEE_THROUGH) want = R.pbr_blend[two];
+            else want = R.pbr_var[mode == DRAW_MRT ? 1 : mode == DRAW_PROBE ? 2 : 0][m->blend_mode == LX_BLEND_CUTOUT ? 1 : 0][two];
+            if (want != bound) { vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, want); bound = want; }
+        }
         MeshGpu *g = mesh_gpu(bt->mesh);
         VkBuffer vbs[2] = {g->vb[bt->lod].buf, inst};
         VkDeviceSize offs[2] = {0, 0};
         vkCmdBindVertexBuffers(cmd, 0, 2, vbs, offs);
         vkCmdBindIndexBuffer(cmd, g->ib[bt->lod].buf, 0, VK_INDEX_TYPE_UINT32);
-        if (shading) {
-            const LxMaterial *m = bt->mat;
+        if (mode != DRAW_DEPTH) {
             VkDescriptorSet sets[2] = {scene_set, material_set(m)};
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.pbr_layout, 0, 2, sets, 1, &ubo_off);
             float nstr = m->normal_map[0] ? lx_maxf(m->normal_strength, 0.001f) * (m->normal_flip_green ? -1.0f : 1.0f) : 0.0f;
-            int flags = (m->roughness_map[0] ? 1 : 0) | (m->metallic_map[0] ? 2 : 0) | (m->ao_map[0] ? 4 : 0) |
-                        (m->roughness_is_smoothness ? 8 : 0) | (m->parallax_shadows ? 16 : 0);
+            int flags = mat_flags(m);
             const LxTerrainGpuLayers *tl = lx_terrain_gpu_layers(m);
-            if (tl) flags |= 32;   /* MF_TERRAIN: blend the layers the vertices carry */
             float pc[24] = {m->albedo.x, m->albedo.y, m->albedo.z, m->albedo.w,
                             m->metallic, m->roughness, m->uv_scale > 0 ? m->uv_scale : 1.0f, nstr,
                             m->emissive.x, m->emissive.y, m->emissive.z, m->emissive_strength,
-                            m->height_map[0] ? lx_maxf(m->height_scale, 0.0f) : 0.0f, m->ao_strength, (float)flags, 0};
+                            m->height_map[0] ? lx_maxf(m->height_scale, 0.0f) : 0.0f, m->ao_strength, (float)flags,
+                            lx_clampf(m->alpha_cutoff, 0.0f, 1.0f)};
             if (tl) {   /* each layer's tiling (metres a repeat covers), how many layers */
                 for (int l = 0; l < 6; l++) pc[16 + l] = tl->tiling[l] > 0.05f ? tl->tiling[l] : 4.0f;
                 pc[22] = (float)tl->count;
@@ -2878,7 +2974,9 @@ static bool probe_render_face(LxScene *s, ProbeSlot *p, int face, VkCommandBuffe
         float lmb[4];
         const float *lm = entity_lightmap(d, mesh, lmb);
         LxMesh *dm = lm[3] >= 0 ? lx_mesh_lightmap_variant(mesh, lx_mat4_scale_of(&d->world)) : mesh;
-        dl_add_lm(&R.probe_list, dm, pick_lod(dm, radius * 0.5f / dist), lx_asset_material(d->mesh.material), d->world.m, white, lm);
+        const LxMaterial *pm = lx_asset_material(d->mesh.material);
+        if (lx_blend_see_through(pm->blend_mode)) continue;   /* reflections show the solid surroundings */
+        dl_add_lm(&R.probe_list, dm, pick_lod(dm, radius * 0.5f / dist), pm, d->world.m, white, lm);
     }
     if (!dl_upload(&R.probe_list, fr)) return false;
 
@@ -2916,7 +3014,7 @@ static bool probe_render_face(LxScene *s, ProbeSlot *p, int face, VkCommandBuffe
     vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.pbr_probe);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.pbr_layout, 2, 1, &R.probe_dummy_set, 0, NULL);
-    draw_batches(cmd, &R.probe_list, fr->inst.buf, true, fr->scene_set, off);
+    draw_batches(cmd, &R.probe_list, fr->inst.buf, DRAW_PROBE, fr->scene_set, off, NULL);
     vkCmdEndRendering(cmd);
     image_barrier_layers(cmd, p->cube.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
@@ -3267,6 +3365,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     LxFrustum cfr[MAX_CASCADES];
     for (int c = 0; c < cascades; c++) { cfr[c] = lx_frustum_from_matrix(cvp[c]); dl_reset(&R.shadow_lists[c]); }
     dl_reset(&R.main_list);
+    dl_reset(&R.trans_list);
     dl_reset(&R.precip_list);
     LxFrustum pfr = lx_frustum_from_matrix(precip_vp);
     for (int k = 0; k < local_n; k++) dl_reset(&R.local_lists[k]);
@@ -3291,7 +3390,11 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
                 float lmb[4];
                 const float *lm = entity_lightmap(d, mesh, lmb);
                 LxMesh *dm = lm[3] >= 0 ? lx_mesh_lightmap_variant(mesh, lx_mat4_scale_of(&d->world)) : mesh;   /* stretched: its own unwrap */
-                dl_add_lm(&R.main_list, dm, pick_lod(dm, radius * proj_scale / dist), mat, d->world.m, white, lm);
+                if (lx_blend_see_through(mat->blend_mode)) {   /* after the solid world, furthest first */
+                    g_dl_key = dist;
+                    dl_add_lm(&R.trans_list, dm, pick_lod(dm, radius * proj_scale / dist), mat, d->world.m, white, lm);
+                    g_dl_key = -1;
+                } else dl_add_lm(&R.main_list, dm, pick_lod(dm, radius * proj_scale / dist), mat, d->world.m, white, lm);
             } else R.stats.instances_culled++;
             if (precip_map && d->generated != LX_GEN_GRASS && lx_frustum_test_sphere(&pfr, c, radius) && !moves_about(s, d))   /* roofs: what stays put */
                 dl_add(&R.precip_list, mesh, mesh->lod_count > 1 ? 1 : 0, mat, d->world.m, white);
@@ -3328,13 +3431,20 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
                                     0.55f + 0.45f * (float)((h >> 24) & 255) / 255.0f, 1);
                 if (vis) {
                     float dist = lx_maxf(lx_len3(lx_sub3(p, view->eye)), 1e-3f);
-                    dl_add(&R.main_list, mesh, pick_lod(mesh, r * proj_scale / dist), mat, m, tint);
+                    bool see = lx_blend_see_through(mat->blend_mode);
+                    if (see) g_dl_key = dist;
+                    dl_add(see ? &R.trans_list : &R.main_list, mesh, pick_lod(mesh, r * proj_scale / dist), mat, m, tint);
+                    g_dl_key = -1;
                 }
                 if (shadow) dl_add(&R.shadow_lists[0], mesh, mesh->lod_count - 1, mat, m, tint);
             }
         }
     }
     bool ok = dl_upload(&R.main_list, fr);
+    if (R.trans_list.nb) {
+        ok = dl_upload(&R.trans_list, fr) && ok;
+        qsort(R.trans_list.batches, (size_t)R.trans_list.nb, sizeof(Batch), batch_far_first);
+    }
     for (int c = 0; c < cascades; c++) ok = dl_upload(&R.shadow_lists[c], fr) && ok;
     for (int k = 0; k < local_n; k++) ok = dl_upload(&R.local_lists[k], fr) && ok;
     if (precip_map) ok = dl_upload(&R.precip_list, fr) && ok;
@@ -3342,6 +3452,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     if (!ok) {
         /* instance stream full: draw nothing extra this frame, buffer grows next frame */
         dl_reset(&R.main_list);
+        dl_reset(&R.trans_list);
         for (int c = 0; c < cascades; c++) dl_reset(&R.shadow_lists[c]);
         for (int k = 0; k < local_n; k++) dl_reset(&R.local_lists[k]);
         dl_reset(&R.precip_list);
@@ -3370,9 +3481,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
             VkRect2D sc = {{0, 0}, {(uint32_t)R.shadow_res, (uint32_t)R.shadow_res}};
             vkCmdSetViewport(cmd, 0, 1, &vp);
             vkCmdSetScissor(cmd, 0, 1, &sc);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.shadow);
-            vkCmdPushConstants(cmd, R.shadow_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 64, cvp[c].m);
-            draw_batches(cmd, &R.shadow_lists[c], fr->inst.buf, false, VK_NULL_HANDLE, 0);
+            draw_batches(cmd, &R.shadow_lists[c], fr->inst.buf, DRAW_DEPTH, VK_NULL_HANDLE, 0, cvp[c].m);
             vkCmdEndRendering(cmd);
         }
         image_barrier(cmd, R.shadow_map.img, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
@@ -3403,9 +3512,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
         VkRect2D sc = {{0, 0}, {(uint32_t)R.shadow_res, (uint32_t)R.shadow_res}};
         vkCmdSetViewport(cmd, 0, 1, &vp);
         vkCmdSetScissor(cmd, 0, 1, &sc);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.shadow);
-        vkCmdPushConstants(cmd, R.shadow_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 64, precip_vp.m);
-        draw_batches(cmd, &R.precip_list, fr->inst.buf, false, VK_NULL_HANDLE, 0);
+        draw_batches(cmd, &R.precip_list, fr->inst.buf, DRAW_DEPTH, VK_NULL_HANDLE, 0, precip_vp.m);
         vkCmdEndRendering(cmd);
         image_barrier_layers(cmd, R.shadow_map.img, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
@@ -3431,7 +3538,6 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
         ri.layerCount = 1;
         ri.pDepthAttachment = &da;
         vkCmdBeginRendering(cmd, &ri);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.shadow);
         int tres = R.local_shadow_res / ATLAS_TILES;
         for (int k = 0; k < local_n; k++) {
             int first = (int)ubo.light_shadow[local_light[k]][0];
@@ -3441,8 +3547,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
                 VkRect2D sc = {{tx * tres, ty * tres}, {(uint32_t)tres, (uint32_t)tres}};
                 vkCmdSetViewport(cmd, 0, 1, &vp);
                 vkCmdSetScissor(cmd, 0, 1, &sc);
-                vkCmdPushConstants(cmd, R.shadow_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 64, local_vp[k][fc].m);
-                draw_batches(cmd, &R.local_lists[k], fr->inst.buf, false, VK_NULL_HANDLE, 0);
+                draw_batches(cmd, &R.local_lists[k], fr->inst.buf, DRAW_DEPTH, VK_NULL_HANDLE, 0, local_vp[k][fc].m);
             }
         }
         vkCmdEndRendering(cmd);
@@ -3462,7 +3567,8 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     bool mrt = ssr || ao;                               /* the extra targets: normals, reflection weight, ambient light */
     bool precip = precip_drops + precip_flakes > 0;
     bool shafts_on = gs->godrays_enabled && gs->godrays_intensity > 0.0f && persp;   /* they read the depth buffer too */
-    bool post = mrt || shafts_on || view->highlight || view->draw_grid || precip;
+    bool see_through = R.trans_list.nb > 0;   /* drawn in the overlay pass, over the finished solid world */
+    bool post = mrt || shafts_on || see_through || view->highlight || view->draw_grid || precip;
     if (mrt) {
         GpuImage *g[3] = {&rt->gnormal, &rt->gspec, &rt->gamb};
         for (int i = 0; i < 3; i++)
@@ -3516,7 +3622,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     vkCmdSetScissor(cmd, 0, 1, &sc);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mrt ? R.pbr_mrt : R.pbr);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.pbr_layout, 2, 1, &R.probe_set, 0, NULL);
-    draw_batches(cmd, &R.main_list, fr->inst.buf, true, fr->scene_set, ubo_off);
+    draw_batches(cmd, &R.main_list, fr->inst.buf, mrt ? DRAW_MRT : DRAW_MAIN, fr->scene_set, ubo_off, NULL);
     /* the sky last, at the far plane: its pixels are the ones nothing covered */
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mrt ? R.sky_mrt : R.sky);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.scene_only_layout, 0, 1, &fr->scene_set, 1, &ubo_off);
@@ -3614,6 +3720,11 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.post_layout, 0, 2, sets, 1, &ubo_off);
             vkCmdPushConstants(cmd, R.post_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 64, pc);
             vkCmdDraw(cmd, 3, 1, 0, 0);
+        }
+        if (see_through) {   /* glass, water, smoke, fire: furthest first, over everything solid (and its AO / reflections) */
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.pbr_blend[0]);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.pbr_layout, 2, 1, &R.probe_set, 0, NULL);
+            draw_batches(cmd, &R.trans_list, fr->inst.buf, DRAW_SEE_THROUGH, fr->scene_set, ubo_off, NULL);
         }
         if (precip) {   /* rain and snow, depth-tested against the scene, blended over it */
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.precip);

@@ -552,8 +552,30 @@ void lx_game_ui_geometry(LxGameUiGeometry *out) {
         lx_input_emit_touch_controls();
         G.anchor = a;
     }
-    /* a custom mouse pointer (Set Mouse): drawn last, over everything, once a frame */
-    if (!G.cursor_drawn && g_lx_input.mouse_image[0] && !g_lx_input.mouse_locked && !g_lx_input.mouse_lock_blocked && !g_lx_input.mouse_hide_want && ready()) {
+    /* a custom mouse pointer (Set Cursor): the system's own pointer where the platform can (it moves with no lag),
+     * else drawn last, over everything, once a frame. Its picture's transparency is kept either way. */
+    {
+        static char made_ref[LX_REF_MAX];
+        static int made_px;
+        int px = (int)(g_lx_input.mouse_size * G.scale + 0.5f);
+        px = px < 8 ? 8 : px > 256 ? 256 : px;
+        if (!g_lx_input.mouse_image[0]) { made_ref[0] = 0; g_lx_input.mouse_native = false; }
+        else if (strcmp(made_ref, g_lx_input.mouse_image) || made_px != px) {
+            lx_strcpy(made_ref, sizeof made_ref, g_lx_input.mouse_image);
+            made_px = px;
+            LxTexture *t = lx_asset_texture(g_lx_input.mouse_image);
+            bool ok = false;
+            if (t && t->pixels && t->width > 0 && t->height > 0) {
+                uint8_t *sq = lx_image_resize(t->pixels, t->width, t->height, px, px);
+                int hx = (int)lx_clampf(g_lx_input.mouse_hot_x * (float)px, 0, (float)(px - 1));
+                int hy = (int)lx_clampf(g_lx_input.mouse_hot_y * (float)px, 0, (float)(px - 1));
+                ok = sq && lx_platform_cursor_image(sq, px, px, hx, hy);
+                lx_free(sq);
+            }
+            g_lx_input.mouse_native = ok;
+        }
+    }
+    if (!G.cursor_drawn && !g_lx_input.mouse_native && g_lx_input.mouse_image[0] && !g_lx_input.mouse_locked && !g_lx_input.mouse_lock_blocked && !g_lx_input.mouse_hide_want && ready()) {
         G.cursor_drawn = true;
         uint32_t tex = image_texture(g_lx_input.mouse_image);
         float sz = g_lx_input.mouse_size, x = G.pointer.x - g_lx_input.mouse_hot_x * sz, y = G.pointer.y - g_lx_input.mouse_hot_y * sz;

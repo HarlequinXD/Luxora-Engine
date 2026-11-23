@@ -35,6 +35,9 @@ layout(push_constant) uniform Material {
 } m;
 
 const int MF_ROUGH_MAP = 1, MF_METAL_MAP = 2, MF_AO_MAP = 4, MF_SMOOTHNESS = 8, MF_PARALLAX_SHADOWS = 16, MF_TERRAIN = 32;
+const int MF_GLASS = 256, MF_ADDITIVE = 512;   // see-through kinds (pbr_blend.frag); Fade is the rest
+// Variants: LX_CUTOUT (pbr_cut / pbr_mrt_cut) cuts away pixels under the material's alpha cutoff;
+// LX_BLEND (pbr_blend) is drawn after the solid world and writes premultiplied colour + how much it hides behind it.
 
 /* Terrain: the vertices carry six layer weights (uv: 0-1, uv2: 2-3, tangent.w: 4, the rest: 5). Each layer is
    sampled from above in world space (or from three sides on steep slopes), and they are blended by height so rock
@@ -491,6 +494,12 @@ void main() {
     }
 
     vec4 tex = textureGrad(u_albedo_map, uv, uv_dx, uv_dy);
+    float alpha = m.albedo.a * tex.a * v_tint.a;
+#if defined(LX_CUTOUT)
+    // smaller mips average the alpha down, so thin cut-outs (leaves, wires) would thin away in the distance: lift it
+    alpha *= 1.0 + max(textureQueryLod(u_albedo_map, uv).x, 0.0) * 0.25;
+    if (alpha < m.params2.w) discard;
+#endif
     vec3 albedo = m.albedo.rgb * tex.rgb * v_tint.rgb;
     float metallic = m.params.x, rough = m.params.y;
     if ((flags & MF_ROUGH_MAP) != 0) {
@@ -689,7 +698,19 @@ void main() {
     color += m.emissive.rgb * m.emissive.w;
     float fog = 1.0 - exp(-u.ground_color.w * length(u.camera_pos.xyz - v_world));
     color = mix(color, u.fog_color.rgb * ambient, fog);
+#if defined(LX_BLEND)
+    float a = clamp(alpha, 0.0, 1.0);
+    if ((flags & MF_ADDITIVE) != 0) o_color = vec4(color * a, 0.0);   // adds light, hides nothing
+    else if ((flags & MF_GLASS) != 0) {
+        // glass: the body fades with alpha, the reflection stays (and hides more of the view at grazing angles)
+        vec3 shine = spec_weight * env * (1.0 - fog);
+        vec3 body = max(color - shine, vec3(0.0));
+        float f = clamp(dot(spec_weight, vec3(0.3333)), 0.0, 1.0) * (1.0 - fog);
+        o_color = vec4(body * a + shine, clamp(a + (1.0 - a) * f, 0.0, 1.0));
+    } else o_color = vec4(color * a, a);
+#else
     o_color = vec4(color, 1.0);
+#endif
 #if LX_MRT
     o_normal = vec4(n * 0.5 + 0.5, 1.0);
     o_spec = vec4(spec_weight * (1.0 - fog), rough);

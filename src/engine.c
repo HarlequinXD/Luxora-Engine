@@ -117,6 +117,7 @@ int lx_run(const LxAppDesc *d) {
     const char *start = d->start_scene ? d->start_scene : (E.has_project ? E.project.startup_scene : NULL);
     E.scene = start ? load_scene_ref(start) : NULL;
     if (!E.scene) E.scene = lx_scene_create_default("Main");
+    if (E.has_project) lx_mouse_apply_project_cursor(&E.project.build);   /* the game's own pointer, if it has one */
     if (d->on_start) d->on_start(E.scene);
 
     double last = lx_time();

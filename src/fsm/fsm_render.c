@@ -336,7 +336,7 @@ static void cu_set(LxFsmCtx *c) {
     lx_mouse_lock(mode == 2);
     lx_mouse_show(mode == 0);
     const char *tex = lx_fsm_asset(c, 1);
-    if (tex && tex[0]) lx_mouse_set_image(tex, lx_fsm_float(c, 2), lx_fsm_float(c, 3), lx_fsm_float(c, 4));
+    lx_mouse_set_image(tex && tex[0] ? tex : NULL, lx_fsm_float(c, 2), lx_fsm_float(c, 3), lx_fsm_float(c, 4));   /* empty: the arrow again */
 }
 static const LxFsmActionDesc A_CU_SET = {"Set Cursor", "Screen", "Shows, hides or locks the mouse pointer, and can give it a picture. Locked is what mouse-look needs.",
     "cursor {0}",

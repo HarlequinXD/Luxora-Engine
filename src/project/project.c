@@ -108,6 +108,7 @@ static void defaults(LxProject *p) {
     if (p->build.target == LX_PLATFORM_ANDROID) p->build.target = LX_PLATFORM_LINUX;
     p->build.window_width = 1280;
     p->build.window_height = 720;
+    p->build.cursor_size = 32;
     p->build.android_min_sdk = 28;
     p->build.android_orientation = 0;
     p->build.development_build = true;
@@ -156,6 +157,8 @@ bool lx_project_save(const LxProject *p) {
     lx_sb_printf(&sb, "android_package = %s\nandroid_min_sdk = %d\nandroid_orientation = %s\noutput_dir = %s\n", b->android_package,
                  b->android_min_sdk, b->android_orientation ? "portrait" : "landscape", b->output_dir);
     lx_sb_printf(&sb, "icon = %s\n", b->icon);
+    lx_sb_printf(&sb, "cursor = %s\ncursor_hotspot = %g %g\ncursor_size = %g\ncursor_mode = %d\n", b->cursor, b->cursor_hotspot[0],
+                 b->cursor_hotspot[1], b->cursor_size, b->cursor_mode);
     for (int i = 0; i < b->scene_count; i++) lx_sb_printf(&sb, "scene = %s\n", b->scenes[i]);
     char path[LX_PATH_MAX];
     lx_path_join(path, sizeof path, p->root, "project.lxproj");
@@ -264,6 +267,13 @@ bool lx_project_load(LxProject *p, const char *root) {
             else if (!strcmp(k, "android_orientation")) b->android_orientation = !strcmp(v, "portrait");
             else if (!strcmp(k, "output_dir")) lx_strcpy(b->output_dir, sizeof b->output_dir, v);
             else if (!strcmp(k, "icon")) lx_strcpy(b->icon, sizeof b->icon, v);
+            else if (!strcmp(k, "cursor")) lx_strcpy(b->cursor, sizeof b->cursor, v);
+            else if (!strcmp(k, "cursor_hotspot")) {
+                LxVec3 h = lx_parse_vec3(v);
+                b->cursor_hotspot[0] = lx_clampf(h.x, 0, 1);
+                b->cursor_hotspot[1] = lx_clampf(h.y, 0, 1);
+            } else if (!strcmp(k, "cursor_size")) b->cursor_size = f > 1 ? f : 32;
+            else if (!strcmp(k, "cursor_mode")) b->cursor_mode = n >= 0 && n <= 2 ? n : 0;
             else if (!strcmp(k, "scene") && b->scene_count < LX_MAX_BUILD_SCENES)
                 lx_strcpy(b->scenes[b->scene_count++], sizeof b->scenes[0], v);
         }

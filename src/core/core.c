@@ -439,6 +439,12 @@ void lx_mouse_set_image(const char *ref, float hx, float hy, float size) {
     g_lx_input.mouse_size = isfinite(size) && size > 1 ? lx_minf(size, 1024) : 32;
 }
 const char *lx_mouse_image(void) { return g_lx_input.mouse_image; }
+void lx_mouse_apply_project_cursor(const LxBuildSettings *b) {
+    if (!b) return;
+    lx_mouse_lock(b->cursor_mode == 2);
+    lx_mouse_show(b->cursor_mode == 0);
+    lx_mouse_set_image(b->cursor[0] ? b->cursor : NULL, b->cursor_hotspot[0], b->cursor_hotspot[1], b->cursor_size);
+}
 void lx_mouse_lock_block(bool blocked) { g_lx_input.mouse_lock_blocked = blocked; }
 void lx_mouse_lock_center(float x, float y) { g_lx_input.lock_cx = x; g_lx_input.lock_cy = y; }
 void lx_mouse_reset(void) {
