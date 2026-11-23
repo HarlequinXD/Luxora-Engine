@@ -412,12 +412,28 @@ void lx_sky_simulate(LxScene *s, float dt) {
                                   L->thunder_vol * (0.85f + 0.3f * rnd(L)));
         }
     }
-    /* the sound of rain: a light loop and a heavy one, mixed by how hard it rains */
+    /* the sound of rain: a light loop and a heavy one, mixed by how hard it rains - made here, or the game's own files */
     float rr = L->rain;
     float light = rr > 0.01f ? lx_minf(1.0f, rr * 3.0f) * (1.0f - 0.55f * smooth01(0.4f, 1.0f, rr)) * 0.6f : 0.0f;
     float heavy = smooth01(0.3f, 1.0f, rr) * 0.85f;
-    lx_audio_ambient(0, light > 0.001f ? lx_sky_builtin_sound("rain_light") : NULL, light);
-    lx_audio_ambient(1, heavy > 0.001f ? lx_sky_builtin_sound("rain_heavy") : NULL, heavy);
+    LxSound *ls = NULL, *hs = NULL;
+    const LxEnvironment *E = &s->env;
+    float vol = lx_clampf(E->rain_volume, 0.0f, 2.0f);
+    if (E->rain_sound == LX_RAIN_SOUND_PROCEDURAL) {
+        ls = lx_sky_builtin_sound("rain_light");
+        hs = lx_sky_builtin_sound("rain_heavy");
+    } else if (E->rain_sound == LX_RAIN_SOUND_CUSTOM) {
+        const char *lr = E->rain_sound_light[0] ? E->rain_sound_light : E->rain_sound_heavy;
+        const char *hr = E->rain_sound_heavy[0] ? E->rain_sound_heavy : E->rain_sound_light;
+        ls = lr[0] ? lx_asset_sound(lr) : NULL;
+        hs = hr[0] ? lx_asset_sound(hr) : NULL;
+        /* one file for both: it simply gets louder (two copies would phase against each other) */
+        if (ls && ls == hs) { light = lx_minf(1.0f, light + heavy); heavy = 0; }
+    }
+    light *= vol;
+    heavy *= vol;
+    lx_audio_ambient(0, light > 0.001f ? ls : NULL, light);
+    lx_audio_ambient(1, heavy > 0.001f ? hs : NULL, heavy);
 }
 
 /* ------------------------------------------------------------------ the API */
@@ -460,63 +476,59 @@ static void normalize(float *x, int n, float to) {
     for (int i = 0; i < n; i++) peak = lx_maxf(peak, fabsf(x[i]));
     if (peak > 0) for (int i = 0; i < n; i++) x[i] *= to / peak;
 }
-/* a decaying ring added at sample `at`: a raindrop's tick or a drip's plink (damped resonator, pitch rising like a bubble) */
-static void add_drop(float *buf, int n, int at, float freq, float tau_s, float amp, float rise) {
-    const float rate = 22050.0f;
-    int len = (int)(tau_s * rate * 5.0f);
-    float y1 = 0, y2 = 0, r = expf(-1.0f / (tau_s * rate));
-    for (int k = 0; k < len && at + k < n; k++) {
-        float f = freq * (1.0f + rise * (float)k / rate);
-        float c = 2.0f * cosf(2.0f * LX_PI * f / rate) * r;
-        float x = k == 0 ? amp : 0.0f;
-        float y = x + c * y1 - r * r * y2;
-        y2 = y1; y1 = y;
-        buf[at + k] += y;
-    }
+/* Rain: a 30 s loop, different everywhere in it, joined end to start with a crossfade. Made only of noise - no
+ * pitched rings, so it never sounds like dripping or trickling water:
+ *  - the hiss: countless far-off impacts, band-limited noise that swells and settles a little at its own slow pace
+ *  - the patter: thousands of tiny noise bursts a second (a few milliseconds each, most faint), high-passed, which
+ *    give rain its grain; heavy rain packs them closer until they merge
+ *  - heavy rain only: a soft, smooth low wash underneath (rain on everything at once), no rumble. */
+static void onepole_hp(float *x, int n, float cutoff, int rate) {
+    float a = expf(-2.0f * LX_PI * cutoff / (float)rate), y = 0, px = 0;
+    for (int i = 0; i < n; i++) { y = a * (y + x[i] - px); px = x[i]; x[i] = y; }
 }
-
-/* Rain: a 40 s loop, different everywhere in it, joined end to start with a crossfade. A hiss of countless tiny
- * impacts (band-limited noise that swells and settles at its own slow random pace), hundreds of distinct ticks a
- * second, drips that plink nearby now and then, and in heavy rain a low roar underneath. */
+static void onepole_lp(float *x, int n, float cutoff, int rate) {
+    float a = 1.0f - expf(-2.0f * LX_PI * cutoff / (float)rate), y = 0;
+    for (int i = 0; i < n; i++) { y += (x[i] - y) * a; x[i] = y; }
+}
 static LxSound *make_rain(bool heavy) {
-    const int rate = 22050, n = rate * 40, X = rate * 2;
+    const int rate = 22050, n = rate * 30, X = rate * 2, N = n + X;
     LxSound *snd = synth_new(heavy ? "builtin:rain_heavy" : "builtin:rain_light", n);
-    float *buf = lx_calloc((size_t)(n + X), sizeof(float));
+    float *hiss = lx_calloc((size_t)N, sizeof(float)), *pat = lx_calloc((size_t)N, sizeof(float));
     SynthRng r = {heavy ? 0xbeefu : 0x5eedu};
+    /* the hiss: white noise, high-passed (no rumble), low-passed twice (no fizz) */
+    for (int i = 0; i < N; i++) hiss[i] = snoise(&r);
+    onepole_hp(hiss, N, heavy ? 500.0f : 900.0f, rate);
+    onepole_lp(hiss, N, heavy ? 5200.0f : 6500.0f, rate);
+    onepole_lp(hiss, N, heavy ? 6500.0f : 8000.0f, rate);
+    /* the patter: short decaying noise bursts at random times, their loudness heavily skewed to quiet */
+    int grains = (heavy ? 3200 : 1100) * N / rate;
+    for (int k = 0; k < grains; k++) {
+        int at = (int)(srnd(&r) * (float)N);
+        float amp = powf(srnd(&r), heavy ? 2.5f : 3.0f) * (srnd(&r) < 0.5f ? 1.0f : -1.0f);
+        float tau = (0.0006f + srnd(&r) * 0.0025f) * (float)rate;
+        int len = (int)(tau * 5.0f);
+        float e = 1.0f, d = expf(-1.0f / tau);
+        for (int j = 0; j < len && at + j < N; j++) { pat[at + j] += amp * e * snoise(&r); e *= d; }
+    }
+    onepole_hp(pat, N, 1200.0f, rate);
+    onepole_lp(pat, N, 7000.0f, rate);
     /* slow swells: three LFOs at unrelated rates, so the pattern never lines up within the loop */
     float lf[3], lp[3];
-    for (int k = 0; k < 3; k++) { lf[k] = 0.03f + srnd(&r) * 0.2f; lp[k] = srnd(&r) * 6.28f; }
-    float hp = 0, lp1 = 0, lp2 = 0, prev = 0, brown = 0, roar = 0;
-    float hp_k = heavy ? 0.85f : 0.9f, lp_k = heavy ? 0.55f : 0.7f;
-    for (int i = 0; i < n + X; i++) {
-        float t = (float)i / rate;
-        float w = snoise(&r);
-        hp = hp_k * (hp + w - prev);   /* high-pass: no rumble in the hiss */
-        prev = w;
-        lp1 += (hp - lp1) * lp_k;
-        lp2 += (lp1 - lp2) * lp_k;
-        float env = 0.72f;
-        for (int k = 0; k < 3; k++) env += 0.1f * sinf(t * lf[k] * 6.2831853f + lp[k]);
-        float v = lp2 * env * (heavy ? 0.5f : 0.32f);
-        if (heavy) {
-            brown = lx_clampf(brown * 0.997f + w * 0.03f, -1, 1);
-            roar += (brown - roar) * 0.05f;
-            v += roar * 1.6f * env;
+    for (int k = 0; k < 3; k++) { lf[k] = 0.02f + srnd(&r) * 0.12f; lp[k] = srnd(&r) * 6.28f; }
+    float wash = 0, wash2 = 0;
+    float *buf = hiss;
+    for (int i = 0; i < N; i++) {
+        float t = (float)i / (float)rate;
+        float env = 0.8f;
+        for (int k = 0; k < 3; k++) env += 0.065f * sinf(t * lf[k] * 6.2831853f + lp[k]);
+        float v = hiss[i] * (heavy ? 0.55f : 0.4f) * env + pat[i] * (heavy ? 0.9f : 1.1f);
+        if (heavy) {   /* the wash: smooth noise around a few hundred hertz */
+            float w = snoise(&r);
+            wash += (w - wash) * 0.09f;
+            wash2 += (wash - wash2) * 0.09f;
+            v += wash2 * 0.9f * env;
         }
         buf[i] = v;
-    }
-    /* ticks: many small impacts, most of them faint */
-    int ticks = (heavy ? 900 : 260) * (n + X) / rate;
-    for (int k = 0; k < ticks; k++) {
-        int at = (int)(srnd(&r) * (float)(n + X));
-        float a = powf(srnd(&r), 3.0f) * (heavy ? 0.35f : 0.45f);
-        add_drop(buf, n + X, at, 1800.0f + srnd(&r) * 5200.0f, 0.0008f + srnd(&r) * 0.002f, a, 0.0f);
-    }
-    /* drips close by: lower, longer, the pitch rising a little (a bubble) */
-    int drips = (heavy ? 6 : 4) * (n + X) / rate;
-    for (int k = 0; k < drips; k++) {
-        int at = (int)(srnd(&r) * (float)(n + X));
-        add_drop(buf, n + X, at, 650.0f + srnd(&r) * 1400.0f, 0.004f + srnd(&r) * 0.008f, (0.15f + srnd(&r) * 0.35f), 6.0f + srnd(&r) * 20.0f);
     }
     /* loop: the extra 2 s fade into the start */
     for (int i = 0; i < X; i++) {
@@ -524,8 +536,14 @@ static LxSound *make_rain(bool heavy) {
         buf[i] = buf[i] * sqrtf(a) + buf[n + i] * sqrtf(1.0f - a);
     }
     memcpy(snd->samples, buf, sizeof(float) * (size_t)n);
-    lx_free(buf);
-    normalize(snd->samples, n, 0.8f);
+    lx_free(hiss);
+    lx_free(pat);
+    /* by loudness rather than peak, so one big burst doesn't make the rest quiet */
+    double sq = 0;
+    for (int i = 0; i < n; i++) sq += (double)snd->samples[i] * snd->samples[i];
+    float rms = (float)sqrt(sq / n);
+    float gain = rms > 0 ? (heavy ? 0.12f : 0.08f) / rms : 1.0f;
+    for (int i = 0; i < n; i++) snd->samples[i] = lx_clampf(snd->samples[i] * gain, -0.95f, 0.95f);
     return snd;
 }
 

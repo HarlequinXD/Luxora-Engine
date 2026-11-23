@@ -1578,6 +1578,7 @@ static void weather_preset_changed(UiNode *n) {
     if (e && e->weather >= 0 && e->weather < LX_WEATHER_CUSTOM) lx_sky_weather_preset((LxWeather)e->weather, e);
     ed_mark_changed();
 }
+static void rain_sound_changed(UiNode *n) { LX_UNUSED(n); ed_mark_changed(); g_lighting_scene = NULL; /* show the right fields */ }
 static void sky_clock_text(char *out, size_t cap, float hour) {
     int m = (int)(hour * 60.0f + 0.5f) % (24 * 60);
     snprintf(out, cap, "%02d:%02d", m / 60, m % 60);
@@ -1646,6 +1647,24 @@ static void sky_sections(UiNode *body, LxEnvironment *env) {
     UiNode *bt = float_row(sec, "Blend Time", &env->weather_blend, 1, 0, 3600);
     bt->on_change = env_changed;
     lx_strcpy(bt->tooltip, sizeof bt->tooltip, "Seconds the weather takes to change while playing (the Set Weather action can choose its own).");
+    {   /* the sound of rain */
+        static const char *RS[] = {"Procedural", "Your Own Sounds", "Off"};
+        UiNode *rr = ed_prop_row(sec, "Rain Sound");
+        UiNode *rd = ui_dropdown(ui, rr, &env->rain_sound, RS, LX_RAIN_SOUND_COUNT);
+        rd->grow = 1;
+        rd->on_change = rain_sound_changed;
+        lx_strcpy(rd->tooltip, sizeof rd->tooltip, "Procedural: rain made by the engine (soft hiss and patter). Your Own Sounds: looping audio "
+                                                   "files. It follows how hard it rains either way.");
+        if (env->rain_sound == LX_RAIN_SOUND_CUSTOM) {
+            UiNode *l = asset_field(sec, "Light Rain", env->rain_sound_light, sizeof env->rain_sound_light, "sound");
+            l->on_change = env_changed;
+            lx_strcpy(l->tooltip, sizeof l->tooltip, "A loop for drizzle and light rain");
+            UiNode *h = asset_field(sec, "Heavy Rain", env->rain_sound_heavy, sizeof env->rain_sound_heavy, "sound");
+            h->on_change = env_changed;
+            lx_strcpy(h->tooltip, sizeof h->tooltip, "A loop for downpours, faded in as the rain gets heavier. Empty: the light one, louder.");
+        }
+        if (env->rain_sound != LX_RAIN_SOUND_OFF) sky_slider(sec, "Rain Volume", &env->rain_volume, 0, 2, "1 = as made", NULL);
+    }
 }
 
 static void lighting_frame(UiNode *body) {

@@ -502,7 +502,13 @@ typedef struct LxEnvironment {
     float lightning;        /* 0..1: how often lightning strikes */
     float mist;             /* 0..1: weather fog on top of fog_density */
     float weather_blend;    /* seconds the weather takes to change while playing */
+    /* the sound of rain (it follows how hard it rains) */
+    int rain_sound;                       /* LxRainSound */
+    char rain_sound_light[LX_REF_MAX];    /* Your Own Sounds: a loop for light rain */
+    char rain_sound_heavy[LX_REF_MAX];    /* ...and for heavy rain (empty = the light one, louder) */
+    float rain_volume;                    /* 0..2, 1 = as made */
 } LxEnvironment;
+typedef enum LxRainSound { LX_RAIN_SOUND_PROCEDURAL, LX_RAIN_SOUND_CUSTOM, LX_RAIN_SOUND_OFF, LX_RAIN_SOUND_COUNT } LxRainSound;
 
 typedef struct LxScene LxScene;
 

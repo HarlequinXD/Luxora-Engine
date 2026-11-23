@@ -20,6 +20,7 @@ static LxEntity handle_of(const LxScene *s, const LxEntityData *d) {
 
 static LxEnvironment default_env(void) {
     LxEnvironment e;
+    memset(&e, 0, sizeof e);
     e.sky_zenith = lx_v3(0.22f, 0.42f, 0.85f);
     e.sky_horizon = lx_v3(0.72f, 0.82f, 0.95f);
     e.ground_color = lx_v3(0.28f, 0.25f, 0.22f);
@@ -38,6 +39,8 @@ static LxEnvironment default_env(void) {
     e.moon_phase = 0.5f;
     e.star_intensity = 1.0f;
     e.weather_blend = 20.0f;
+    e.rain_sound = LX_RAIN_SOUND_PROCEDURAL;
+    e.rain_volume = 1.0f;
     e.cloud_height = 1500.0f;
     e.cloud_thickness = 1800.0f;
     e.wind_direction = 30.0f;

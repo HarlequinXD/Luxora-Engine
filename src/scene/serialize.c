@@ -176,6 +176,9 @@ char *lx_scene_serialize(const LxScene *s) {
         lx_sb_printf(&sb, "wind.direction = %g\nwind.speed = %g\nweather = %d\nweather.rain = %g\nweather.snow = %g\n", e->wind_direction,
                      e->wind_speed, e->weather, e->rain, e->snow);
         lx_sb_printf(&sb, "weather.lightning = %g\nweather.mist = %g\nweather.blend = %g\n", e->lightning, e->mist, e->weather_blend);
+        lx_sb_printf(&sb, "weather.rain_sound = %d\nweather.rain_volume = %g\n", e->rain_sound, e->rain_volume);
+        if (e->rain_sound_light[0]) lx_sb_printf(&sb, "weather.rain_sound_light = %s\n", e->rain_sound_light);
+        if (e->rain_sound_heavy[0]) lx_sb_printf(&sb, "weather.rain_sound_heavy = %s\n", e->rain_sound_heavy);
     }
     const LxBakeSettings *bk = &s->bake;
     lx_sb_printf(&sb, "bake.texels_per_unit = %g\nbake.max_atlas = %d\nbake.bounces = %d\nbake.samples = %d\nbake.directional = %d\nbake.denoise = %d\n",
@@ -261,6 +264,10 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
                 else if (!strcmp(k, "weather.lightning")) e->lightning = lx_clampf(f, 0, 1);
                 else if (!strcmp(k, "weather.mist")) e->mist = lx_clampf(f, 0, 1);
                 else if (!strcmp(k, "weather.blend")) e->weather_blend = lx_clampf(f, 0, 3600);
+                else if (!strcmp(k, "weather.rain_sound")) e->rain_sound = (int)lx_clampf(f, 0, LX_RAIN_SOUND_COUNT - 1);
+                else if (!strcmp(k, "weather.rain_volume")) e->rain_volume = lx_clampf(f, 0, 2);
+                else if (!strcmp(k, "weather.rain_sound_light")) lx_strcpy(e->rain_sound_light, sizeof e->rain_sound_light, v);
+                else if (!strcmp(k, "weather.rain_sound_heavy")) lx_strcpy(e->rain_sound_heavy, sizeof e->rain_sound_heavy, v);
             }
             else if (!strcmp(k, "bake.texels_per_unit")) s->bake.texels_per_unit = (float)atof(v);
             else if (!strcmp(k, "bake.max_atlas")) s->bake.max_atlas_size = atoi(v);

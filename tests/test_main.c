@@ -1477,6 +1477,43 @@ static void test_sky(void) {
           ce->cloud_type == e->cloud_type && NEAR(ce->rain, e->rain, 1e-4f),
           "the sky and weather survive saving");
     lx_scene_destroy(c);
+    {   /* the sound of rain: chosen per scene and saved */
+        CHECK(e->rain_sound == LX_RAIN_SOUND_PROCEDURAL && NEAR(e->rain_volume, 1, 1e-6f) && !e->rain_sound_light[0], "rain sounds are made by default");
+        LxEnvironment keep = *e;
+        e->rain_sound = LX_RAIN_SOUND_CUSTOM; e->rain_volume = 0.7f;
+        lx_strcpy(e->rain_sound_light, sizeof e->rain_sound_light, "Audio/Rain Light.wav");
+        lx_strcpy(e->rain_sound_heavy, sizeof e->rain_sound_heavy, "Audio/Downpour.ogg");
+        char *rt = lx_scene_serialize(s);
+        LxScene *rc = lx_scene_deserialize(rt);
+        lx_free(rt);
+        const LxEnvironment *re = lx_scene_environment(rc);
+        CHECK(re->rain_sound == LX_RAIN_SOUND_CUSTOM && NEAR(re->rain_volume, 0.7f, 1e-5f) && !strcmp(re->rain_sound_light, "Audio/Rain Light.wav") &&
+              !strcmp(re->rain_sound_heavy, "Audio/Downpour.ogg"), "your own rain sounds are saved");
+        lx_scene_destroy(rc);
+        *e = keep;
+    }
+    for (int k = 0; k < 2; k++) {   /* made rain is noise all the way: no ringing tones (they read as dripping, trickling water) */
+        const LxSound *rs = lx_sky_builtin_sound(k ? "rain_heavy" : "rain_light");
+        const int rate = rs->sample_rate;
+        static double band[128];
+        memset(band, 0, sizeof band);
+        for (int fr = 0; fr + 1024 < rs->frame_count; fr += 1024 * 8)
+            for (int b = 0; b < 128; b++) {
+                double w = 2 * LX_PI * (b + 0.5) * rate / 2.0 / 128 / rate, c = 2 * cos(w), s1 = 0, s2 = 0;
+                for (int i = 0; i < 1024; i++) { double s0 = rs->samples[fr + i] * (0.5 - 0.5 * cos(2 * LX_PI * i / 1023)) + c * s1 - s2; s2 = s1; s1 = s0; }
+                band[b] += s1 * s1 + s2 * s2 - c * s1 * s2;
+            }
+        double worst = 0, mid = 0, high = 0;
+        for (int b = 3; b < 125; b++) {
+            double r = band[b] / ((band[b - 3] + band[b - 2] + band[b + 2] + band[b + 3]) / 4 + 1e-12);
+            if (r > worst) worst = r;
+            double f = (b + 0.5) * rate / 2.0 / 128;
+            if (f > 500 && f < 2500) mid += band[b] / 2000.0;
+            if (f > 3000 && f < 8000) high += band[b] / 5000.0;
+        }
+        CHECK(worst < 1.8 && mid < high * 2.5, "%s rain: no tones (peakiest band %.2fx), no drip band (mid / high %.2f)", k ? "heavy" : "light",
+              worst, mid / high);
+    }
     CHECK(lx_sky_builtin_sound("thunder") && lx_sky_builtin_sound("thunder")->frame_count > 22050 * 4, "thunder is made in code");
     CHECK(lx_asset_sound("builtin:thunder") == lx_sky_builtin_sound("thunder"), "...and found as builtin:thunder");
     {   /* a sound that has played for hours still reads the right samples (float positions used to round after ~6 min) */
