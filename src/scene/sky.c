@@ -331,15 +331,31 @@ static void send(LxScene *s, const char *ev, float hour) { lx_fsm_broadcast_even
 
 static void strike(LxScene *s) {
     LxSkyLive *L = &s->sky;
+    const LxEnvironment *e = &s->env;
     float a = rnd(L) * 2.0f * LX_PI;
     L->bolt_dir = lx_norm3(lx_v3(cosf(a), 0.0f, sinf(a)));
-    L->bolt_dist = 800.0f + rnd(L) * rnd(L) * 7000.0f;
+    /* where it lands: between the closest and farthest distance, mostly near the far end in a weak storm and drawing
+     * in as the storm strengthens */
+    float storm = lx_sky_storm_strength(s);
+    float dmin = lx_maxf(e->thunder_min_distance, 0.0f), dmax = lx_maxf(e->thunder_max_distance, dmin);
+    float u = rnd(L) * rnd(L);                       /* most strikes in the nearer part of the range */
+    u = lx_minf(1.0f, u * (1.6f - 1.2f * storm));   /* a strong storm brings them closer */
+    L->bolt_dist = dmin + (dmax - dmin) * u;
     L->bolt_seed = rnd(L) * 1000.0f;
     L->bolt_age = 0;
     L->flash_t = 0;
-    L->thunder_in = L->bolt_dist / 343.0f;
-    L->thunder_vol = lx_clampf(1.5f - L->bolt_dist / 5000.0f, 0.3f, 1.3f);
+    L->thunder_in = L->bolt_dist / 343.0f;   /* as late as sound would come */
+    /* louder close by and in a stronger storm */
+    float near = lx_clampf(1.6f - L->bolt_dist / 4000.0f, 0.25f, 1.4f);
+    L->thunder_vol = near * (0.65f + 0.55f * storm) * lx_clampf(e->thunder_volume, 0.0f, 2.0f);
     send(s, "LIGHTNING", s->env.time_of_day);
+}
+/* how strong the storm is now: the live Lightning, made stronger by heavy rain */
+float lx_sky_storm_strength(const LxScene *s) {
+    if (!s) return 0;
+    const LxSkyLive *L = &s->sky;
+    float l = s->sky.started ? L->lightning : s->env.lightning, r = s->sky.started ? L->rain : s->env.rain;
+    return lx_clampf(l * (0.75f + 0.5f * r), 0.0f, 1.0f);
 }
 void lx_sky_strike_lightning(LxScene *s) {
     if (!s || s->env.sky_mode != LX_SKY_DAY_NIGHT) return;
@@ -393,7 +409,8 @@ void lx_sky_simulate(LxScene *s, float dt) {
         L->next_strike -= dt;
         if (L->next_strike <= 0) {
             strike(s);
-            float mean = 3.0f + 40.0f * (1.0f - L->lightning) * (1.0f - L->lightning);
+            float st = 1.0f - lx_sky_storm_strength(s);   /* more often as the storm strengthens */
+            float mean = 2.5f + 50.0f * st * st;
             L->next_strike = -logf(lx_maxf(rnd(L), 1e-4f)) * mean + 0.5f;
         }
     }
@@ -403,13 +420,37 @@ void lx_sky_simulate(LxScene *s, float dt) {
             LxEntity le = lx_scene_listener(s);
             LxVec3 at = le ? lx_entity_world_position(s, le) : lx_v3(0, 0, 0);
             /* a different clap each time: close strikes crack, far ones rumble; never the same one twice running */
-            int first = L->bolt_dist < 2500.0f ? 0 : 4, v = first + (int)(rnd(L) * 4.0f) % 4;
-            if (v == L->last_thunder) v = first + (v - first + 1 + (int)(rnd(L) * 3.0f)) % 4;
-            L->last_thunder = v;
-            char ref[32];
-            snprintf(ref, sizeof ref, "builtin:thunder%d", v);
-            lx_audio_play_oneshot(ref, lx_madd3(at, lx_norm3(lx_v3(L->bolt_dir.x, 0.25f, L->bolt_dir.z)), 30.0f),
-                                  L->thunder_vol * (0.85f + 0.3f * rnd(L)));
+            const LxEnvironment *E = &s->env;
+            bool close = L->bolt_dist < 2500.0f;
+            LxSound *snd = NULL;
+            if (E->thunder_sound == LX_RAIN_SOUND_PROCEDURAL) {
+                int first = close ? 0 : 4, v = first + (int)(rnd(L) * 4.0f) % 4;
+                if (v == L->last_thunder) v = first + (v - first + 1 + (int)(rnd(L) * 3.0f)) % 4;
+                L->last_thunder = v;
+                char ref[32];
+                snprintf(ref, sizeof ref, "thunder%d", v);
+                snd = lx_sky_builtin_sound(ref);
+            } else if (E->thunder_sound == LX_RAIN_SOUND_CUSTOM) {
+                /* your own: the close or far group (or the other one if it's empty), never the same file twice running */
+                const char *pick[LX_THUNDER_FILES];
+                int n = 0;
+                for (int g = 0; g < 2 && !n; g++) {
+                    bool use_close = g == 0 ? close : !close;
+                    for (int t = 0; t < LX_THUNDER_FILES; t++) {
+                        const char *r = use_close ? E->thunder_close[t] : E->thunder_far[t];
+                        if (r[0]) pick[n++] = r;
+                    }
+                }
+                if (n) {
+                    int v = (int)(rnd(L) * (float)n) % n;
+                    if (n > 1 && v + 100 == L->last_thunder) v = (v + 1 + (int)(rnd(L) * (float)(n - 1))) % n;
+                    L->last_thunder = v + 100;
+                    snd = lx_asset_sound(pick[v]);
+                }
+            }
+            if (snd)
+                lx_audio_play_oneshot_sound(snd, lx_madd3(at, lx_norm3(lx_v3(L->bolt_dir.x, 0.25f, L->bolt_dir.z)), 30.0f),
+                                            L->thunder_vol * (0.85f + 0.3f * rnd(L)));
         }
     }
     /* the sound of rain: a light loop and a heavy one, mixed by how hard it rains - made here, or the game's own files */

@@ -41,6 +41,10 @@ static LxEnvironment default_env(void) {
     e.weather_blend = 20.0f;
     e.rain_sound = LX_RAIN_SOUND_PROCEDURAL;
     e.rain_volume = 1.0f;
+    e.thunder_sound = LX_RAIN_SOUND_PROCEDURAL;
+    e.thunder_min_distance = 800.0f;
+    e.thunder_max_distance = 7800.0f;
+    e.thunder_volume = 1.0f;
     e.cloud_height = 1500.0f;
     e.cloud_thickness = 1800.0f;
     e.wind_direction = 30.0f;

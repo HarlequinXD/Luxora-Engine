@@ -1665,6 +1665,37 @@ static void sky_sections(UiNode *body, LxEnvironment *env) {
         }
         if (env->rain_sound != LX_RAIN_SOUND_OFF) sky_slider(sec, "Rain Volume", &env->rain_volume, 0, 2, "1 = as made", NULL);
     }
+    {   /* thunder */
+        static const char *TS[] = {"Procedural", "Your Own Sounds", "Off"};
+        UiNode *tr = ed_prop_row(sec, "Thunder Sound");
+        UiNode *td = ui_dropdown(ui, tr, &env->thunder_sound, TS, LX_RAIN_SOUND_COUNT);
+        td->grow = 1;
+        td->on_change = rain_sound_changed;
+        lx_strcpy(td->tooltip, sizeof td->tooltip, "Procedural: eight claps and rumbles made by the engine. Your Own Sounds: audio files, "
+                                                   "a different one each time.");
+        if (env->thunder_sound == LX_RAIN_SOUND_CUSTOM) {
+            static const char *CL[] = {"Close 1", "Close 2", "Close 3", "Close 4"}, *FA[] = {"Far 1", "Far 2", "Far 3", "Far 4"};
+            for (int t = 0; t < LX_THUNDER_FILES; t++) {
+                UiNode *c = asset_field(sec, CL[t], env->thunder_close[t], sizeof env->thunder_close[t], "sound");
+                c->on_change = env_changed;
+                lx_strcpy(c->tooltip, sizeof c->tooltip, "Sharp cracks and booms, for strikes closer than 2.5 km");
+            }
+            for (int t = 0; t < LX_THUNDER_FILES; t++) {
+                UiNode *f = asset_field(sec, FA[t], env->thunder_far[t], sizeof env->thunder_far[t], "sound");
+                f->on_change = env_changed;
+                lx_strcpy(f->tooltip, sizeof f->tooltip, "Low rolling rumbles, for distant strikes. If you only fill one group it's used for both.");
+            }
+        }
+        if (env->thunder_sound != LX_RAIN_SOUND_OFF) sky_slider(sec, "Thunder Volume", &env->thunder_volume, 0, 2, "1 = as made", NULL);
+        UiNode *dn = float_row(sec, "Closest Strike (m)", &env->thunder_min_distance, 50, 0, 50000);
+        dn->on_change = env_changed;
+        lx_strcpy(dn->tooltip, sizeof dn->tooltip, "How near the camera lightning can strike. Thunder takes as long as sound would (about 3 s per km), "
+                                                   "and close strikes are louder and crack.");
+        UiNode *df = float_row(sec, "Farthest Strike (m)", &env->thunder_max_distance, 50, 0, 50000);
+        df->on_change = env_changed;
+        lx_strcpy(df->tooltip, sizeof df->tooltip, "How far away it can strike. As the storm grows (Lightning, heavier rain) strikes come "
+                                                   "closer, louder and more often.");
+    }
 }
 
 static void lighting_frame(UiNode *body) {

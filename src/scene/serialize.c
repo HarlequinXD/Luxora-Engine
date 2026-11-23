@@ -179,6 +179,12 @@ char *lx_scene_serialize(const LxScene *s) {
         lx_sb_printf(&sb, "weather.rain_sound = %d\nweather.rain_volume = %g\n", e->rain_sound, e->rain_volume);
         if (e->rain_sound_light[0]) lx_sb_printf(&sb, "weather.rain_sound_light = %s\n", e->rain_sound_light);
         if (e->rain_sound_heavy[0]) lx_sb_printf(&sb, "weather.rain_sound_heavy = %s\n", e->rain_sound_heavy);
+        lx_sb_printf(&sb, "weather.thunder_sound = %d\nweather.thunder_volume = %g\nweather.thunder_distance = %g %g\n", e->thunder_sound,
+                     e->thunder_volume, e->thunder_min_distance, e->thunder_max_distance);
+        for (int t = 0; t < LX_THUNDER_FILES; t++) {
+            if (e->thunder_close[t][0]) lx_sb_printf(&sb, "weather.thunder_close.%d = %s\n", t, e->thunder_close[t]);
+            if (e->thunder_far[t][0]) lx_sb_printf(&sb, "weather.thunder_far.%d = %s\n", t, e->thunder_far[t]);
+        }
     }
     const LxBakeSettings *bk = &s->bake;
     lx_sb_printf(&sb, "bake.texels_per_unit = %g\nbake.max_atlas = %d\nbake.bounces = %d\nbake.samples = %d\nbake.directional = %d\nbake.denoise = %d\n",
@@ -268,6 +274,17 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
                 else if (!strcmp(k, "weather.rain_volume")) e->rain_volume = lx_clampf(f, 0, 2);
                 else if (!strcmp(k, "weather.rain_sound_light")) lx_strcpy(e->rain_sound_light, sizeof e->rain_sound_light, v);
                 else if (!strcmp(k, "weather.rain_sound_heavy")) lx_strcpy(e->rain_sound_heavy, sizeof e->rain_sound_heavy, v);
+                else if (!strcmp(k, "weather.thunder_sound")) e->thunder_sound = (int)lx_clampf(f, 0, LX_RAIN_SOUND_COUNT - 1);
+                else if (!strcmp(k, "weather.thunder_volume")) e->thunder_volume = lx_clampf(f, 0, 2);
+                else if (!strcmp(k, "weather.thunder_distance")) {
+                    LxVec3 d = lx_parse_vec3(v);
+                    e->thunder_min_distance = lx_clampf(d.x, 0, 50000);
+                    e->thunder_max_distance = lx_clampf(d.y, e->thunder_min_distance, 50000);
+                } else if (!strncmp(k, "weather.thunder_close.", 22) || !strncmp(k, "weather.thunder_far.", 20)) {
+                    bool close = k[16] == 'c';
+                    int t = atoi(k + (close ? 22 : 20));
+                    if (t >= 0 && t < LX_THUNDER_FILES) lx_strcpy(close ? e->thunder_close[t] : e->thunder_far[t], LX_REF_MAX, v);
+                }
             }
             else if (!strcmp(k, "bake.texels_per_unit")) s->bake.texels_per_unit = (float)atof(v);
             else if (!strcmp(k, "bake.max_atlas")) s->bake.max_atlas_size = atoi(v);

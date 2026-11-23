@@ -1477,6 +1477,48 @@ static void test_sky(void) {
           ce->cloud_type == e->cloud_type && NEAR(ce->rain, e->rain, 1e-4f),
           "the sky and weather survive saving");
     lx_scene_destroy(c);
+    {   /* thunder: closer, louder and more often as the storm grows; its distance and sounds are settings */
+        LxEnvironment keep = *e;
+        CHECK(e->thunder_sound == LX_RAIN_SOUND_PROCEDURAL && e->thunder_min_distance < e->thunder_max_distance && NEAR(e->thunder_volume, 1, 1e-6f),
+              "thunder: made by default, with a range of distances");
+        e->cloud_coverage = 1; e->cloud_density = 1; e->weather_blend = 0.01f;
+        float dist[2] = {0, 0}, vol[2] = {0, 0};
+        int count[2] = {0, 0};
+        for (int k = 0; k < 2; k++) {
+            e->lightning = k ? 1.0f : 0.2f;
+            e->rain = k ? 1.0f : 0.1f;
+            s->simulating = true;
+            for (int i = 0; i < 3; i++) lx_sky_simulate(s, 0.05f);   /* the live weather takes the settings */
+            for (int i = 0; i < 400; i++) { lx_sky_strike_lightning(s); dist[k] += s->sky.bolt_dist; vol[k] += s->sky.thunder_vol; }
+            s->sky.next_strike = 0;
+            for (int i = 0; i < 6000; i++) {   /* ten minutes */
+                float before = s->sky.next_strike;
+                lx_sky_simulate(s, 0.1f);
+                if (s->sky.next_strike > before + 0.05f) count[k]++;
+            }
+            s->simulating = false;
+        }
+        CHECK(lx_sky_storm_strength(s) > 0.95f, "Lightning with heavy rain is a full storm (%.2f)", lx_sky_storm_strength(s));
+        CHECK(dist[1] < dist[0] * 0.75f && vol[1] > vol[0] * 1.4f, "a stronger storm strikes closer (%.0f m vs %.0f m) and louder", dist[1] / 400, dist[0] / 400);
+        CHECK(count[1] > count[0] * 3, "...and more often (%d vs %d strikes in ten minutes)", count[1], count[0]);
+        e->thunder_min_distance = 200; e->thunder_max_distance = 600;
+        bool inside = true;
+        for (int i = 0; i < 200; i++) { lx_sky_strike_lightning(s); inside = inside && s->sky.bolt_dist >= 199.9f && s->sky.bolt_dist <= 600.1f; }
+        CHECK(inside && s->sky.thunder_in < 2.0f, "strikes stay within Closest / Farthest Strike; thunder as late as sound would");
+        e->thunder_sound = LX_RAIN_SOUND_CUSTOM; e->thunder_volume = 1.5f;
+        lx_strcpy(e->thunder_close[0], LX_REF_MAX, "Audio/Crack.wav");
+        lx_strcpy(e->thunder_far[2], LX_REF_MAX, "Audio/Rumble 3.ogg");
+        char *tt = lx_scene_serialize(s);
+        LxScene *tc = lx_scene_deserialize(tt);
+        lx_free(tt);
+        const LxEnvironment *te = lx_scene_environment(tc);
+        CHECK(te->thunder_sound == LX_RAIN_SOUND_CUSTOM && NEAR(te->thunder_volume, 1.5f, 1e-5f) && NEAR(te->thunder_min_distance, 200, 1e-3f) &&
+              NEAR(te->thunder_max_distance, 600, 1e-3f) && !strcmp(te->thunder_close[0], "Audio/Crack.wav") && !te->thunder_close[1][0] &&
+              !strcmp(te->thunder_far[2], "Audio/Rumble 3.ogg"), "thunder settings and your own thunder sounds are saved");
+        lx_scene_destroy(tc);
+        *e = keep;
+        s->sky.thunder_in = -1;
+    }
     {   /* the sound of rain: chosen per scene and saved */
         CHECK(e->rain_sound == LX_RAIN_SOUND_PROCEDURAL && NEAR(e->rain_volume, 1, 1e-6f) && !e->rain_sound_light[0], "rain sounds are made by default");
         LxEnvironment keep = *e;

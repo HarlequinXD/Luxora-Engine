@@ -469,6 +469,7 @@ typedef enum LxWeather {
 } LxWeather;
 typedef enum LxCloudType { LX_CLOUDS_CUMULUS, LX_CLOUDS_STRATUS, LX_CLOUDS_STORM } LxCloudType;
 
+#define LX_THUNDER_FILES 4
 typedef struct LxEnvironment {
     LxVec3 sky_zenith, sky_horizon, ground_color;   /* Gradient sky; Day-night uses the ground as its albedo */
     float ambient_intensity;
@@ -507,6 +508,13 @@ typedef struct LxEnvironment {
     char rain_sound_light[LX_REF_MAX];    /* Your Own Sounds: a loop for light rain */
     char rain_sound_heavy[LX_REF_MAX];    /* ...and for heavy rain (empty = the light one, louder) */
     float rain_volume;                    /* 0..2, 1 = as made */
+    /* thunder: it comes as late as sound would from where the lightning struck, louder and more often as the storm
+     * gets stronger (Lightning, and heavier rain) - and closer: strikes move towards Closest Strike */
+    int thunder_sound;                            /* LxRainSound: procedural, your own files, or none */
+    char thunder_close[LX_THUNDER_FILES][LX_REF_MAX];   /* Your Own Sounds: claps for near strikes (any empty) */
+    char thunder_far[LX_THUNDER_FILES][LX_REF_MAX];     /* ...and rumbles for far ones (a missing group uses the other) */
+    float thunder_min_distance, thunder_max_distance;   /* metres from the listener a strike can land */
+    float thunder_volume;                         /* 0..2 */
 } LxEnvironment;
 typedef enum LxRainSound { LX_RAIN_SOUND_PROCEDURAL, LX_RAIN_SOUND_CUSTOM, LX_RAIN_SOUND_OFF, LX_RAIN_SOUND_COUNT } LxRainSound;
 
@@ -1626,6 +1634,7 @@ void lx_sky_weather_preset(LxWeather w, LxEnvironment *e); /* writes a preset's 
 const char *lx_weather_name(LxWeather w);
 float lx_sky_wetness(const LxScene *s);                    /* 0..1: how wet the ground is now */
 void lx_sky_strike_lightning(LxScene *s);                  /* a flash and thunder now, somewhere in view */
+float lx_sky_storm_strength(const LxScene *s);             /* 0..1: Lightning, made stronger by heavy rain (thunder closer, louder, more often) */
 
 /* music (one track at a time, crossfaded) and scene changes behind a fade */
 void lx_music_play(LxScene *s, const char *clip, float volume, float fade_seconds);
