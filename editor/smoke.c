@@ -1281,7 +1281,10 @@ static void s_leak_check(void) {
         if (ed_viewport_to_screen(lx_v3(0.7f, 0, z), &b)) dark += ls_lum(px, w, h, b.x * k, b.y * k);
     }
     lit /= 5; dark /= 5;
-    SMOKE_CHECK(lit > 20 && dark < lx_maxf(4.0f, lit * 0.04f), "no light through a thin wall on the GPU (lit side %.0f, other side %.0f)", lit, dark);
+    /* compared as light (linear), not as screen values: the sRGB curve lifts near-black, so 9/255 is 0.3 % of the light */
+    float lin_lit = powf((lit / 255.0f + 0.055f) / 1.055f, 2.4f), lin_dark = powf((dark / 255.0f + 0.055f) / 1.055f, 2.4f);
+    SMOKE_CHECK(lit > 20 && lin_dark < lin_lit * 0.02f, "no light through a thin wall on the GPU (lit side %.0f, other side %.0f: %.2f %% of the light)",
+                lit, dark, lin_lit > 0 ? 100.0f * lin_dark / lin_lit : 100.0f);
     lx_free(px);
 }
 
