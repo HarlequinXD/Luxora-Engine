@@ -158,6 +158,7 @@ static struct {
     uint32_t swap_count, image_index;
     bool swap_transfer_src;
     bool vsync, swap_dirty;
+    bool low_latency;   /* the editor: what's dragged keeps up with the mouse (see lx_renderer_set_low_latency) */
     bool swap_written;
     bool frame_active;
     /* frames */
@@ -861,7 +862,11 @@ static bool create_swapchain(void) {
             if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) mode = modes[i];
             if (modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR && mode == VK_PRESENT_MODE_FIFO_KHR) mode = modes[i];
         }
-    uint32_t count = caps.minImageCount + 1;
+    else if (R.low_latency)   /* no tearing, and the newest picture replaces any waiting one instead of queueing behind it */
+        for (uint32_t i = 0; i < np; i++) if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) mode = modes[i];
+    /* a queue of finished pictures waiting for the screen is a queue of old mouse positions: low latency with plain
+     * vsync keeps it to the fewest images the driver allows */
+    uint32_t count = R.low_latency && mode == VK_PRESENT_MODE_FIFO_KHR ? (caps.minImageCount > 2 ? caps.minImageCount : 2) : caps.minImageCount + 1;
     if (caps.maxImageCount && count > caps.maxImageCount) count = caps.maxImageCount;
     if (count > 8) count = 8;
     VkSwapchainCreateInfoKHR ci = {VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
@@ -1850,6 +1855,15 @@ LxGraphicsSettings *lx_graphics_settings(void) {
     return &R.settings;
 }
 const LxRenderStats *lx_render_stats(void) { return &R.stats; }
+void lx_renderer_set_low_latency(bool on) { if (R.low_latency != on) { R.low_latency = on; R.swap_dirty = true; } }
+bool lx_renderer_low_latency_mode(void) { return R.low_latency; }
+/* the last frame sent is finished on the GPU: input read after this is shown in the very next picture rather than
+ * two behind (the editor calls it before reading the mouse; games keep two frames in flight for speed) */
+void lx_renderer_wait_last_frame(void) {
+    if (!R.ready) return;
+    FrameData *prev = &R.frames[(R.frame + FRAMES - 1) % FRAMES];
+    vkWaitForFences(R.device, 1, &prev->fence, VK_TRUE, UINT64_MAX);
+}
 void lx_renderer_set_vsync(bool on) { if (R.vsync != on) { R.vsync = on; R.swap_dirty = true; } }
 
 /* ------------------------------------------------------------------ meshes & textures */

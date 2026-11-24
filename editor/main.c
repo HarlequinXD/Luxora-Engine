@@ -203,7 +203,12 @@ int main(int argc, char **argv) {
     int frame = 0, build_exit = 0;
     float fps_acc = 0;
     int fps_frames = 0;
+    /* An editor answers the hand: whatever is dragged (a state, a panel edge, a gizmo) should sit under the mouse.
+     * The newest picture replaces a waiting one instead of queueing behind it, and the mouse is read only once the
+     * last frame is done, so it is at most a frame behind rather than three. */
+    lx_renderer_set_low_latency(true);
     while (!ED.quit) {
+        lx_renderer_wait_last_frame();
         if (!lx_platform_pump()) {
             if (ED.mode == ED_MODE_EDITOR && ED.dirty && ED.play == ED_EDIT) {
                 /* the window close button: save prompts would block automation; autosave a recovery copy */
@@ -260,6 +265,12 @@ int main(int argc, char **argv) {
             extern bool ed_smoke_step(int frame);
             static int smoke_frame;
             if (!ed_smoke_step(smoke_frame++)) ED.quit = true;
+        }
+        /* the newest-picture-wins mode doesn't wait for the screen: keep an easy frame (a graph, a menu) from running
+         * the GPU flat out at thousands of frames a second - 240 a second is past any screen */
+        if (!smoke && !stress_frames && !shot) {
+            double spent = lx_time() - now;
+            if (spent < 1.0 / 240.0) lx_sleep_ms((int)((1.0 / 240.0 - spent) * 1000.0 + 0.5));
         }
     }
     lx_renderer_wait_idle();

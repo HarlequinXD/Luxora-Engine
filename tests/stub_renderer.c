@@ -15,6 +15,9 @@ void lx_renderer_wait_idle(void) {}
 LxGraphicsSettings *lx_graphics_settings(void) { if (!g_settings.shadow_resolution) g_settings = lx_graphics_defaults(2); return &g_settings; }
 const LxRenderStats *lx_render_stats(void) { return &g_stats; }
 void lx_renderer_set_vsync(bool on) { LX_UNUSED(on); }
+void lx_renderer_set_low_latency(bool on) { LX_UNUSED(on); }
+bool lx_renderer_low_latency_mode(void) { return false; }
+void lx_renderer_wait_last_frame(void) {}
 bool lx_renderer_begin_frame(void) { int w, h; lx_window_size(&w, &h); return w > 0 && h > 0; }
 void lx_renderer_end_frame(void) {}
 int lx_renderer_validation_errors(void) { return 0; }

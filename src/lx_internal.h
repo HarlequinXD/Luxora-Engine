@@ -147,6 +147,9 @@ bool lx_renderer_begin_frame(void);  /* false = window minimised, skip frame */
 void lx_renderer_end_frame(void);
 void lx_renderer_wait_idle(void);
 void lx_renderer_set_vsync(bool on);
+void lx_renderer_set_low_latency(bool on);   /* editor: mailbox / fewest swap images, so dragging keeps up with the mouse */
+bool lx_renderer_low_latency_mode(void);
+void lx_renderer_wait_last_frame(void);      /* the previous frame done on the GPU (call before reading input) */
 
 typedef struct LxUiVertex { float x, y, u, v; uint32_t color; } LxUiVertex;
 /* the baked UI font atlas (src/gfx/font_atlas.h), shared by the editor and the game UI */
