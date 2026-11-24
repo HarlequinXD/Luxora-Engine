@@ -20,6 +20,7 @@ typedef struct FontData {
 typedef struct Toast { char text[160]; float time; } Toast;
 
 struct UiCtx {
+    int flat;   /* > 0: fills are drawn flat (colour swatches must show the exact colour) */
     UiNode *root;
     void (*after_input)(UiCtx *ui);
     uint32_t app_icon;
@@ -324,7 +325,7 @@ void ui_draw_rect_gradient(UiCtx *ui, float x, float y, float w, float h, uint32
 
 /* Theme surfaces get their gradient automatically: anything filled with one of the theme's surface
  * colours (taller than a hairline) blends down from its *_top companion. */
-static uint32_t gradient_top(UiCtx *ui, uint32_t col) {
+static uint32_t gradient_top(UiCtx *ui, uint32_t col, float h) {
     const UiTheme *t = &ui->theme;
     if (col == t->accent) return t->accent_top;
     if (col == t->accent_hover) return t->accent_hover_top;
@@ -332,12 +333,22 @@ static uint32_t gradient_top(UiCtx *ui, uint32_t col) {
     if (col == t->panel_alt) return t->panel_alt_top;
     if (col == t->header) return t->header_top;
     if (col == t->window) return t->window_top;
-    return col;
+    /* every other solid fill too: a little lighter at the top, a little more on small elements (buttons, fields,
+     * chips) than on big areas, so panels stay calm. See-through fills (shadows, glows, tints) stay as they are. */
+    if ((col >> 24) < 0xf0) return col;
+    float k = h < 48.0f ? 0.10f : h < 160.0f ? 0.07f : 0.045f;
+    return ui_lerp_color(col, UI_RGBA(255, 255, 255, (int)(col >> 24)), k);
 }
+uint32_t ui_shade(uint32_t col, float k) {   /* k > 0 towards white, < 0 towards black */
+    return k >= 0 ? ui_lerp_color(col, UI_RGBA(255, 255, 255, (int)(col >> 24)), k)
+                  : ui_lerp_color(col, UI_RGBA(0, 0, 0, (int)(col >> 24)), -k);
+}
+void ui_flat_begin(UiCtx *ui) { ui->flat++; }
+void ui_flat_end(UiCtx *ui) { if (ui->flat > 0) ui->flat--; }
 
 void ui_draw_rect(UiCtx *ui, float x, float y, float w, float h, uint32_t col, float r) {
     if (w <= 0 || h <= 0 || !(col >> 24)) return;
-    uint32_t top = h > 6.0f ? gradient_top(ui, col) : col;
+    uint32_t top = h > 8.0f * ui->scale && !ui->flat ? gradient_top(ui, col, h / ui->scale) : col;
     Grad g = {x, y, w, h, top, col, false};
     rect_impl(ui, &g, r);
 }
@@ -2273,7 +2284,9 @@ static void draw_node(UiCtx *ui, UiNode *n) {
             float k = n->maxv > 1.0f ? 1.0f / n->maxv : 1.0f;
             uint32_t col = UI_RGBA((int)(lx_saturate(powf(n->f[0] * k, 1 / 2.2f)) * 255), (int)(lx_saturate(powf(n->f[1] * k, 1 / 2.2f)) * 255),
                                    (int)(lx_saturate(powf(n->f[2] * k, 1 / 2.2f)) * 255), 255);
+            ui_flat_begin(ui);   /* the exact colour */
             ui_draw_rect(ui, n->x + S(ui, 3), n->y + S(ui, 3), n->cw - S(ui, 6), n->ch - S(ui, 6), col, S(ui, 2));
+            ui_flat_end(ui);
         }
         break;
     }

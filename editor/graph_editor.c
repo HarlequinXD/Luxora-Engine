@@ -677,16 +677,23 @@ static void draw_state(UiCtx *ui, const LxGraph *g, int i, const LxFsmRun *run) 
         ui_draw_border(ui, x + 4 * s, y + 4 * s, w, h, COL_EDGE, r, 1);
     } else ui_draw_rect(ui, x + 2 * s, y + 3 * s, w, h, UI_RGBA(0, 0, 0, 110), r);
     if (active) ui_draw_rect(ui, x - 5 * s, y - 5 * s, w + 10 * s, h + 10 * s, ui_alpha(err ? UI_HEX(0xe5534b) : COL_ACCENT, 0.22f), r + 4 * s);
-    ui_draw_rect(ui, x, y, w, h, COL_BOX, r);
-    /* title */
-    if (active) ui_draw_rect_gradient(ui, x, y, w, th, UI_HEX(0x5a92ff), UI_HEX(0x3d7cf5), r, false);
-    else ui_draw_rect(ui, x, y, w, th, head, r);
-    if (h > th + 1) ui_draw_rect(ui, x, y + th - r, w, r, active ? UI_HEX(0x3d7cf5) : head, 0);
+    /* the card: its body lighter at the top, the title bar a richer blend of the state's colour */
+    ui_draw_rect_gradient(ui, x, y, w, h, ui_shade(COL_BOX, 0.09f), ui_shade(COL_BOX, -0.12f), r, false);
+    uint32_t head_lo = active ? UI_HEX(0x2f68dc) : ui_shade(head, -0.18f);
+    if (active) ui_draw_rect_gradient(ui, x, y, w, th, UI_HEX(0x6a9eff), head_lo, r, false);
+    else ui_draw_rect_gradient(ui, x, y, w, th, ui_shade(head, 0.22f), head_lo, r, false);
+    if (h > th + 1) {
+        ui_flat_begin(ui);
+        ui_draw_rect(ui, x, y + th - r, w, r, head_lo, 0);   /* square the title's bottom corners */
+        ui_flat_end(ui);
+    }
+    ui_draw_rect(ui, x + r, y + 1, w - 2 * r, 1, ui_alpha(UI_HEX(0xffffff), 0.16f), 0);   /* a soft highlight along the top */
     ui_push_clip(ui, x, y, w, h);
     UiFont tf = GE.zoom >= 0.8f ? UI_FONT_BOLD : UI_FONT_SMALL;
     bool compact = GE.zoom < 0.55f;   /* zoomed out: each card a block of colour with its name, big enough to read */
     if (compact) {
-        ui_draw_rect(ui, x, y, w, h, active ? UI_HEX(0x3d7cf5) : ui_alpha(head, 0.85f), r);
+        uint32_t cc = active ? UI_HEX(0x3d7cf5) : head;
+        ui_draw_rect_gradient(ui, x, y, w, h, ui_shade(cc, 0.2f), ui_shade(cc, -0.18f), r, false);
         UiFont cf = h >= ui_line_height(ui, UI_FONT_BOLD) + 2 ? UI_FONT_BOLD : UI_FONT_SMALL;   /* a short card: smaller */
         float tw = ui_text_width(ui, cf, st->name);
         if (h >= ui_line_height(ui, cf) * 0.8f)

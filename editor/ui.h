@@ -163,6 +163,11 @@ UiNode *ui_image(UiCtx *ui, UiNode *parent, uint32_t texture);
 UiNode *ui_separator(UiCtx *ui, UiNode *parent);
 /* vertical (top -> bottom) or horizontal (left -> right) gradient rectangle */
 void ui_draw_rect_gradient(UiCtx *ui, float x, float y, float w, float h, uint32_t a, uint32_t b, float r, bool horizontal);
+/* Every solid ui_draw_rect taller than a hairline is a soft vertical gradient (lighter at the top). Between these
+ * two, fills are flat: colour swatches and anything that must show its exact colour. */
+void ui_flat_begin(UiCtx *ui);
+void ui_flat_end(UiCtx *ui);
+uint32_t ui_shade(uint32_t col, float k);   /* towards white (k > 0) or black (k < 0) */
 UiNode *ui_color(UiCtx *ui, UiNode *parent, float *rgb, bool alpha);
 UiNode *ui_split(UiCtx *ui, UiNode *parent, int dir, float ratio);
 UiNode *ui_tabs(UiCtx *ui, UiNode *parent);

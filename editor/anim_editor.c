@@ -354,7 +354,8 @@ static void draw_box(UiCtx *ui, float gx, float gy, uint32_t bg, const char *tit
     float r = 5 * s;
     ui_draw_rect(ui, x + 2 * s, y + 3 * s, w, h, UI_RGBA(0, 0, 0, 110), r);
     if (live) ui_draw_rect(ui, x - 5 * s, y - 5 * s, w + 10 * s, h + 10 * s, ui_alpha(COL_RUN, 0.20f), r + 4 * s);
-    ui_draw_rect(ui, x, y, w, h, bg, r);
+    ui_draw_rect_gradient(ui, x, y, w, h, ui_shade(bg, 0.2f), ui_shade(bg, -0.16f), r, false);   /* lighter at the top */
+    ui_draw_rect(ui, x + r, y + 1, w - 2 * r, 1, ui_alpha(UI_HEX(0xffffff), 0.14f), 0);           /* a soft top highlight */
     if (live && live_progress >= 0) {
         /* how far through the state is, along its bottom edge */
         float frac = live_progress - floorf(live_progress);
