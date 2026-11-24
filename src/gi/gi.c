@@ -277,9 +277,18 @@ static void queue_box(Level *L, int x0, int y0, int z0, int x1, int y1, int z1, 
 
 /* Place a level around the eye, in steps of two probes. A small move keeps everything that's still inside and
  * only the slab that came into view is built; a jump starts over. */
+static float g_look_y;   /* the view's up/down direction: levels move down when looking down, up when looking up */
+void lx_gi_set_view_dir(LxVec3 fwd) {
+    float l = lx_len3(fwd);
+    g_look_y = l > 1e-4f && isfinite(l) ? lx_clampf(fwd.y / l, -1.0f, 1.0f) : 0.0f;
+}
 static void level_place(Level *L, int lev, LxVec3 eye, int P, float pcell) {
     int pres[3] = {P, P, P};
     if (lev == NLEV - 1) { pres[0] = P * 3 / 2; pres[2] = P * 3 / 2; }   /* the far level is wider than tall */
+    /* a camera high above looking down sees the ground, not the air around itself: each level slides along the
+     * view's vertical direction by up to 60 % of its half height, so the ground gets the finer probes (turning
+     * left and right never moves the levels) */
+    eye.y += g_look_y * 0.6f * 0.5f * (float)pres[1] * pcell;
     int oc[3];
     for (int a = 0; a < 3; a++) {
         int c = (int)floorf(lx_comp3(eye, a) / pcell) - pres[a] / 2;

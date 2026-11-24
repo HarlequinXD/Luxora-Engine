@@ -3195,6 +3195,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
         /* a thumbnail: no GI of its own (the real views own it) */
     } else if (R.gi_frame != R.frame_serial) {   /* once per frame: the first view's camera places the levels */
         R.gi_frame = R.frame_serial;
+        lx_gi_set_view_dir(lx_v3(-view->view.m[2], -view->view.m[6], -view->view.m[10]));
         lx_gi_update(s, gs, view->eye);
         upload_gi(cmd, fr);
     }

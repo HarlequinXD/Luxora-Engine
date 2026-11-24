@@ -2134,6 +2134,37 @@ static void test_gi_leaks(void) {
     printf("  dark room / lit room next to a thin wall: %.3f before, %.3f with walls\n", before, after);
     CHECK(lit_new > 0, "the lit side has bounce light (%g)", lit_new);
     CHECK(after < 0.05f, "no light leaks through a thin wall (%.3f, was %.3f)", after, before);
+    {   /* the same rooms with no ceiling, seen from 16 m above (the editor's top view): the levels follow the view down,
+         * so the floor gets the fine probes rather than coarse ones above the wall that see both rooms */
+        LxScene *s = lx_scene_create("Open Rooms");
+        LxEntity floor = lx_spawn_primitive(s, LX_PRIM_CUBE, "Floor", lx_v3(0, -0.5f, 0));
+        lx_entity_set_scale(s, floor, lx_v3(16, 1, 8));
+        static const float wxz[4][4] = {{-8.05f, 0, 0.1f, 8}, {8.05f, 0, 0.1f, 8}, {0, -4.05f, 16, 0.1f}, {0, 4.05f, 16, 0.1f}};
+        for (int i = 0; i < 4; i++) {
+            LxEntity w = lx_spawn_primitive(s, LX_PRIM_CUBE, "Outer Wall", lx_v3(wxz[i][0], 1.5f, wxz[i][1]));
+            lx_entity_set_scale(s, w, lx_v3(wxz[i][2], 3, wxz[i][3]));
+        }
+        LxEntity mid = lx_spawn_primitive(s, LX_PRIM_CUBE, "Thin Wall", lx_v3(0.13f, 1.5f, 0));
+        lx_entity_set_scale(s, mid, lx_v3(0.08f, 3, 8));
+        LxEntity lamp = lx_entity_create(s, "Lamp");
+        lx_entity_set_position(s, lamp, lx_v3(-4, 2, 0));
+        lx_add_light(s, lamp, LX_LIGHT_POINT)->intensity = 60;
+        s->env.ambient_intensity = 0;
+        LxGraphicsSettings g = lx_graphics_defaults(2);
+        lx_gi_set_view_dir(lx_v3(0, -1, 0.01f));
+        for (int f = 0; f < 60; f++) lx_gi_update(s, &g, lx_v3(0, 16, 0.01f));
+        float lit = 0, dark = 0;
+        for (int k = 0; k < 5; k++) {
+            LxVec3 a = lx_gi_irradiance(lx_v3(-0.6f, 0.01f, -2.0f + k), lx_v3(0, 1, 0), true);
+            LxVec3 b = lx_gi_irradiance(lx_v3(0.7f, 0.01f, -2.0f + k), lx_v3(0, 1, 0), true);
+            lit += a.x + a.y + a.z;
+            dark += b.x + b.y + b.z;
+        }
+        CHECK(lit > 0 && dark < lit * 0.02f, "seen from high above, the dark room stays dark (%.3f of the lit side)", lit > 0 ? dark / lit : 1.0f);
+        lx_gi_set_view_dir(lx_v3(0, 0, 0));
+        lx_gi_shutdown();
+        lx_scene_destroy(s);
+    }
     CHECK(lit_new > lit_old * 0.6f, "the lit side keeps its light (%g vs %g)", lit_new, lit_old);
 }
 

@@ -659,6 +659,7 @@ typedef struct LxGiVolume {
 void lx_gi_init(void);
 void lx_gi_shutdown(void);
 void lx_gi_update(LxScene *s, const LxGraphicsSettings *g, LxVec3 eye);
+void lx_gi_set_view_dir(LxVec3 fwd);   /* the camera's forward: levels slide towards what it looks down (or up) at */
 const LxGiVolume *lx_gi_volume(void);
 int lx_gi_last_ray_count(void);
 int lx_gi_moving_triangles(void);   /* moving objects' triangles in GI this frame (tests) */
