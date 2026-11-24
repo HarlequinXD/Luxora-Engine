@@ -2126,7 +2126,8 @@ static void post_set(VkDescriptorSet set, VkImageView a, VkSampler sa, VkImageLa
 /* the pictures after the main pass: ambient light, occlusion, sun shafts, the bloom levels, and their input sets */
 static void post_alloc(LxRenderTarget *rt) {
     const VkImageLayout RO = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, DRO = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-    VkImageUsageFlags use = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    /* transfer: cleared once at creation, so their first read (before any pass writes them) is defined */
+    VkImageUsageFlags use = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     ImageDesc d = {(uint32_t)rt->iw, (uint32_t)rt->ih, 1, 1, 1, R.gamb_format, use, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_2D, false, 0};
     image_create(&rt->gamb, &d);
     d.w = (uint32_t)rt->sw; d.h = (uint32_t)rt->sh; d.fmt = VK_FORMAT_R8_UNORM;
