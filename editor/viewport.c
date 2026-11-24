@@ -680,6 +680,10 @@ static void viewport_drop(UiNode *n, const char *type, const char *payload) {
             ed_mark_changed();
             ed_commit();
         }
+    } else if (!strcmp(type, "graph") || !strcmp(type, "animator")) {
+        float dist;
+        LxEntity hit = lx_scene_raycast(ED.scene, r, 1000, &dist);
+        if (hit) ed_attach_graph_asset(hit, type, payload);
     } else if (!strcmp(type, "scene")) {
         extern bool ed_open_scene(const char *ref);
         if (!ED.dirty) ed_open_scene(payload);

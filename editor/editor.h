@@ -194,6 +194,8 @@ bool ed_graph_keys(void);                 /* true: the graph view took the keybo
 void ed_graph_forget(void);
 void ed_graph_edit(LxEntity e, int slot);
 void ed_graph_open_asset(const char *ref);
+bool ed_attach_graph_asset(LxEntity e, const char *type, const char *ref);
+void ed_content_new_asset(const char *kind, const char *name);   /* the Create menu: "graph", "animator", "material" (open folder) */   /* dropped on an object: "graph" / "animator" */
 void ed_animator_open_asset(const char *ref);
 void ed_animator_forget(void);          /* the UI is being rebuilt: drop what it was editing */
 void ed_animator_show(LxEntity e);      /* show this object's animator graph in the Animator tab */

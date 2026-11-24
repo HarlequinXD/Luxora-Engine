@@ -1019,6 +1019,31 @@ static void s_gi_live(void) {
  * normal frame, so they are not held to the frame budget - the same reason a screenshot isn't. */
 static void an_step_begin(void) { g_big_skip = true; }
 
+/* the content browser's Create menu makes both kinds of graph and opens them; dropping one on an object attaches it */
+static void s_create_graphs(void) {
+    an_step_begin();
+    ed_content_open_dir(ED.project.assets);
+    char gp[LX_PATH_MAX], ap[LX_PATH_MAX];
+    lx_path_join(gp, sizeof gp, ED.project.assets, "Smoke Made.lxgraph");
+    lx_path_join(ap, sizeof ap, ED.project.assets, "Smoke Made.lxanim");
+    ed_content_new_asset("graph", "Smoke Made");
+    SMOKE_CHECK(lx_file_exists(gp), "Create > State Graph writes a .lxgraph in the open folder");
+    SMOKE_CHECK(ED.view_tabs && ED.view_tabs->tab_index == 1 && ge_graph() != NULL, "...and opens it in the State Graph tab");
+    ed_content_new_asset("animator", "Smoke Made");
+    SMOKE_CHECK(lx_file_exists(ap), "Create > Animator Graph writes a .lxanim");
+    SMOKE_CHECK(ED.view_tabs && ED.view_tabs->tab_index == 2 && ae_graph() != NULL, "...and opens it in the Animator tab");
+    LxEntity e = lx_spawn_primitive(ED.scene, LX_PRIM_CUBE, "Graph Drop", lx_v3(0, 0.5f, 0));
+    SMOKE_CHECK(ed_attach_graph_asset(e, "graph", "Smoke Made.lxgraph"), "a State Graph dropped on an object attaches");
+    LxStateGraph *sg = lx_get_state_graph(ED.scene, e);
+    SMOKE_CHECK(sg && sg->count == 1 && !strcmp(sg->slots[0].graph, "Smoke Made.lxgraph"), "the object runs it");
+    SMOKE_CHECK(!ed_attach_graph_asset(e, "animator", "Smoke Made.lxanim"), "an Animator Graph needs an Animator to drive");
+    lx_entity_destroy(ED.scene, e);
+    ED.selected = 0;
+    ED.view_tabs->tab_index = 0;
+    lx_path_remove(gp);
+    lx_path_remove(ap);
+    ED.content_dirty = true;
+}
 static void s_an_open(void) {
     an_step_begin();
     char path[LX_PATH_MAX];
@@ -1227,6 +1252,7 @@ static const struct { int frame; SmokeFn fn; const char *what; } STEPS[] = {
     {333, s_sg_loaded, "the new scene plays"},
     {335, s_sg_stop, "stop"},
     {337, s_sg_stopped, "back in edit mode"},
+    {339, s_create_graphs, "the content browser creates State and Animator Graphs"},
 };
 
 /* the template steps start once everything above is finished (the 4K thumbnails can take a while) */

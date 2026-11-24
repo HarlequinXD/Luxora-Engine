@@ -222,6 +222,28 @@ static void row_menu(UiNode *n) {
     it = ui_menu_item(ED.ui, p, "Delete", "Del", ctx_delete); it->icon = UI_ICON_TRASH; it->icon_color = ui_theme(ED.ui)->danger;
 }
 
+/* a State Graph or Animator Graph dropped on an object: it runs that graph */
+bool ed_attach_graph_asset(LxEntity e, const char *type, const char *ref) {
+    if (!ED.scene || !e || !lx_entity_valid(ED.scene, e) || ED.play != ED_EDIT) return false;
+    if (!strcmp(type, "graph")) {
+        LxStateGraph *sg = lx_get_state_graph(ED.scene, e);
+        for (int i = 0; sg && i < sg->count; i++)
+            if (!strcmp(sg->slots[i].graph, ref)) { ui_notify(ED.ui, "%s already runs %s", lx_entity_name(ED.scene, e), ref); return false; }
+        lx_add_state_graph(ED.scene, e, ref);
+        ui_notify(ED.ui, "%s now runs %s", lx_entity_name(ED.scene, e), lx_path_filename(ref));
+    } else if (!strcmp(type, "animator")) {
+        LxEntity a = lx_find_animator(ED.scene, e);
+        LxAnimator *an = a ? lx_get_animator(ED.scene, a) : NULL;
+        if (!an) { ui_notify(ED.ui, "%s has no Animator - Animator Graphs drive animated models", lx_entity_name(ED.scene, e)); return false; }
+        lx_strcpy(an->graph, sizeof an->graph, ref);
+        ui_notify(ED.ui, "%s's Animator now uses %s", lx_entity_name(ED.scene, a), lx_path_filename(ref));
+    } else return false;
+    ed_select(e);
+    ED.inspector_dirty = true;
+    ed_mark_changed();
+    ed_commit();
+    return true;
+}
 static void row_drop(UiNode *n, const char *type, const char *payload) {
     LxEntity target = (LxEntity)n->tag;
     if (!strcmp(type, "entity")) {
@@ -242,6 +264,8 @@ static void row_drop(UiNode *n, const char *type, const char *payload) {
     } else if (!strcmp(type, "material")) {
         LxMeshRenderer *mr = lx_get_mesh(ED.scene, target);
         if (mr) { lx_strcpy(mr->material, sizeof mr->material, payload); ED.inspector_dirty = true; ed_mark_changed(); ed_commit(); }
+    } else if (!strcmp(type, "graph") || !strcmp(type, "animator")) {
+        ed_attach_graph_asset(target, type, payload);
     } else if (!strcmp(type, "prefab")) {
         ed_prefab_place(payload, lx_v3(0, 0, 0), target);   /* as a child of the row it's dropped on */
     } else if (!strcmp(type, "model")) {
@@ -1982,6 +2006,12 @@ static void tile_open(UiNode *n) {
         char ref[LX_REF_MAX];
         ed_relative_asset(ref, sizeof ref, path);
         ed_model_place(ref, ed_spawn_point(), 0);
+    } else if (icon == UI_ICON_GRAPH || icon == UI_ICON_ANIMATOR) {   /* open it in its editor tab */
+        char ref[LX_REF_MAX];
+        ed_relative_asset(ref, sizeof ref, path);
+        tile_click(n);
+        if (icon == UI_ICON_GRAPH) ed_graph_open_asset(ref);
+        else ed_animator_open_asset(ref);
     } else if (icon == UI_ICON_SCRIPT || icon == UI_ICON_FILE) lx_platform_open_folder(path);
     else tile_click(n);
 }
@@ -2051,6 +2081,48 @@ static void create_script_named(const char *name) {
     ui_notify(ED.ui, "Script created - its behaviour is ready in Add Component > Behaviour");
     ed_scripts_refresh(true);
 }
+/* a free file name in the open folder: "Name.ext", else "Name 2.ext", ... */
+static void unique_asset_path(char *out, size_t cap, const char *name, const char *ext) {
+    char file[LX_NAME_MAX + 16];
+    for (int i = 1; i < 1000; i++) {
+        if (i == 1) snprintf(file, sizeof file, "%s%s", name, ext);
+        else snprintf(file, sizeof file, "%s %d%s", name, i, ext);
+        lx_path_join(out, cap, ED.content_dir, file);
+        if (!lx_file_exists(out)) return;
+    }
+}
+static void create_state_graph_named(const char *name) {
+    char p[LX_PATH_MAX], ref[LX_REF_MAX];
+    unique_asset_path(p, sizeof p, name, ".lxgraph");
+    LxGraph *g = lx_graph_new(name);
+    if (!lx_graph_save(g, p)) { lx_graph_free(g); ui_notify(ED.ui, "Couldn't create %s", lx_path_filename(p)); return; }
+    ed_relative_asset(ref, sizeof ref, p);
+    lx_graph_replace(ref, g);   /* takes it */
+    ED.content_dirty = true;
+    ed_select_asset(p);
+    ed_graph_open_asset(ref);
+    ui_notify(ED.ui, "State Graph created - add it to an object with Add Component > State Graph, or drop it on one");
+}
+static void create_anim_graph_named(const char *name) {
+    char p[LX_PATH_MAX], ref[LX_REF_MAX];
+    unique_asset_path(p, sizeof p, name, ".lxanim");
+    LxAnimGraph *g = lx_anim_graph_new(name);
+    if (!lx_anim_graph_save(g, p)) { lx_anim_graph_free(g); ui_notify(ED.ui, "Couldn't create %s", lx_path_filename(p)); return; }
+    ed_relative_asset(ref, sizeof ref, p);
+    lx_anim_graph_replace(ref, g);
+    ED.content_dirty = true;
+    ed_select_asset(p);
+    ed_animator_open_asset(ref);
+    ui_notify(ED.ui, "Animator Graph created - set it as an Animator component's Graph");
+}
+/* the Create menu's assets, by name (smoke test, tools): "graph" or "animator", made in the open folder */
+void ed_content_new_asset(const char *kind, const char *name) {
+    if (!strcmp(kind, "graph")) create_state_graph_named(name);
+    else if (!strcmp(kind, "animator")) create_anim_graph_named(name);
+    else if (!strcmp(kind, "material")) create_material_named(name);
+}
+static void m_new_state_graph(UiNode *n) { LX_UNUSED(n); ed_prompt("New State Graph", "Name", "New State Graph", create_state_graph_named); }
+static void m_new_anim_graph(UiNode *n) { LX_UNUSED(n); ed_prompt("New Animator Graph", "Name", "New Animator", create_anim_graph_named); }
 static void m_new_folder(UiNode *n) { LX_UNUSED(n); ed_prompt("New Folder", "Name", "New Folder", create_folder_named); }
 static void m_new_material(UiNode *n) { LX_UNUSED(n); ed_prompt("New Material", "Name", "New Material", create_material_named); }
 static void m_new_scene_asset(UiNode *n) { LX_UNUSED(n); ed_prompt("New Scene", "Name", "New Scene", create_scene_named); }
@@ -2063,6 +2135,8 @@ static void create_asset_menu_at(float x, float y) {
     it = ui_menu_item(ED.ui, p, "Material", NULL, m_new_material); it->icon = UI_ICON_MATERIAL; it->icon_color = ed_color_for_icon(UI_ICON_MATERIAL);
     it = ui_menu_item(ED.ui, p, "Scene", NULL, m_new_scene_asset); it->icon = UI_ICON_SCENE; it->icon_color = ed_color_for_icon(UI_ICON_SCENE);
     it = ui_menu_item(ED.ui, p, "Script (Behaviour)", NULL, m_new_script); it->icon = UI_ICON_SCRIPT; it->icon_color = ed_color_for_icon(UI_ICON_SCRIPT);
+    it = ui_menu_item(ED.ui, p, "State Graph", NULL, m_new_state_graph); it->icon = UI_ICON_GRAPH; it->icon_color = ed_color_for_icon(UI_ICON_GRAPH);
+    it = ui_menu_item(ED.ui, p, "Animator Graph", NULL, m_new_anim_graph); it->icon = UI_ICON_ANIMATOR; it->icon_color = ed_color_for_icon(UI_ICON_ANIMATOR);
 }
 static void create_asset_menu(UiNode *n) { create_asset_menu_at(n->x, n->y + n->ch); }
 static void grid_menu(UiNode *n) { LX_UNUSED(n); LxVec2 m = lx_mouse_pos(); create_asset_menu_at(m.x, m.y); }
