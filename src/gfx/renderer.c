@@ -796,6 +796,8 @@ static bool create_device(void) {
     VkDeviceCreateInfo ci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     if (core13) {
         f13.dynamicRendering = VK_TRUE;
+        /* newer shader compilers turn `discard` into demote-to-helper (a core 1.3 feature every 1.3 device has) */
+        f13.shaderDemoteToHelperInvocation = VK_TRUE;
         ci.pNext = &f13;
     } else {
         exts[ne++] = "VK_KHR_dynamic_rendering";
