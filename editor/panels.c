@@ -1819,10 +1819,17 @@ static void lighting_frame(UiNode *body) {
     }
 
     sec = ed_section(body, UI_ICON_SUN, "Global Illumination (project)", &g_open_gi, NULL);
-    UiNode *row = ed_prop_row(sec, "Quality Preset");
+    UiNode *row = ed_prop_row(sec, "Graphics Preset");
     UiNode *q = ui_dropdown(ui, row, &g_quality, QUALITY, 4);
     q->grow = 1;
     q->on_change = quality_changed;
+    {
+        UiNode *l = ui_label(ui, sec, "Sets every effect, not just GI: Low also turns off screen-space reflections, reflection "
+                                      "cards, ambient occlusion and sun shafts. Each one can be turned back on below.");
+        l->font = UI_FONT_SMALL;
+        l->fg = ui_theme(ui)->text_dim;
+        l->wrap = true;
+    }
     bool_row(sec, "Live GI", &g->gi_enabled)->on_change = graphics_changed;
     row = ed_prop_row(sec, "Rays / Frame");
     UiNode *ph = ui_int(ui, row, &g->gi_rays_per_frame, 1024, 1000000);
