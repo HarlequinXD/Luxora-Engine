@@ -7,7 +7,7 @@ on:
 
 jobs:
   linux:
-    name: Linux (build, tests, Vulkan screenshots)
+    name: Linux (build, tests, download)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -49,29 +49,63 @@ jobs:
           export HOME=$RUNNER_TEMP/home && mkdir -p $HOME
           LUXORA_NO_AUDIO=1 xvfb-run -a -s "-screen 0 1600x940x24" ./build/luxora_editor_nogpu --new $RUNNER_TEMP/projects "CI Sample" --smoke
 
-      - name: Editor stress test (random heavy use, sanitizers)
+      - name: Build a game from the editor pipeline
         run: |
           export HOME=$RUNNER_TEMP/home
-          cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
-          cmake --build build-asan --target luxora_editor_nogpu
-          LUXORA_NO_AUDIO=1 xvfb-run -a ./build-asan/luxora_editor_nogpu --new $RUNNER_TEMP/stress "Stress" --screenshot /dev/null --frames 3
-          P="$RUNNER_TEMP/stress/Stress"
-          if [ -n "$LUXORA_SMOKE_FBX_DIR" ]; then mkdir -p "$P/Assets/Models" && cp "$LUXORA_SMOKE_FBX_DIR"/*.fbx "$P/Assets/Models/"; fi
-          for seed in 1 2 3; do
-            rm -rf "$RUNNER_TEMP/s$seed" && cp -r "$P" "$RUNNER_TEMP/s$seed"
-            ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
-            LUXORA_NO_AUDIO=1 LUXORA_STRESS_SEED=$seed LUXORA_STRESS_PROJECT="$RUNNER_TEMP/s$seed" \
-              xvfb-run -a -s "-screen 0 1600x940x24" ./build-asan/luxora_editor_nogpu "$RUNNER_TEMP/s$seed" --stress 1500 > stress$seed.log 2>&1 \
-              || { tail -80 stress$seed.log; grep -E "BROKEN" -A2 stress$seed.log | head -40; exit 1; }
-            grep "\[stress\] done" stress$seed.log
+          LUXORA_NO_AUDIO=1 xvfb-run -a -s "-screen 0 1600x940x24" ./build/luxora_editor_nogpu "$RUNNER_TEMP/projects/CI Sample" --build
+          ls -la "$RUNNER_TEMP/projects/CI Sample/Builds/Linux/CI Sample"
+
+      - name: Package
+        run: |
+          # the editor (with its built-in script compiler) and the game player it packages games with - no engine source
+          mkdir -p "linux-package/Luxora Editor/Runtime/Linux" "linux-package/Luxora Editor/Licenses"
+          cp build/luxora_editor "linux-package/Luxora Editor/LuxoraEditor"
+          cp README.md "linux-package/Luxora Editor/"
+          cp build/luxora_player "linux-package/Luxora Editor/Runtime/Linux/LuxoraPlayer"
+          cp third_party/tinycc/COPYING "linux-package/Luxora Editor/Licenses/TinyCC (LGPL-2.1).txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Luxora-Editor-Linux
+          path: |
+            linux-package/
+
+
+  # The slow checks run beside the build: the downloads don't wait for them (a failure still shows red).
+  linux-vulkan:
+    name: Linux Vulkan (lavapipe + validation, screenshots)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 install -y cmake ninja-build libx11-dev xvfb mesa-vulkan-drivers vulkan-validationlayers \
+                                  vulkan-tools glslang-tools python3-pil
+
+      - name: Configure & build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Sample FBX characters (downloaded for testing, not part of the repo)
+        run: |
+          mkdir -p $RUNNER_TEMP/fbx
+          for f in "Samba%20Dancing.fbx" "mixamo.fbx"; do
+            curl -fsSL --retry 3 -o "$RUNNER_TEMP/fbx/${f//%20/ }" "https://raw.githubusercontent.com/mrdoob/three.js/r170/examples/models/fbx/$f" || true
           done
-          # the State Graph editor, hard: most actions are graph edits
-          rm -rf "$RUNNER_TEMP/sg" && cp -r "$P" "$RUNNER_TEMP/sg"
-          ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
-          LUXORA_NO_AUDIO=1 LUXORA_STRESS_GRAPH=1 LUXORA_STRESS_SEED=11 LUXORA_STRESS_PROJECT="$RUNNER_TEMP/sg" \
-            xvfb-run -a -s "-screen 0 1600x940x24" ./build-asan/luxora_editor_nogpu "$RUNNER_TEMP/sg" --stress 2500 > stress_graph.log 2>&1 \
-            || { tail -80 stress_graph.log; grep -E "BROKEN" -A2 stress_graph.log | head -40; exit 1; }
-          grep "\[stress\] done" stress_graph.log
+          ls -la $RUNNER_TEMP/fbx
+          if [ -s "$RUNNER_TEMP/fbx/Samba Dancing.fbx" ] && [ -s "$RUNNER_TEMP/fbx/mixamo.fbx" ]; then
+            echo "LUXORA_TEST_FBX_DIR=$RUNNER_TEMP/fbx" >> $GITHUB_ENV
+            echo "LUXORA_SMOKE_FBX_DIR=$RUNNER_TEMP/fbx" >> $GITHUB_ENV
+          else echo "::warning::sample FBX download failed - model tests skipped"; fi
+
+      - name: Sample project
+        run: |
+          export HOME=$RUNNER_TEMP/home && mkdir -p $HOME
+          LUXORA_NO_AUDIO=1 xvfb-run -a -s "-screen 0 1600x940x24" ./build/luxora_editor_nogpu --new $RUNNER_TEMP/projects "CI Sample" --screenshot /dev/null --frames 3
 
       - name: Build a game from the editor pipeline
         run: |
@@ -153,20 +187,59 @@ jobs:
           name: screenshots
           path: shots/*.png
 
-      - name: Package
-        run: |
-          # the editor (with its built-in script compiler) and the game player it packages games with - no engine source
-          mkdir -p "linux-package/Luxora Editor/Runtime/Linux" "linux-package/Luxora Editor/Licenses"
-          cp build/luxora_editor "linux-package/Luxora Editor/LuxoraEditor"
-          cp README.md "linux-package/Luxora Editor/"
-          cp build/luxora_player "linux-package/Luxora Editor/Runtime/Linux/LuxoraPlayer"
-          cp third_party/tinycc/COPYING "linux-package/Luxora Editor/Licenses/TinyCC (LGPL-2.1).txt"
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Luxora-Editor-Linux
-          path: |
-            linux-package/
+  linux-stress:
+    name: Linux stress (random heavy use, sanitizers)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 install -y cmake ninja-build libx11-dev xvfb mesa-vulkan-drivers vulkan-validationlayers \
+                                  vulkan-tools glslang-tools python3-pil
+
+      - name: Sample FBX characters (downloaded for testing, not part of the repo)
+        run: |
+          mkdir -p $RUNNER_TEMP/fbx
+          for f in "Samba%20Dancing.fbx" "mixamo.fbx"; do
+            curl -fsSL --retry 3 -o "$RUNNER_TEMP/fbx/${f//%20/ }" "https://raw.githubusercontent.com/mrdoob/three.js/r170/examples/models/fbx/$f" || true
+          done
+          ls -la $RUNNER_TEMP/fbx
+          if [ -s "$RUNNER_TEMP/fbx/Samba Dancing.fbx" ] && [ -s "$RUNNER_TEMP/fbx/mixamo.fbx" ]; then
+            echo "LUXORA_TEST_FBX_DIR=$RUNNER_TEMP/fbx" >> $GITHUB_ENV
+            echo "LUXORA_SMOKE_FBX_DIR=$RUNNER_TEMP/fbx" >> $GITHUB_ENV
+          else echo "::warning::sample FBX download failed - model tests skipped"; fi
+
+      - name: Home
+        run: mkdir -p $RUNNER_TEMP/home
+
+      - name: Editor stress test (random heavy use, sanitizers)
+        run: |
+          export HOME=$RUNNER_TEMP/home
+          cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          cmake --build build-asan --target luxora_editor_nogpu
+          LUXORA_NO_AUDIO=1 xvfb-run -a ./build-asan/luxora_editor_nogpu --new $RUNNER_TEMP/stress "Stress" --screenshot /dev/null --frames 3
+          P="$RUNNER_TEMP/stress/Stress"
+          if [ -n "$LUXORA_SMOKE_FBX_DIR" ]; then mkdir -p "$P/Assets/Models" && cp "$LUXORA_SMOKE_FBX_DIR"/*.fbx "$P/Assets/Models/"; fi
+          for seed in 1 2 3; do
+            rm -rf "$RUNNER_TEMP/s$seed" && cp -r "$P" "$RUNNER_TEMP/s$seed"
+            ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+            LUXORA_NO_AUDIO=1 LUXORA_STRESS_SEED=$seed LUXORA_STRESS_PROJECT="$RUNNER_TEMP/s$seed" \
+              xvfb-run -a -s "-screen 0 1600x940x24" ./build-asan/luxora_editor_nogpu "$RUNNER_TEMP/s$seed" --stress 1500 > stress$seed.log 2>&1 \
+              || { tail -80 stress$seed.log; grep -E "BROKEN" -A2 stress$seed.log | head -40; exit 1; }
+            grep "\[stress\] done" stress$seed.log
+          done
+          # the State Graph editor, hard: most actions are graph edits
+          rm -rf "$RUNNER_TEMP/sg" && cp -r "$P" "$RUNNER_TEMP/sg"
+          ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+          LUXORA_NO_AUDIO=1 LUXORA_STRESS_GRAPH=1 LUXORA_STRESS_SEED=11 LUXORA_STRESS_PROJECT="$RUNNER_TEMP/sg" \
+            xvfb-run -a -s "-screen 0 1600x940x24" ./build-asan/luxora_editor_nogpu "$RUNNER_TEMP/sg" --stress 2500 > stress_graph.log 2>&1 \
+            || { tail -80 stress_graph.log; grep -E "BROKEN" -A2 stress_graph.log | head -40; exit 1; }
+          grep "\[stress\] done" stress_graph.log
+
 
   windows:
     name: Windows (MSVC)
