@@ -53,6 +53,7 @@ typedef struct Level {
     int *snew;                /* surface voxels not lit yet: lit before any probe looks at them */
     int nnew, cnew;
     float *sh;                /* per probe: 12 (L1 SH, red / green / blue) */
+    float *var;               /* per probe: how much its brightness jumps between updates (noise), to tell noise from change */
     float *vis;               /* per probe: 6, distance to the first surface along +x -x +y -y +z -z (probe cells) */
     uint8_t *hist, *need;     /* per probe: updates in its history; updates it still wants */
     bool unlit;               /* some probes have never been traced */
@@ -103,7 +104,7 @@ void lx_gi_init(void) {
 }
 static void level_free(Level *L) {
     lx_free(L->sdf); lx_free(L->tri); lx_free(L->rad); lx_free(L->surf); lx_free(L->slist); lx_free(L->snew);
-    lx_free(L->sh); lx_free(L->vis); lx_free(L->hist); lx_free(L->need); lx_free(L->cls); lx_free(L->bdist); lx_free(L->stamp); lx_free(L->fresh);
+    lx_free(L->sh); lx_free(L->var); lx_free(L->vis); lx_free(L->hist); lx_free(L->need); lx_free(L->cls); lx_free(L->bdist); lx_free(L->stamp); lx_free(L->fresh);
     memset(L, 0, sizeof *L);
 }
 void lx_gi_shutdown(void) {
@@ -220,6 +221,7 @@ static void level_alloc(Level *L) {
     L->rad = lx_calloc((size_t)L->nv * 3, sizeof(float));
     L->surf = lx_calloc((size_t)L->nv, 1);
     L->sh = lx_calloc((size_t)L->np * SH_FLOATS, sizeof(float));
+    L->var = lx_calloc((size_t)L->np, sizeof(float));
     L->vis = lx_alloc(sizeof(float) * (size_t)L->np * 6);
     L->hist = lx_calloc((size_t)L->np, 1);
     L->need = lx_alloc((size_t)L->np);
@@ -335,6 +337,7 @@ static void level_place(Level *L, int lev, LxVec3 eye, int P, float pcell) {
                 if (ox < 0 || oy < 0 || oz < 0 || ox >= L->pres[0] || oy >= L->pres[1] || oz >= L->pres[2]) continue;
                 int i = pidx(&n, x, y, z), o = pidx(L, ox, oy, oz);
                 memcpy(&n.sh[i * SH_FLOATS], &L->sh[o * SH_FLOATS], sizeof(float) * SH_FLOATS);
+                n.var[i] = L->var[o];
                 memcpy(&n.vis[i * 6], &L->vis[o * 6], sizeof(float) * 6);
                 n.hist[i] = L->hist[o];
                 n.need[i] = L->need[o];
@@ -343,7 +346,7 @@ static void level_place(Level *L, int lev, LxVec3 eye, int P, float pcell) {
                 n.stamp[i] = L->stamp[o];
             }
     lx_free(L->sdf); lx_free(L->tri); lx_free(L->rad); lx_free(L->surf); lx_free(L->slist);
-    lx_free(L->sh); lx_free(L->vis); lx_free(L->hist); lx_free(L->need); lx_free(L->cls); lx_free(L->bdist); lx_free(L->stamp); lx_free(L->fresh);
+    lx_free(L->sh); lx_free(L->var); lx_free(L->vis); lx_free(L->hist); lx_free(L->need); lx_free(L->cls); lx_free(L->bdist); lx_free(L->stamp); lx_free(L->fresh);
     n.slist = NULL;
     n.nnew = 0;
     n.nsurf = n.csurf = 0;
@@ -572,7 +575,7 @@ static void light_job(void *user, int begin, int end, int thread) {
             if (ti >= b->tri_count) continue;
             n = b->normals[ti];
             const LxTriMaterial *mt = &b->materials[b->mat_index[ti]];
-            albedo = mt->albedo;
+            albedo = b->tri_albedo ? lx_bvh_tri_albedo(b, ti) : mt->albedo;   /* its own part of the texture */
             glow = mt->emissive;
         }
         if (L->sdf[i] < 0) n = lx_neg3(n);   /* seen from behind: light its back */
@@ -629,22 +632,50 @@ static void probe_job(void *user, int begin, int end, int thread) {
         if (sdf_at(L, o) < -0.05f * L->pcell) { L->hist[i] = 0; continue; }   /* buried in a wall: filled from its neighbours */
         LxRng rng = lx_rng_seed(j->seed, (uint64_t)i * 2654435761u + 1u);
         LxQuat q = lx_quat_norm((LxQuat){lx_rng_f(&rng) - 0.5f, lx_rng_f(&rng) - 0.5f, lx_rng_f(&rng) - 0.5f, lx_rng_f(&rng) - 0.5f});
-        float c[12] = {0};
         int N = L->cls[i] == 2 ? lx_maxi(j->rays / 2, 8) : j->rays;
         if (!L->hist[i]) N *= 2;   /* starting over: twice the rays, so the first estimate isn't a noisy one */
+        LxVec3 rad_ray[512], dir_ray[512];
+        if (N > 512) N = 512;
+        float mean = 0;
         for (int r = 0; r < N; r++) {
             float zz = 1.0f - (2.0f * r + 1.0f) / (float)N, rr = sqrtf(lx_maxf(0, 1 - zz * zz)), a = (float)r * 2.39996323f;
             LxVec3 d = lx_quat_rotate(q, lx_v3(rr * cosf(a), zz, rr * sinf(a)));
             int hl;
-            LxVec3 hp, rad;
-            if (march(o, d, 1e4f, j->lev, &hl, &hp, NULL)) rad = surface_light(&G.lv[hl], hp);
-            else rad = sky_radiance(d);
+            LxVec3 hp;
+            dir_ray[r] = d;
+            rad_ray[r] = march(o, d, 1e4f, j->lev, &hl, &hp, NULL) ? surface_light(&G.lv[hl], hp) : sky_radiance(d);
+            mean += luminance(rad_ray[r]);
+        }
+        mean /= (float)N;
+        /* fireflies: one ray finding a small, very bright spot (a lamp's hot surface, a sunlit gap) would flash the
+         * probe for an update; no ray may bring more than 12 times this update's average */
+        float cap = lx_maxf(mean * 12.0f, 1e-4f);
+        float c[12] = {0};
+        for (int r = 0; r < N; r++) {
+            LxVec3 rad = rad_ray[r], d = dir_ray[r];
+            float lum = luminance(rad);
+            if (lum > cap) rad = lx_scale3(rad, cap / lum);
             float sh[4] = {SH_C0, SH_C1 * d.y, SH_C1 * d.z, SH_C1 * d.x};
             for (int b = 0; b < 4; b++) { c[b] += rad.x * sh[b]; c[4 + b] += rad.y * sh[b]; c[8 + b] += rad.z * sh[b]; }
         }
         float w = 4.0f * LX_PI / (float)N;
-        float a = L->hist[i] ? lx_maxf(1.0f / (float)(L->hist[i] + 1), G.alpha_min) : 1.0f;
         float *s = &L->sh[i * SH_FLOATS];
+        /* Stable and quick at once: how far this update's brightness is from the history, against how much it
+         * usually jumps (the noise of a handful of rays). Within the noise: blend in gently, so a settled probe stays
+         * still. Well beyond it (a light switched on, a door opened): blend in fast, so the change shows at once. */
+        float est = luminance(lx_v3(c[0] * w, c[4] * w, c[8] * w)), was = luminance(lx_v3(s[0], s[4], s[8]));
+        float a;
+        if (!L->hist[i]) {
+            a = 1.0f;
+            L->var[i] = est * est * 0.04f;
+        } else {
+            float diff = est - was, noise = sqrtf(L->var[i]) + 0.03f * lx_maxf(was, 0) + 1e-5f;
+            float z = fabsf(diff) / noise;
+            float base = lx_maxf(1.0f / (float)(L->hist[i] + 1), G.alpha_min);
+            if (z < 2.0f) a = lx_maxf(1.0f / (float)(L->hist[i] + 1), G.alpha_min * 0.35f);
+            else a = lx_minf(base * (1.0f + (z - 2.0f) * 0.5f), 0.65f);
+            L->var[i] += (diff * diff - L->var[i]) * 0.15f;
+        }
         for (int b = 0; b < 12; b++) s[b] += (c[b] * w - s[b]) * a;
         if (L->hist[i] < 250) L->hist[i]++;
     }

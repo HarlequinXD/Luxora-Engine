@@ -161,6 +161,13 @@ static void sample_small(const SmallTex *s, float u, float v, float out[4]) {
     }
 }
 
+bool lx_cards_tex_sample(const char *ref, float u, float v, float out[4]) {
+    const SmallTex *t = small_tex(ref);
+    if (!t) return false;
+    sample_small(t, u, v, out);
+    return true;
+}
+
 /* Draws the six cards of a mesh + material: albedo (RGBA8, sRGB, alpha = covered) and depth (R8, 255 = empty),
  * each R x R, one after the other. */
 void lx_cards_capture(const LxMesh *m, const LxMaterial *mat, uint8_t *albedo, uint8_t *depth) {

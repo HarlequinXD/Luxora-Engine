@@ -376,6 +376,7 @@ void lx_cards_forget_mesh(const LxMesh *m);
 int lx_cards_take_dirty(int *tiles, int cap);                 /* tiles to upload */
 void lx_cards_tile_pixels(int tile, uint8_t *albedo, uint8_t *depth);
 void lx_cards_reset(void);
+bool lx_cards_tex_sample(const char *ref, float u, float v, float out[4]);   /* a colour map, shrunk: linear rgba at uv */
 float lx_cards_trace_box(const uint8_t *albedo, const uint8_t *depth, LxVec3 o, LxVec3 d, int steps, uint8_t rgb_out[3], int *face_out);
 void lx_terrain_shutdown(void);
 float lx_terrain_test_seams(LxScene *s, LxEntity e);   /* tests: worst mismatch along shared chunk edges */
@@ -565,10 +566,13 @@ typedef struct LxBvh {
     LxBvhNode *nodes;
     int node_count;
     LxTriMaterial *materials;
+    uint32_t *tri_albedo;   /* GI builds: each triangle's own colour from its part of the texture (sRGB packed), or NULL */
     int material_count;
     LxAabb bounds;
 } LxBvh;
 
+/* a triangle's diffuse colour for bounce light (GI builds: its part of the texture; otherwise its material's) */
+LxVec3 lx_bvh_tri_albedo(const LxBvh *b, int tri);
 typedef struct LxHit {
     float t;
     int tri;

@@ -97,7 +97,7 @@ static void subdivide(BuildCtx *c, int ni) {
 
 void lx_bvh_free(LxBvh *b) {
     lx_free(b->v0); lx_free(b->e1); lx_free(b->e2); lx_free(b->normals);
-    lx_free(b->mat_index); lx_free(b->tri_index); lx_free(b->nodes); lx_free(b->materials);
+    lx_free(b->mat_index); lx_free(b->tri_index); lx_free(b->nodes); lx_free(b->materials); lx_free(b->tri_albedo);
     memset(b, 0, sizeof *b);
 }
 
@@ -155,7 +155,40 @@ static const LxMeshLod *build_lod(LxEntityData *d, bool moving) {
 }
 #define MOVING_TRI_MAX 400000   /* the most moving triangles GI takes in one frame */
 
-static bool g_skip_terrain, g_skip_see_through;
+static bool g_skip_terrain, g_skip_see_through, g_tri_colours;
+static float lin_of(uint8_t c) { float x = c / 255.0f; return x <= 0.04045f ? x / 12.92f : powf((x + 0.055f) / 1.055f, 2.4f); }
+static uint8_t srgb_of(float c) {
+    c = lx_clampf(c, 0.0f, 1.0f);
+    return (uint8_t)((c <= 0.0031308f ? c * 12.92f : 1.055f * powf(c, 1.0f / 2.4f) - 0.055f) * 255.0f + 0.5f);
+}
+LxVec3 lx_bvh_tri_albedo(const LxBvh *b, int tri) {
+    if (!b->tri_albedo) return b->materials[b->mat_index[tri]].albedo;
+    uint32_t p = b->tri_albedo[tri];
+    return lx_v3(lin_of((uint8_t)p), lin_of((uint8_t)(p >> 8)), lin_of((uint8_t)(p >> 16)));
+}
+/* A triangle's colour from its own part of the colour map: a model with one texture for all its parts (a house:
+ * walls, roof, door) bounces each part's colour, not the whole picture's average. A triangle that spans much of
+ * the texture (a tiled floor) takes the average, which is what it shows from a distance. */
+static uint32_t tri_colour(const LxMaterial *m, LxVec3 avg, const LxVertex *a, const LxVertex *b, const LxVertex *c) {
+    LxVec3 col = avg;
+    if (m->albedo_map[0]) {
+        float du1 = b->u - a->u, dv1 = b->v - a->v, du2 = c->u - a->u, dv2 = c->v - a->v;
+        float area = fabsf(du1 * dv2 - du2 * dv1) * 0.5f;   /* of the texture's 0..1 square */
+        float own = 1.0f - lx_clampf((area - 0.004f) / 0.03f, 0.0f, 1.0f);
+        if (own > 0) {
+            const float uv[4][2] = {{(a->u + b->u + c->u) / 3, (a->v + b->v + c->v) / 3}, {a->u * 0.6f + (b->u + c->u) * 0.2f, a->v * 0.6f + (b->v + c->v) * 0.2f},
+                                    {b->u * 0.6f + (a->u + c->u) * 0.2f, b->v * 0.6f + (a->v + c->v) * 0.2f}, {c->u * 0.6f + (a->u + b->u) * 0.2f, c->v * 0.6f + (a->v + b->v) * 0.2f}};
+            float sum[3] = {0}, px[4];
+            int n = 0;
+            for (int k = 0; k < 4; k++)
+                if (lx_cards_tex_sample(m->albedo_map, uv[k][0], uv[k][1], px)) { sum[0] += px[0]; sum[1] += px[1]; sum[2] += px[2]; n++; }
+            if (n) col = lx_lerp3(avg, lx_v3(sum[0] / n, sum[1] / n, sum[2] / n), own);
+        }
+    }
+    float diffuse = 1.0f - m->metallic * 0.9f;
+    col = lx_scale3(lx_mul3(col, lx_v3(m->albedo.x, m->albedo.y, m->albedo.z)), diffuse);
+    return (uint32_t)srgb_of(col.x) | (uint32_t)srgb_of(col.y) << 8 | (uint32_t)srgb_of(col.z) << 16;
+}
 /* GI skips terrain chunks (it reads the height data instead); light (GI, baking) skips see-through materials:
  * glass, smoke and fire let it through. Sound still bounces off glass. */
 static bool gi_skips(LxScene *s, int i) {
@@ -183,6 +216,11 @@ static void build(LxBvh *b, LxScene *s, bool moving) {
     b->normals = lx_alloc(sizeof(LxVec3) * (size_t)tris);
     b->mat_index = lx_alloc(sizeof(uint16_t) * (size_t)tris);
     b->tri_index = lx_alloc(sizeof(int) * (size_t)tris);
+    b->tri_albedo = g_tri_colours ? lx_alloc(sizeof(uint32_t) * (size_t)tris) : NULL;
+    static const char **avg_ref;
+    static LxVec3 *avg_col;
+    static int navg, cavg;
+    navg = 0;
     b->nodes = lx_alloc(sizeof(LxBvhNode) * (size_t)(tris * 2));
     BuildCtx c = {b, lx_alloc(sizeof(LxVec3) * (size_t)tris), lx_alloc(sizeof(LxAabb) * (size_t)tris)};
     const LxMaterial **mats = NULL;
@@ -205,6 +243,22 @@ static void build(LxBvh *b, LxScene *s, bool moving) {
                 mi = b->material_count - 1;
             }
         }
+        LxVec3 tex_avg = lx_v3(1, 1, 1);
+        if (b->tri_albedo && mat->albedo_map[0]) {   /* the texture's average, once per texture */
+            int f = -1;
+            for (int q = 0; q < navg && f < 0; q++) if (!strcmp(avg_ref[q], mat->albedo_map)) f = q;
+            if (f < 0) {
+                if (navg == cavg) {
+                    cavg = cavg ? cavg * 2 : 16;
+                    avg_ref = lx_realloc((void *)avg_ref, sizeof(char *) * (size_t)cavg);
+                    avg_col = lx_realloc(avg_col, sizeof(LxVec3) * (size_t)cavg);
+                }
+                avg_ref[navg] = mat->albedo_map;
+                avg_col[navg] = texture_average(mat->albedo_map);
+                f = navg++;
+            }
+            tex_avg = avg_col[f];
+        }
         for (int k = 0; k + 2 < l0->index_count; k += 3, t++) {
             const LxVertex *va = &l0->vertices[l0->indices[k]], *vb = &l0->vertices[l0->indices[k + 1]], *vc = &l0->vertices[l0->indices[k + 2]];
             LxVec3 a = lx_mat4_point(d->world, lx_v3(va->px, va->py, va->pz));
@@ -214,6 +268,7 @@ static void build(LxBvh *b, LxScene *s, bool moving) {
             b->e1[t] = lx_sub3(bb, a);
             b->e2[t] = lx_sub3(cc, a);
             b->normals[t] = lx_norm3(lx_cross3(b->e1[t], b->e2[t]));
+            if (b->tri_albedo) b->tri_albedo[t] = tri_colour(mat, tex_avg, va, vb, vc);
             b->mat_index[t] = (uint16_t)mi;
             b->tri_index[t] = t;
             LxAabb tb = lx_aabb_empty();
@@ -248,9 +303,9 @@ static void build(LxBvh *b, LxScene *s, bool moving) {
 void lx_bvh_build_from_scene(LxBvh *b, LxScene *s) { build(b, s, false); }
 /* without terrain chunks: GI measures its distance to the terrain from the height data itself (exact) */
 void lx_bvh_build_gi(LxBvh *b, LxScene *s) {
-    g_skip_terrain = g_skip_see_through = true;
+    g_skip_terrain = g_skip_see_through = g_tri_colours = true;
     build(b, s, false);
-    g_skip_terrain = g_skip_see_through = false;
+    g_skip_terrain = g_skip_see_through = g_tri_colours = false;
 }
 void lx_bvh_build_light(LxBvh *b, LxScene *s) {
     g_skip_see_through = true;
