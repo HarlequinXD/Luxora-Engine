@@ -88,7 +88,7 @@ static void arena(LxScene *s, bool tps) {
     env->fog_density = 0.008f;
     LxEntity sun = lx_entity_find(s, "Directional Light");
     if (sun) {
-        lx_entity_set_euler(s, sun, lx_v3(38, 140, 0));
+        lx_entity_set_euler(s, sun, lx_v3(-38, -140, 0));
         LxLight *l = lx_get_light(s, sun);
         l->color = lx_v3(1.0f, 0.88f, 0.74f);
         l->intensity = 3.2f;
@@ -110,7 +110,7 @@ static void arena(LxScene *s, bool tps) {
         snprintf(n, sizeof n, "Crate %d", (int)i + 1);
         float sz = crates[i][2];
         LxEntity c = prim(s, LX_PRIM_CUBE, n, lx_v3(crates[i][0], sz * 0.5f, crates[i][1]), lx_v3(sz, sz, sz), "Materials/Crate.lxmat", true);
-        lx_entity_set_euler(s, c, lx_v3(0, crates[i][3], 0));
+        lx_entity_set_euler(s, c, lx_v3(0, -crates[i][3], 0));
     }
     static const float pillars[][2] = {{-9, -9}, {9, -9}, {-9, 9}, {9, 9}};
     for (int i = 0; i < 4; i++) {
@@ -121,7 +121,7 @@ static void arena(LxScene *s, bool tps) {
     /* a walkway along the north wall with a ramp up to it, and steps on the east side */
     prim(s, LX_PRIM_CUBE, "Walkway", lx_v3(-6, 1.4f, -20.5f), lx_v3(20, 0.4f, 5), "Materials/Metal.lxmat", true);
     LxEntity ramp = prim(s, LX_PRIM_CUBE, "Ramp", lx_v3(7.2f, 0.72f, -20.5f), lx_v3(7, 0.3f, 4), "Materials/Metal.lxmat", true);
-    lx_entity_set_euler(s, ramp, lx_v3(0, 0, 12));
+    lx_entity_set_euler(s, ramp, lx_v3(0, 0, -12));
     for (int i = 0; i < 4; i++) {
         char n[32];
         snprintf(n, sizeof n, "Step %d", i + 1);
@@ -248,7 +248,7 @@ static bool fps_template(const char *assets, LxScene *s) {
     LxEntity cam = lx_entity_find(s, "Main Camera");
     LxEntity p = lx_entity_create(s, "Player");
     lx_entity_set_position(s, p, lx_v3(0, 0, 16));
-    lx_entity_set_euler(s, p, lx_v3(0, 180, 0));   /* facing into the yard (-Z) */
+    lx_entity_set_euler(s, p, lx_v3(0, -180, 0));   /* facing into the yard (-Z) */
     lx_entity_set_tag(s, p, "Player");
     LxCharacterController *cc = lx_add_character(s, p);
     cc->radius = 0.4f;
@@ -269,7 +269,7 @@ static bool fps_template(const char *assets, LxScene *s) {
         const float wp[] = {25, 8, 1.3f, 120, 0.9f, 1.4f, 1};
         behave(s, gun, "FPS Weapon", wp, 7);
         LxEntity barrel = prim(s, LX_PRIM_CYLINDER, "Barrel", lx_v3(0, 0.02f, 0.62f), lx_v3(0.5f, 0.35f, 0.5f), "Materials/Metal.lxmat", false);
-        lx_entity_set_euler(s, barrel, lx_v3(90, 0, 0));
+        lx_entity_set_euler(s, barrel, lx_v3(-90, 0, 0));
         lx_entity_set_parent(s, barrel, gun);
         LxEntity sight = prim(s, LX_PRIM_CUBE, "Sight", lx_v3(0, 0.62f, 0.1f), lx_v3(0.3f, 0.25f, 0.15f), "Materials/Metal.lxmat", false);
         lx_entity_set_parent(s, sight, gun);
@@ -310,7 +310,7 @@ static bool tps_template(const char *assets, LxScene *s) {
     storeroom(s);
     LxEntity p = lx_entity_create(s, "Player");
     lx_entity_set_position(s, p, lx_v3(0, 0, 14));
-    lx_entity_set_euler(s, p, lx_v3(0, 180, 0));   /* facing into the yard (-Z) */
+    lx_entity_set_euler(s, p, lx_v3(0, -180, 0));   /* facing into the yard (-Z) */
     lx_entity_set_tag(s, p, "Player");
     LxCharacterController *cc = lx_add_character(s, p);
     cc->radius = 0.4f;
@@ -349,7 +349,7 @@ static bool tps_template(const char *assets, LxScene *s) {
         char n[32];
         snprintf(n, sizeof n, "Coin %d", (int)i + 1);
         LxEntity c = pickup(s, n, 2, 50, "Materials/Gold.lxmat", lx_v3(coins[i][0], coins[i][1], coins[i][2]), LX_PRIM_CYLINDER, lx_v3(0.6f, 0.08f, 0.6f));
-        lx_entity_set_euler(s, c, lx_v3(90, 0, 0));
+        lx_entity_set_euler(s, c, lx_v3(-90, 0, 0));
     }
     pickup(s, "Health Pack 1", 0, 35, "Materials/Health.lxmat", lx_v3(-21.5f, 0.6f, 21.5f), LX_PRIM_CUBE, lx_v3(0.5f, 0.5f, 0.5f));
     pickup(s, "Health Pack 2", 0, 35, "Materials/Health.lxmat", lx_v3(18, 0.6f, -14), LX_PRIM_CUBE, lx_v3(0.5f, 0.5f, 0.5f));

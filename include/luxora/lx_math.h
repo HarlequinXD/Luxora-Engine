@@ -90,7 +90,13 @@ LX_INLINE LxVec3 lx_quat_rotate(LxQuat q, LxVec3 v) {
     return lx_add3(lx_add3(v, lx_scale3(t, q.w)), lx_cross3(u, t));
 }
 /* Euler in degrees, applied Y (yaw) then X (pitch) then Z (roll). */
-LX_INLINE LxQuat lx_quat_euler_deg(LxVec3 e) {
+/* Two conventions for degrees:
+ *  - lx_quat_euler_deg / lx_quat_to_euler_deg: what people see and type (the Inspector, State Graph actions,
+ *    scripts, saved scenes). Clockwise is positive: looking down an axis from its positive end towards the origin
+ *    (from above for Y), a positive angle turns things clockwise.
+ *  - the _ccw versions: the maths underneath (right-handed, counter-clockwise positive), for code that works out
+ *    angles itself (atan2, the editor camera). Each is the other with every angle negated. */
+LX_INLINE LxQuat lx_quat_euler_deg_ccw(LxVec3 e) {
     LxQuat qy = lx_quat_axis_angle(lx_v3(0, 1, 0), e.y * LX_DEG2RAD);
     LxQuat qx = lx_quat_axis_angle(lx_v3(1, 0, 0), e.x * LX_DEG2RAD);
     LxQuat qz = lx_quat_axis_angle(lx_v3(0, 0, 1), e.z * LX_DEG2RAD);
@@ -125,8 +131,8 @@ LX_INLINE LxQuat lx_quat_slerp(LxQuat a, LxQuat b, float t) {
     LxQuat r = {a.x * wa + b.x * wb, a.y * wa + b.y * wb, a.z * wa + b.z * wb, a.w * wa + b.w * wb};
     return lx_quat_norm(r);
 }
-/* Inverse of lx_quat_euler_deg (Y, then X, then Z). */
-LX_INLINE LxVec3 lx_quat_to_euler_deg(LxQuat q) {
+/* Inverse of lx_quat_euler_deg_ccw (Y, then X, then Z). */
+LX_INLINE LxVec3 lx_quat_to_euler_deg_ccw(LxQuat q) {
     float xx = q.x * q.x, yy = q.y * q.y, zz = q.z * q.z;
     float xy = q.x * q.y, xz = q.x * q.z, yz = q.y * q.z, wx = q.w * q.x, wy = q.w * q.y, wz = q.w * q.z;
     float r00 = 1 - 2 * (yy + zz), r02 = 2 * (xz + wy), r10 = 2 * (xy + wz), r11 = 1 - 2 * (xx + zz);
@@ -139,6 +145,9 @@ LX_INLINE LxVec3 lx_quat_to_euler_deg(LxQuat q) {
     else { e.y = atan2f(-r20, r00); e.z = 0; }
     return lx_scale3(e, LX_RAD2DEG);
 }
+/* the user's convention: clockwise positive (see lx_quat_euler_deg_ccw) */
+LX_INLINE LxQuat lx_quat_euler_deg(LxVec3 e) { return lx_quat_euler_deg_ccw(lx_v3(-e.x, -e.y, -e.z)); }
+LX_INLINE LxVec3 lx_quat_to_euler_deg(LxQuat q) { LxVec3 e = lx_quat_to_euler_deg_ccw(q); return lx_v3(-e.x, -e.y, -e.z); }
 /* Rotation whose local X, Y, Z axes are the given orthonormal vectors. */
 LX_INLINE LxQuat lx_quat_from_basis(LxVec3 x, LxVec3 y, LxVec3 z) {
     float tr = x.x + y.y + z.z;

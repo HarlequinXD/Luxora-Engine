@@ -11,6 +11,7 @@ static int g_fail, g_pass;
         else { g_fail++; printf("  FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } \
     } while (0)
 #define NEAR(a, b, eps) (fabsf((a) - (b)) <= (eps))
+#define VNEAR3(v, X, Y, Z, e) (NEAR((v).x, X, e) && NEAR((v).y, Y, e) && NEAR((v).z, Z, e))
 
 static const char *tmpdir(void) {
     const char *t = getenv("TMPDIR");
@@ -28,6 +29,31 @@ static void test_math(void) {
     CHECK(err < 1e-4f, "inverse error %g", err);
     LxVec3 r = lx_quat_rotate(lx_quat_axis_angle(lx_v3(0, 1, 0), LX_PI * 0.5f), lx_v3(1, 0, 0));
     CHECK(NEAR(r.z, -1.0f, 1e-5f), "rotate y 90: %g %g %g", r.x, r.y, r.z);
+    /* degrees as people see and type them: clockwise positive, looking down each axis from its positive end */
+    {
+        LxVec3 f = lx_quat_rotate(lx_quat_euler_deg(lx_v3(0, 90, 0)), lx_v3(0, 0, 1));
+        CHECK(VNEAR3(f, -1, 0, 0, 1e-5f), "+90 about Y turns clockwise seen from above: forward (+Z) to -X (%g %g %g)", f.x, f.y, f.z);
+        LxVec3 u = lx_quat_rotate(lx_quat_euler_deg(lx_v3(90, 0, 0)), lx_v3(0, 1, 0));
+        CHECK(VNEAR3(u, 0, 0, -1, 1e-5f), "+90 about X: clockwise seen from +X, up (+Y) to -Z (%g %g %g)", u.x, u.y, u.z);
+        LxVec3 x = lx_quat_rotate(lx_quat_euler_deg(lx_v3(0, 0, 90)), lx_v3(1, 0, 0));
+        CHECK(VNEAR3(x, 0, -1, 0, 1e-5f), "+90 about Z: clockwise seen from +Z, +X to -Y (%g %g %g)", x.x, x.y, x.z);
+        LxVec3 e = lx_quat_to_euler_deg(lx_quat_euler_deg(lx_v3(20, -35, 50)));
+        CHECK(VNEAR3(e, 20, -35, 50, 1e-3f), "degrees read back as written (%g %g %g)", e.x, e.y, e.z);
+        /* scenes saved before: the same turns, now shown clockwise positive */
+        const char *old_text = "# Luxora scene v1\n[scene]\nname = Old\naxes = +z\n[entity]\nname = Box\nrotation = 0 90 0\n";
+        LxScene *os = lx_scene_deserialize(old_text);
+        LxEntity b = lx_entity_find(os, "Box");
+        LxVec3 of = lx_quat_rotate(lx_entity_rotation(os, b), lx_v3(0, 0, 1));
+        CHECK(VNEAR3(of, 1, 0, 0, 1e-4f) && NEAR(lx_entity_euler(os, b).y, -90, 1e-3f), "an older scene's turn is kept, shown as -90 (%g)",
+              lx_entity_euler(os, b).y);
+        char *again = lx_scene_serialize(os);
+        LxScene *ns = lx_scene_deserialize(again);
+        lx_free(again);
+        LxVec3 nf = lx_quat_rotate(lx_entity_rotation(ns, lx_entity_find(ns, "Box")), lx_v3(0, 0, 1));
+        CHECK(VNEAR3(nf, 1, 0, 0, 1e-4f), "and saved again, it stays put");
+        lx_scene_destroy(ns);
+        lx_scene_destroy(os);
+    }
     LxMat4 vp = lx_mat4_mul(lx_mat4_perspective(1.0f, 1.0f, 0.1f, 100), lx_mat4_look_at(lx_v3(0, 0, 5), lx_v3(0, 0, 0), lx_v3(0, 1, 0)));
     LxFrustum f = lx_frustum_from_matrix(vp);
     CHECK(lx_frustum_test_sphere(&f, lx_v3(0, 0, 0), 0.5f), "origin visible");
@@ -247,7 +273,7 @@ static LxScene *ramp_scene(float deg, bool mesh, LxEntity *ch, LxVec3 start) {
     LxEntity r = lx_spawn_primitive(s, LX_PRIM_CUBE, "Ramp", lx_v3(0, 0, 0));
     float a = deg * LX_DEG2RAD, L = 20, T = 1;
     lx_entity_set_scale(s, r, lx_v3(10, T, L));
-    lx_entity_set_rotation(s, r, lx_quat_euler_deg(lx_v3(-deg, 0, 0)));
+    lx_entity_set_rotation(s, r, lx_quat_euler_deg_ccw(lx_v3(-deg, 0, 0)));
     LxVec3 up = lx_v3(0, sinf(a), cosf(a)), nrm = lx_v3(0, cosf(a), -sinf(a));
     lx_entity_set_position(s, r, lx_add3(lx_v3(0, 0, 2), lx_sub3(lx_scale3(up, L / 2), lx_scale3(nrm, T / 2))));
     if (mesh) { lx_remove_component(s, r, LX_COMP_COLLIDER); lx_add_collider(s, r, LX_COLLIDER_MESH); }
@@ -429,7 +455,7 @@ static void test_physics(void) {
     LxEntity sp = body(s, "Sphere", LX_COLLIDER_SPHERE, lx_v3(-2, 3, 0));
     LxEntity bx = body(s, "Box", LX_COLLIDER_BOX, lx_v3(2, 3, 0));
     LxEntity cap = body(s, "Capsule", LX_COLLIDER_CAPSULE, lx_v3(5, 3, 0));
-    lx_entity_set_euler(s, cap, lx_v3(0, 0, 90));
+    lx_entity_set_euler(s, cap, lx_v3(0, 0, -90));
     run(s, 4);
     LxVec3 ps = lx_entity_world_position(s, sp), pb = lx_entity_world_position(s, bx), pc = lx_entity_world_position(s, cap);
     CHECK(NEAR(ps.y, 0.5f, 0.03f), "sphere rests on the ground (y=%g)", ps.y);
@@ -555,7 +581,7 @@ static void test_physics(void) {
     s = lx_scene_create("Mesh");
     LxEntity plane = lx_spawn_primitive(s, LX_PRIM_PLANE, "Plane", lx_v3(0, 0, 0));
     lx_get_collider(s, plane)->shape = LX_COLLIDER_MESH;
-    lx_entity_set_euler(s, plane, lx_v3(0, 0, -20));
+    lx_entity_set_euler(s, plane, lx_v3(0, 0, 20));
     LxEntity roll = body(s, "Roller", LX_COLLIDER_SPHERE, lx_v3(0, 2, 0));
     run(s, 1.5f);
     LxVec3 rp = lx_entity_world_position(s, roll);
@@ -711,7 +737,7 @@ static void test_gi(void) {
     lx_entity_set_scale(s, wall, lx_v3(6, 4, 0.5f));
     lx_strcpy(lx_get_mesh(s, wall)->material, LX_REF_MAX, "builtin:red");
     LxEntity sun = lx_entity_create(s, "Sun");
-    lx_entity_set_euler(s, sun, lx_v3(60, 180, 0));
+    lx_entity_set_euler(s, sun, lx_v3(-60, -180, 0));
     lx_add_light(s, sun, LX_LIGHT_DIRECTIONAL)->intensity = 3.0f;
     s->env.ambient_intensity = 0.0f; /* only the sun: every bit of GI must come from bounces */
     LxGraphicsSettings g = lx_graphics_defaults(1);
@@ -810,7 +836,7 @@ static void test_gi_no_dark_sweep(void) {
         lx_entity_set_scale(s, b, lx_v3(2, 2, 2));
     }
     LxEntity sun = lx_entity_create(s, "Sun");
-    lx_entity_set_euler(s, sun, lx_v3(50, 30, 0));
+    lx_entity_set_euler(s, sun, lx_v3(-50, -30, 0));
     lx_add_light(s, sun, LX_LIGHT_DIRECTIONAL)->intensity = 3;
     s->env.ambient_intensity = 0.3f;
     LxGraphicsSettings g = lx_graphics_defaults(1);
@@ -862,7 +888,7 @@ static void test_gi_terrain_ground(void) {
     lx_terrain_end_stroke(s, te);
     lx_terrain_update(s, lx_v3(0, 0, 0), true);
     LxEntity sun = lx_entity_create(s, "Sun");
-    lx_entity_set_euler(s, sun, lx_v3(45, 30, 0));
+    lx_entity_set_euler(s, sun, lx_v3(-45, -30, 0));
     lx_add_light(s, sun, LX_LIGHT_DIRECTIONAL)->intensity = 3;
     s->env.ambient_intensity = 0.5f;
     LxGraphicsSettings g = lx_graphics_defaults(1);
@@ -972,7 +998,7 @@ static void test_gi_moving(void) {
     LxEntity floor = lx_spawn_primitive(s, LX_PRIM_CUBE, "Floor", lx_v3(0, -0.5f, 0));
     lx_entity_set_scale(s, floor, lx_v3(20, 1, 20));
     LxEntity sun = lx_entity_create(s, "Sun");
-    lx_entity_set_euler(s, sun, lx_v3(50, 30, 0));
+    lx_entity_set_euler(s, sun, lx_v3(-50, -30, 0));
     lx_add_light(s, sun, LX_LIGHT_DIRECTIONAL)->intensity = 3;
     s->env.ambient_intensity = 0.5f;
     LxGraphicsSettings g = lx_graphics_defaults(1);
@@ -1851,7 +1877,7 @@ static void test_lightmapper(void) {
     L->color = lx_v3(1, 1, 1);
     L->mode = LX_LIGHT_BAKED;
     L->shadow_radius = 0;
-    lx_entity_set_euler(s, sun, lx_v3(90, 180, 0));   /* pointing straight down */
+    lx_entity_set_euler(s, sun, lx_v3(-90, -180, 0));   /* pointing straight down */
     s->env.ambient_intensity = 0;
     LxVec3 up = lx_v3(0, 1, 0);
 
@@ -1900,12 +1926,12 @@ static void test_lightmapper(void) {
     lx_lightmap_bake_free(b);
 
     /* tilted 60 degrees: cos 60 = half */
-    lx_entity_set_euler(s, sun, lx_v3(30, 180, 0));
+    lx_entity_set_euler(s, sun, lx_v3(-30, -180, 0));
     b = lm_bake_cpu(s);
     open = lm_probe(b, s, floor, lx_v3(6, 0, 6), 2.0f, up, NULL);
     CHECK(fabsf(open.y - 1.5f) < 0.05f, "a sun 30 degrees above the horizon gives half (%.3f)", open.y);
     lx_lightmap_bake_free(b);
-    lx_entity_set_euler(s, sun, lx_v3(90, 180, 0));
+    lx_entity_set_euler(s, sun, lx_v3(-90, -180, 0));
 
     /* Mixed and Realtime suns put no direct light in the lightmap */
     L = lx_get_light(s, sun);
@@ -2021,7 +2047,7 @@ static void test_bake_volumes(void) {
     L->color = lx_v3(1, 1, 1);
     L->mode = LX_LIGHT_BAKED;
     L->shadow_radius = 0;
-    lx_entity_set_euler(s, sun, lx_v3(90, 180, 0));
+    lx_entity_set_euler(s, sun, lx_v3(-90, -180, 0));
     LxEntity ve = lx_entity_create(s, "Volume");
     LxBakeVolume *bv = lx_add_bake_volume(s, ve);
     bv->size = lx_v3(16, 3, 16);
@@ -2102,7 +2128,7 @@ static void test_gi_headroom(void) {
     LxEntity ground = lx_spawn_primitive(s, LX_PRIM_PLANE, "Ground", lx_v3(0, 0, 0));
     lx_entity_set_scale(s, ground, lx_v3(4, 1, 4));
     LxEntity sun = lx_entity_create(s, "Sun");
-    lx_entity_set_euler(s, sun, lx_v3(50, 210, 0));
+    lx_entity_set_euler(s, sun, lx_v3(-50, -210, 0));
     lx_add_light(s, sun, LX_LIGHT_DIRECTIONAL)->intensity = 3;
     LxEntity hero = lx_spawn_primitive(s, LX_PRIM_CAPSULE, "Hero", lx_v3(0, 0.9f, 0));
     lx_entity_set_scale(s, hero, lx_v3(0.5f, 0.9f, 0.5f));
@@ -3340,7 +3366,7 @@ static void test_animator_runtime(void) {
     LxEntity tip = lx_entity_find(s, "Tip");
     lx_animator_play_state(s, root, 0, "Idle", 0);
     for (int i = 0; i < 10; i++) lx_animator_update(s, root, 0.05f);
-    CHECK(tip && NEAR(lx_entity_euler(s, tip).z, 45, 2.0f), "the graph poses the skeleton (%g deg)", tip ? lx_entity_euler(s, tip).z : 0);
+    CHECK(tip && NEAR(lx_entity_euler(s, tip).z, -45, 2.0f), "the graph poses the skeleton (%g deg)", tip ? lx_entity_euler(s, tip).z : 0);
 
     /* parameters a graph does not have are quietly ignored rather than fatal */
     lx_animator_set_float(s, root, "Nothing", 5);
@@ -3483,12 +3509,12 @@ static void test_root_motion(void) {
 
     /* ---- the twist it is measured with ---- */
     {
-        LxQuat yaw = lx_quat_euler_deg(lx_v3(0, 40, 0));
+        LxQuat yaw = lx_quat_euler_deg_ccw(lx_v3(0, 40, 0));
         CHECK(NEAR(lx_quat_twist_y_angle(yaw) * LX_RAD2DEG, 40, 0.01f), "a turn about Y reads back (%g deg)",
               lx_quat_twist_y_angle(yaw) * LX_RAD2DEG);
-        LxQuat lean = lx_quat_euler_deg(lx_v3(25, 0, 0));
+        LxQuat lean = lx_quat_euler_deg_ccw(lx_v3(25, 0, 0));
         CHECK(fabsf(lx_quat_twist_y_angle(lean)) < 0.01f, "leaning forward is not turning (%g)", lx_quat_twist_y_angle(lean));
-        LxQuat both = lx_quat_mul(lx_quat_euler_deg(lx_v3(0, 40, 0)), lx_quat_euler_deg(lx_v3(25, 0, 0)));
+        LxQuat both = lx_quat_mul(lx_quat_euler_deg_ccw(lx_v3(0, 40, 0)), lx_quat_euler_deg_ccw(lx_v3(25, 0, 0)));
         CHECK(NEAR(lx_quat_twist_y_angle(both) * LX_RAD2DEG, 40, 0.5f), "a lean on top of a turn still reads the turn (%g deg)",
               lx_quat_twist_y_angle(both) * LX_RAD2DEG);
         /* taking the twist out leaves the lean behind */
@@ -3721,7 +3747,7 @@ static void test_models(void) {
     }
     CHECK(def && found, "skinned vertex follows the animated bone (45 degrees)");
     LxVec3 e = lx_entity_euler(s, tip);
-    CHECK(NEAR(e.z, 45, 0.1f), "bone rotated %g", e.z);
+    CHECK(NEAR(e.z, -45, 0.1f)   /* the clip turns it 45 counter-clockwise: -45 shown */, "bone rotated %g", e.z);
     /* a clip by its name alone plays the character's own clip ("Bend", "bend", "#Bend") */
     const char *bare[] = {"Bend", "bend", "#Bend"};
     for (int k = 0; k < 3; k++) {
@@ -3729,7 +3755,7 @@ static void test_models(void) {
         lx_animator_play(s, root, bare[k], 0);
         lx_animator_set_time(s, root, 0.5f);
         lx_animator_update(s, root, 0);
-        CHECK(lx_animator_playing(s, root) && NEAR(lx_entity_euler(s, tip).z, 45, 0.1f), "clip named \"%s\" plays", bare[k]);
+        CHECK(lx_animator_playing(s, root) && NEAR(lx_entity_euler(s, tip).z, -45, 0.1f), "clip named \"%s\" plays", bare[k]);
     }
     /* the Play Animation action finds the Animator on the model inside a player object */
     {

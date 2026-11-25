@@ -2,6 +2,10 @@
 
 This document explains how each system works today, its real limits, and what comes next. It is deliberately candid about where the current implementation stands against the long-term goals.
 
+## Rotation degrees
+
+Every angle people see or type - the Inspector, the rotate gizmo's readout, State Graph actions, scripts (`lx_entity_set_euler`, `lx_quat_euler_deg`), saved scenes and prefabs - is **clockwise positive**: looking down an axis from its positive end towards the origin (from above for Y), a positive angle turns clockwise, so +90 about Y turns a character to its right. The maths underneath is right-handed; `lx_quat_euler_deg_ccw` / `lx_quat_to_euler_deg_ccw` are that convention (each is the other with every angle negated), for code that works out angles itself. Scenes and prefabs write `turns = cw` in their header; files without it are read with their angles negated, so every object keeps the turn it had.
+
 ## Frame flow
 
 ```

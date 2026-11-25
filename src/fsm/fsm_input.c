@@ -373,7 +373,7 @@ static void in_look(LxFsmCtx *c) {
             st->started = true;
             st->pitch = lx_clampf(look_wrap_deg(lx_entity_euler(c->scene, head).x), down, up);
         }
-        float pitch = d.y * vsens * (lx_fsm_bool(c, 5) ? 1.0f : -1.0f);
+        float pitch = -d.y * vsens * (lx_fsm_bool(c, 5) ? 1.0f : -1.0f);   /* degrees are clockwise positive */
         if (pitch == pitch) st->pitch = lx_clampf(st->pitch + pitch, down, up);
         lx_entity_set_euler(c->scene, head, lx_v3(st->pitch, 0, 0));
         lx_fsm_set_float(c, 11, st->pitch);

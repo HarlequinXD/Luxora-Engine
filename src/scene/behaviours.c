@@ -69,8 +69,8 @@ static void fly_update(LxBehaviourCtx *c, float dt) {
     if (lx_input_last_device() == LX_DEVICE_KEYBOARD_MOUSE && !mouse_look) lx = ly = 0;
     /* mouse deltas are per frame; stick values are rates */
     float rate = lx_input_last_device() == LX_DEVICE_GAMEPAD ? dt * 60.0f : 1.0f;
-    s->yaw -= lx * look * rate;
-    s->pitch = lx_clampf(s->pitch + ly * look * rate, -89.0f, 89.0f);
+    s->yaw += lx * look * rate;   /* degrees turn clockwise positive: the mouse to the right turns right */
+    s->pitch = lx_clampf(s->pitch - ly * look * rate, -89.0f, 89.0f);
     lx_entity_set_euler(c->scene, c->self, lx_v3(s->pitch, s->yaw, 0));
     LxQuat q = lx_entity_rotation(c->scene, c->self);
     LxVec3 fwd = lx_quat_rotate(q, lx_v3(0, 0, 1)), right = lx_quat_rotate(q, lx_v3(-1, 0, 0));
@@ -90,7 +90,7 @@ static void orbit_update(LxBehaviourCtx *c, float dt) {
     float r = c->params[0];
     LxVec3 p = lx_v3(sinf(s->angle) * r, c->params[2], cosf(s->angle) * r);
     lx_entity_set_position(c->scene, c->self, p);
-    lx_entity_set_euler(c->scene, c->self, lx_v3(-atan2f(p.y, r) * LX_RAD2DEG, s->angle * LX_RAD2DEG, 0));
+    lx_entity_set_euler(c->scene, c->self, lx_v3(atan2f(p.y, r) * LX_RAD2DEG, -s->angle * LX_RAD2DEG, 0));   /* clockwise positive */
 }
 
 static void flicker_update(LxBehaviourCtx *c, float dt) {

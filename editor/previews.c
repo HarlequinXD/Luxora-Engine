@@ -104,7 +104,7 @@ static LxScene *build(const Preview *p) {
     l->color = lx_v3(1, 0.97f, 0.92f);
     l->cast_shadows = false;
     l->contribute_gi = false;
-    lx_entity_set_euler(s, sun, lx_v3(-40, 35, 0));
+    lx_entity_set_euler(s, sun, lx_v3(40, -35, 0));
     if (!strcmp(p->kind, "material")) {
         LxEntity e = lx_spawn_primitive(s, LX_PRIM_SPHERE, "Ball", lx_v3(0, 0, 0));
         LxMeshRenderer *mr = lx_get_mesh(s, e);

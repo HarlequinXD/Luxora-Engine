@@ -24,7 +24,7 @@ static bool showing_game(void) { return ED.game_view && ED.scene && lx_scene_mai
 bool ed_viewport_showing_game(void) { return showing_game(); }
 
 /* ---------------- math helpers ---------------- */
-static LxQuat cam_rot(void) { return lx_quat_euler_deg(lx_v3(ED.cam_pitch, ED.cam_yaw, 0)); }
+static LxQuat cam_rot(void) { return lx_quat_euler_deg_ccw(lx_v3(ED.cam_pitch, ED.cam_yaw, 0)); }
 
 static void editor_view(LxRenderView *rv, int w, int h) {
     memset(rv, 0, sizeof *rv);
@@ -94,7 +94,7 @@ static LxVec3 quat_to_euler_deg(LxQuat q) {
     float y = atan2f(M(0, 2), M(2, 2));
     float z = atan2f(M(1, 0), M(1, 1));
 #undef M
-    return lx_v3(x * LX_RAD2DEG, y * LX_RAD2DEG, z * LX_RAD2DEG);
+    return lx_v3(-x * LX_RAD2DEG, -y * LX_RAD2DEG, -z * LX_RAD2DEG);   /* shown clockwise positive, like everywhere else */
 }
 
 static float snapf(float v, float step) { return step > 0 ? roundf(v / step) * step : v; }

@@ -160,7 +160,7 @@ char *lx_scene_serialize(const LxScene *s) {
     LxStrBuf sb = {0};
     const LxEnvironment *e = &s->env;
     clean_value(((LxScene *)s)->name);
-    lx_sb_printf(&sb, "# Luxora scene v1\n[scene]\nname = %s\naxes = +z\n", s->name);
+    lx_sb_printf(&sb, "# Luxora scene v1\n[scene]\nname = %s\naxes = +z\nturns = cw\n", s->name);
     lx_sb_printf(&sb, "sky_zenith = %g %g %g\nsky_horizon = %g %g %g\nground = %g %g %g\n", e->sky_zenith.x, e->sky_zenith.y,
                  e->sky_zenith.z, e->sky_horizon.x, e->sky_horizon.y, e->sky_horizon.z, e->ground_color.x, e->ground_color.y,
                  e->ground_color.z);
@@ -202,7 +202,7 @@ char *lx_entity_serialize(const LxScene *s, LxEntity root) {
     const LxEntityData *d = lx_entity_data(s, root);
     if (!d) return NULL;
     LxStrBuf sb = {0};
-    lx_sb_printf(&sb, "# Luxora prefab v1\n[prefab]\nname = %s\naxes = +z\n", d->name);
+    lx_sb_printf(&sb, "# Luxora prefab v1\n[prefab]\nname = %s\naxes = +z\nturns = cw\n", d->name);
     int next_id = 1;
     write_entity(&sb, s, root, 0, &next_id, true);
     return sb.data;
@@ -215,6 +215,7 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
     char k[96], v[1024];
     int r;
     bool in_scene = false, in_header = false, old_axes = false;   /* old files: cameras and lights faced -Z */
+    bool old_turns = false;   /* old files wrote rotations counter-clockwise positive: the same turn is the negated angles */
     LxEntity cur_e = 0;
     LxEntity *made = NULL;
     int made_n = 0, made_cap = 0;
@@ -224,7 +225,7 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
         if (r == 2) {
             in_scene = !strcmp(k, "scene");
             in_header = in_scene || !strcmp(k, "prefab");
-            if (in_header) old_axes = true;   /* until the header says "axes = +z" */
+            if (in_header) old_axes = old_turns = true;   /* until the header says "axes = +z" / "turns = cw" */
             if (!strcmp(k, "entity")) {
                 cur_e = lx_entity_create(s, "Entity");
                 LX_VEC_PUSH(made, made_n, made_cap, cur_e);
@@ -234,6 +235,7 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
             continue;
         }
         if (in_header && !strcmp(k, "axes")) { old_axes = strcmp(v, "+z") != 0; continue; }
+        if (in_header && !strcmp(k, "turns")) { old_turns = strcmp(v, "cw") != 0; continue; }
         if (in_scene) {
             LxEnvironment *e = &s->env;
             if (!strcmp(k, "name")) lx_strcpy(s->name, sizeof s->name, v);
@@ -327,7 +329,10 @@ static LxEntity deserialize_into(LxScene *s, const char *text, LxEntity attach) 
         else if (!strcmp(k, "prefab")) lx_strcpy(d->prefab, sizeof d->prefab, v);
         else if (!strcmp(k, "active")) d->active = lx_parse_bool(v);
         else if (!strcmp(k, "position")) d->position = lx_parse_vec3(v);
-        else if (!strcmp(k, "rotation")) lx_entity_set_euler(s, cur_e, lx_parse_vec3(v));
+        else if (!strcmp(k, "rotation")) {
+            LxVec3 r = lx_parse_vec3(v);
+            lx_entity_set_euler(s, cur_e, old_turns ? lx_v3(-r.x, -r.y, -r.z) : r);
+        }
         else if (!strcmp(k, "scale")) d->scale = lx_parse_vec3(v);
         else if (!strncmp(k, "camera.", 7)) {
             LxCamera *c = lx_add_camera(s, cur_e);

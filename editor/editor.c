@@ -613,7 +613,7 @@ void ed_select_asset(const char *abs_path) {
 
 LxVec3 ed_spawn_point(void) {
     /* in front of the editor camera, on the ground if looking down */
-    LxQuat q = lx_quat_euler_deg(lx_v3(ED.cam_pitch, ED.cam_yaw, 0));
+    LxQuat q = lx_quat_euler_deg_ccw(lx_v3(ED.cam_pitch, ED.cam_yaw, 0));
     LxVec3 f = lx_quat_rotate(q, lx_v3(0, 0, -1));
     LxVec3 p = lx_madd3(ED.cam_pos, f, 8.0f);
     if (f.y < -0.1f) {
@@ -662,9 +662,9 @@ LxEntity ed_create(const char *what) {
         e = lx_entity_create(s, what);
         lx_entity_set_position(s, e, lx_v3(at.x, 1.5f, at.z));
         if (!strcmp(what, "Camera")) lx_add_camera(s, e);
-        else if (!strcmp(what, "Directional Light")) { lx_add_light(s, e, LX_LIGHT_DIRECTIONAL); lx_entity_set_euler(s, e, lx_v3(50, 150, 0)); lx_entity_set_position(s, e, lx_v3(at.x, 6, at.z)); }
+        else if (!strcmp(what, "Directional Light")) { lx_add_light(s, e, LX_LIGHT_DIRECTIONAL); lx_entity_set_euler(s, e, lx_v3(-50, -150, 0)); lx_entity_set_position(s, e, lx_v3(at.x, 6, at.z)); }
         else if (!strcmp(what, "Point Light")) { lx_add_light(s, e, LX_LIGHT_POINT); lx_entity_set_position(s, e, lx_v3(at.x, 2.5f, at.z)); }
-        else if (!strcmp(what, "Spot Light")) { lx_add_light(s, e, LX_LIGHT_SPOT); lx_entity_set_position(s, e, lx_v3(at.x, 4, at.z)); lx_entity_set_euler(s, e, lx_v3(90, 0, 0)); }
+        else if (!strcmp(what, "Spot Light")) { lx_add_light(s, e, LX_LIGHT_SPOT); lx_entity_set_position(s, e, lx_v3(at.x, 4, at.z)); lx_entity_set_euler(s, e, lx_v3(-90, 0, 0)); }
         else if (!strcmp(what, "Audio Source")) lx_add_audio_source(s, e, "");
         else if (!strcmp(what, "Reflection Probe")) { lx_add_reflection_probe(s, e); lx_entity_set_position(s, e, lx_v3(at.x, 2.0f, at.z)); }
         else if (!strcmp(what, "Baked Lighting Volume")) { lx_add_bake_volume(s, e); ed_bake_volume_fit(e); }
@@ -709,7 +709,7 @@ void ed_focus_selected(void) {
         c = lx_aabb_center(b);
         radius = lx_maxf(0.5f, lx_len3(lx_aabb_extent(b)));
     }
-    LxQuat q = lx_quat_euler_deg(lx_v3(ED.cam_pitch, ED.cam_yaw, 0));
+    LxQuat q = lx_quat_euler_deg_ccw(lx_v3(ED.cam_pitch, ED.cam_yaw, 0));
     LxVec3 f = lx_quat_rotate(q, lx_v3(0, 0, -1));
     ED.cam_pos = lx_madd3(c, f, -radius * 2.8f);
 }

@@ -78,7 +78,7 @@ static LxScene *fz_scene(LxEntity *owner_out) {
     LxEntity cam = lx_entity_create(s, "Cam");
     lx_add_camera(s, cam)->priority = 5;
     lx_entity_set_position(s, cam, lx_v3(0, 3, 8));
-    lx_entity_set_euler(s, cam, lx_v3(0, 180, 0));   /* looking back at the origin (-Z) */
+    lx_entity_set_euler(s, cam, lx_v3(0, -180, 0));   /* looking back at the origin (-Z) */
     *owner_out = o;
     return s;
 }
@@ -679,7 +679,7 @@ static void test_fsm_semantics(void) {
     sem_begin(ONE("[action]\ntype = Quaternion From Euler\np0 = 0 90 0\np1 = $q\n"
                   "[action]\ntype = Quaternion Rotate Vector\np0 = $q\np1 = 0 0 1\np2 = $v\n"));
     sem_run(2, DT);
-    CHECK(VEQ(svv("v"), 1, 0, 0, 1e-4f), "a 90 degree yaw turns forward into right");
+    CHECK(VEQ(svv("v"), -1, 0, 0, 1e-4f), "a 90 degree yaw (clockwise from above) turns forward (+Z) to the right (-X)");
     sem_end();
 
     sem_begin(ONE("[action]\ntype = Color From RGBA\np0 = 255\np1 = 128\np2 = 0\np3 = 255\np4 = true\np5 = $c\n"
@@ -1041,7 +1041,7 @@ static void test_fsm_action_library(void) {
     sem_begin(ONE("[action]\ntype = Set Rotation\np0 = name:Trigger\np2 = 0 90 0\np6 = World\n"
                   "[action]\ntype = Get Direction Vectors\np0 = name:Trigger\np1 = $v\n"));
     sem_run(2, DT);
-    CHECK(NEAR(svv("v").x, 1, 1e-3f), "a 90 degree yaw points forward along +X (%g %g %g)", svv("v").x, svv("v").y, svv("v").z);
+    CHECK(NEAR(svv("v").x, -1, 1e-3f), "a 90 degree yaw turns forward to the right, along -X (%g %g %g)", svv("v").x, svv("v").y, svv("v").z);
     sem_end();
 
     sem_begin(ONE("[action]\ntype = Set Position\np0 = name:Trigger\np1 = 0 0 0\np5 = World\n"
