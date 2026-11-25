@@ -80,6 +80,9 @@ typedef struct FrameData {
     GpuBuffer gi_staging;                /* GI levels on their way to the textures */
     size_t gi_staging_size;
     VkDescriptorSet scene_set;
+    GpuBuffer card_buf[3];               /* reflection cards: objects + grid header, grid cells, each cell's objects */
+    GpuBuffer card_staging;              /* card tiles on their way to the atlas */
+    VkDescriptorSet card_set;
 } FrameData;
 
 #define MAT_TEXTURES 6
@@ -189,6 +192,13 @@ static struct {
     int probe_res, probe_mips;
     GpuImage probe_depth, dummy_cube;
     VkDescriptorSet probe_set, probe_dummy_set;
+    /* reflection cards (src/gfx/cards.c): the atlas, and an empty set for views that have none */
+    VkDescriptorSetLayout cards_layout;
+    GpuImage card_albedo, card_depth;
+    GpuBuffer card_none[3];
+    VkDescriptorSet card_none_set;
+    uint64_t cards_frame;
+    bool cards_live;   /* this frame's card set holds the scene's objects */
     DrawList probe_list;
     uint64_t frame_serial, probe_frame;
     int probe_rr;
@@ -1507,9 +1517,166 @@ static void gc_create(int res) {
     R.gi_up_sh[0] = R.gi_up_sh[1] = R.gi_up_vis[0] = R.gi_up_vis[1] = R.gi_up_sdf[0] = R.gi_up_sdf[1] = 0;
 }
 
+/* ------------------------------------------------------------------ reflection cards
+ * The atlas (every carded object's six sides, src/gfx/cards.c) and, per frame, the objects around the camera in a
+ * coarse grid for the reflection trace (ssr_trace.frag) to walk. */
+#define CARD_CELL 4.0f
+#define CARD_GX 48
+#define CARD_GY 16
+#define CARD_GZ 48
+#define CARD_MAX_INST 4096
+#define CARD_MAX_IDX 65536
+#define CARD_REACH 100.0f
+#define CARD_UPLOAD_TILES 96
+typedef struct CardInst { float rows[12]; float info[4]; LxAabb wb; } CardInst;
+static CardInst *g_card_inst;
+static int g_card_n, g_card_cap;
+
+static void write_storage(VkDescriptorSet set, uint32_t binding, VkBuffer buf) {
+    VkDescriptorBufferInfo bi = {buf, 0, VK_WHOLE_SIZE};
+    VkWriteDescriptorSet w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = set;
+    w.dstBinding = binding;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w.pBufferInfo = &bi;
+    vkUpdateDescriptorSets(R.device, 1, &w, 0, NULL);
+}
+static const VkDeviceSize CARD_BYTES[3] = {32 + 64 * (VkDeviceSize)CARD_MAX_INST, 8 * (VkDeviceSize)CARD_GX * CARD_GY * CARD_GZ, 4 * (VkDeviceSize)CARD_MAX_IDX};
+static void cards_write_set(VkDescriptorSet set, GpuBuffer *bufs) {
+    for (uint32_t k = 0; k < 3; k++) write_storage(set, k, bufs[k].buf);
+    write_image(set, 3, R.card_albedo.view, R.point_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    write_image(set, 4, R.card_depth.view, R.point_clamp, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+}
+static void cards_create(void) {
+    ImageDesc a = {LX_CARD_ATLAS, LX_CARD_ATLAS, 1, 1, 1, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                   VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_2D, false, 0};
+    image_create(&R.card_albedo, &a);
+    a.fmt = VK_FORMAT_R8_UNORM;
+    image_create(&R.card_depth, &a);
+    VkCommandBuffer cmd = one_shot_begin();
+    clear_image(cmd, &R.card_albedo, 0.0f);
+    clear_image(cmd, &R.card_depth, 1.0f);   /* 1: nothing there */
+    one_shot_end(cmd);
+    /* the empty set: a header that says no objects (previews, cards off) */
+    for (int k = 0; k < 3; k++) {
+        buffer_create(&R.card_none[k], 64, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
+        memset(R.card_none[k].mapped, 0, 64);
+    }
+    R.card_none_set = alloc_set(R.cards_layout);
+    cards_write_set(R.card_none_set, R.card_none);
+    for (int f = 0; f < FRAMES; f++) {
+        FrameData *fr = &R.frames[f];
+        for (int k = 0; k < 3; k++) buffer_create(&fr->card_buf[k], CARD_BYTES[k], VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
+        buffer_create(&fr->card_staging, (VkDeviceSize)CARD_UPLOAD_TILES * LX_CARD_RES * LX_CARD_RES * 5, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true);
+        fr->card_set = alloc_set(R.cards_layout);
+        cards_write_set(fr->card_set, fr->card_buf);
+    }
+}
+/* an object near the camera with its cards drawn: into this frame's list */
+static void cards_add(const LxEntityData *d, LxMesh *mesh, int tile) {
+    if (g_card_n >= CARD_MAX_INST) return;
+    LxVec3 mn, ext;
+    lx_cards_box(mesh, &mn, &ext);
+    LxMat4 inv = lx_mat4_inverse(d->world);
+    if (g_card_n == g_card_cap) { g_card_cap = g_card_cap ? g_card_cap * 2 : 256; g_card_inst = lx_realloc(g_card_inst, sizeof(CardInst) * (size_t)g_card_cap); }
+    CardInst *ci = &g_card_inst[g_card_n++];
+    float lo[3] = {mn.x, mn.y, mn.z}, e[3] = {ext.x, ext.y, ext.z};
+    for (int a = 0; a < 3; a++) {   /* world -> 0..1 across the box, one row per axis */
+        for (int c = 0; c < 4; c++) ci->rows[a * 4 + c] = inv.m[c * 4 + a] / e[a];
+        ci->rows[a * 4 + 3] -= lo[a] / e[a];
+    }
+    ci->info[0] = (float)tile; ci->info[1] = ci->info[2] = ci->info[3] = 0;
+    LxAabb box = {mn, lx_add3(mn, ext)};
+    ci->wb = lx_aabb_transform(box, d->world);
+}
+/* this frame's objects into the grid around the eye, and newly drawn cards into the atlas */
+static void cards_finish(VkCommandBuffer cmd, FrameData *fr, LxVec3 eye) {
+    lx_cards_capture_pending(4);
+    int tiles[CARD_UPLOAD_TILES];
+    int nt = lx_cards_take_dirty(tiles, CARD_UPLOAD_TILES);
+    if (nt > 0) {
+        const size_t A = (size_t)LX_CARD_RES * LX_CARD_RES * 4, D = (size_t)LX_CARD_RES * LX_CARD_RES;
+        uint8_t *st = fr->card_staging.mapped;
+        VkBufferImageCopy ra[CARD_UPLOAD_TILES], rd[CARD_UPLOAD_TILES];
+        memset(ra, 0, sizeof ra);
+        memset(rd, 0, sizeof rd);
+        for (int i = 0; i < nt; i++) {
+            size_t ao = (size_t)i * A, dof = (size_t)nt * A + (size_t)i * D;
+            lx_cards_tile_pixels(tiles[i], st + ao, st + dof);
+            int tx = (tiles[i] % (LX_CARD_ATLAS / LX_CARD_RES)) * LX_CARD_RES, ty = (tiles[i] / (LX_CARD_ATLAS / LX_CARD_RES)) * LX_CARD_RES;
+            VkBufferImageCopy *r[2] = {&ra[i], &rd[i]};
+            for (int k = 0; k < 2; k++) {
+                r[k]->bufferOffset = k ? dof : ao;
+                r[k]->imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                r[k]->imageSubresource.layerCount = 1;
+                r[k]->imageOffset.x = tx; r[k]->imageOffset.y = ty;
+                r[k]->imageExtent.width = r[k]->imageExtent.height = LX_CARD_RES; r[k]->imageExtent.depth = 1;
+            }
+        }
+        GpuImage *im[2] = {&R.card_albedo, &R.card_depth};
+        for (int k = 0; k < 2; k++) {
+            image_barrier(cmd, im[k]->img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, 0, 1, 1);
+            vkCmdCopyBufferToImage(cmd, fr->card_staging.buf, im[k]->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, (uint32_t)nt, k ? rd : ra);
+            image_barrier(cmd, im[k]->img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, 0, 1, 1);
+        }
+    }
+    /* the grid: CARD_GX x CARD_GY x CARD_GZ cells of CARD_CELL metres, centred on the eye (snapped to whole cells) */
+    float org[3] = {floorf(eye.x / CARD_CELL) * CARD_CELL - CARD_GX / 2 * CARD_CELL, floorf(eye.y / CARD_CELL) * CARD_CELL - CARD_GY / 2 * CARD_CELL,
+                    floorf(eye.z / CARD_CELL) * CARD_CELL - CARD_GZ / 2 * CARD_CELL};
+    const int res[3] = {CARD_GX, CARD_GY, CARD_GZ};
+    float *hdr = fr->card_buf[0].mapped;
+    hdr[0] = org[0]; hdr[1] = org[1]; hdr[2] = org[2]; hdr[3] = CARD_CELL;
+    int32_t *ires = (int32_t *)(hdr + 4);
+    ires[0] = CARD_GX; ires[1] = CARD_GY; ires[2] = CARD_GZ; ires[3] = g_card_n;
+    float *inst = hdr + 8;
+    uint32_t *cells = fr->card_buf[1].mapped, *idx = fr->card_buf[2].mapped;
+    memset(cells, 0, (size_t)CARD_BYTES[1]);
+    int (*range)[6] = g_card_n ? lx_alloc(sizeof(int[6]) * (size_t)g_card_n) : NULL;
+    for (int i = 0; i < g_card_n; i++) {
+        memcpy(inst + (size_t)i * 16, g_card_inst[i].rows, 64);
+        const float *lo = &g_card_inst[i].wb.min.x, *hi = &g_card_inst[i].wb.max.x;
+        for (int a = 0; a < 3; a++) {
+            range[i][a] = (int)floorf((lo[a] - org[a]) / CARD_CELL);
+            range[i][a + 3] = (int)floorf((hi[a] - org[a]) / CARD_CELL);
+            if (range[i][a] < 0) range[i][a] = 0;
+            if (range[i][a + 3] >= res[a]) range[i][a + 3] = res[a] - 1;
+        }
+        for (int z = range[i][2]; z <= range[i][5]; z++)
+            for (int y = range[i][1]; y <= range[i][4]; y++)
+                for (int x = range[i][0]; x <= range[i][3]; x++) cells[((y * CARD_GZ + z) * CARD_GX + x) * 2 + 1]++;
+    }
+    uint32_t total = 0;
+    for (int c = 0; c < CARD_GX * CARD_GY * CARD_GZ; c++) {
+        uint32_t n = cells[c * 2 + 1];
+        if (total + n > CARD_MAX_IDX) n = total < CARD_MAX_IDX ? CARD_MAX_IDX - total : 0;   /* full: the rest of the cells go without */
+        cells[c * 2] = total;
+        cells[c * 2 + 1] = n;   /* its room in the index list */
+        total += n;
+    }
+    /* fill each cell's room (fill[] counts what's in it so far) */
+    static uint32_t *fill;
+    static size_t fill_cap;
+    size_t ncell = (size_t)CARD_GX * CARD_GY * CARD_GZ;
+    if (fill_cap < ncell) { fill_cap = ncell; fill = lx_realloc(fill, fill_cap * 4); }
+    memset(fill, 0, ncell * 4);
+    for (int i = 0; i < g_card_n; i++)
+        for (int z = range[i][2]; z <= range[i][5]; z++)
+            for (int y = range[i][1]; y <= range[i][4]; y++)
+                for (int x = range[i][0]; x <= range[i][3]; x++) {
+                    size_t c = (size_t)(y * CARD_GZ + z) * CARD_GX + (size_t)x;
+                    if (fill[c] < cells[c * 2 + 1]) idx[cells[c * 2] + fill[c]++] = (uint32_t)i;
+                }
+    for (size_t c = 0; c < ncell; c++) cells[c * 2 + 1] = fill[c];
+    lx_free(range);
+    g_card_n = 0;
+}
+
 static void create_static_resources(void) {
     VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 16}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8192},
-                                    {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 64}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 24}};
+                                    {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 96}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 24}};
     VkDescriptorPoolCreateInfo pi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     pi.maxSets = 4096;
@@ -1546,6 +1713,11 @@ static void create_static_resources(void) {
     VkDescriptorSetLayoutBinding rb[5];
     for (uint32_t i = 0; i < 5; i++) rb[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
     R.ssr_layout = set_layout(rb, 5);
+    VkDescriptorSetLayoutBinding kb[5];
+    for (uint32_t i = 0; i < 5; i++)
+        kb[i] = (VkDescriptorSetLayoutBinding){i, i < 3 ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                               VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+    R.cards_layout = set_layout(kb, 5);
 
     /* small formats for the SSR inputs: 10-bit normals, 8-bit reflection weight + roughness */
     R.gnormal_format = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
@@ -1563,8 +1735,8 @@ static void create_static_resources(void) {
 
     VkDescriptorSetLayout pbr_sets[3] = {R.scene_layout, R.material_layout, R.probe_layout};
     R.pbr_layout = pipe_layout(pbr_sets, 3, 96, VK_SHADER_STAGE_FRAGMENT_BIT);
-    VkDescriptorSetLayout ssr_sets[3] = {R.scene_layout, R.ssr_layout, R.probe_layout};
-    R.ssr_pipe_layout = pipe_layout(ssr_sets, 3, 32, VK_SHADER_STAGE_FRAGMENT_BIT);
+    VkDescriptorSetLayout ssr_sets[4] = {R.scene_layout, R.ssr_layout, R.probe_layout, R.cards_layout};
+    R.ssr_pipe_layout = pipe_layout(ssr_sets, 4, 32, VK_SHADER_STAGE_FRAGMENT_BIT);
     R.filter_layout = pipe_layout(&R.tex_layout, 1, 16, VK_SHADER_STAGE_FRAGMENT_BIT);
     R.shadow_layout = pipe_layout(NULL, 0, 64, VK_SHADER_STAGE_VERTEX_BIT);
     R.scene_only_layout = pipe_layout(&R.scene_layout, 1, 0, 0);
@@ -1741,6 +1913,7 @@ static void create_static_resources(void) {
     R.probe_set = alloc_set(R.probe_layout);
     R.probe_dummy_set = alloc_set(R.probe_layout);
     write_probe_set(R.probe_dummy_set, true);
+    cards_create();
     probes_create(R.settings.reflection_resolution > 0 ? R.settings.reflection_resolution : 128);
 }
 
@@ -1797,6 +1970,8 @@ void lx_renderer_shutdown(void) {
         FrameData *fr = &R.frames[f];
         buffer_destroy(&fr->ubo); buffer_destroy(&fr->inst); buffer_destroy(&fr->ui_vb); buffer_destroy(&fr->ui_ib);
         buffer_destroy(&fr->gi_staging);
+        for (int k = 0; k < 3; k++) buffer_destroy(&fr->card_buf[k]);
+        buffer_destroy(&fr->card_staging);
         vkDestroyFence(R.device, fr->fence, NULL);
         vkDestroySemaphore(R.device, fr->acquired, NULL);
     }
@@ -1817,6 +1992,10 @@ void lx_renderer_shutdown(void) {
     lx_free(R.terrain_sets);
     probes_destroy();
     image_destroy(&R.dummy_cube);
+    image_destroy(&R.card_albedo);
+    image_destroy(&R.card_depth);
+    for (int k = 0; k < 3; k++) buffer_destroy(&R.card_none[k]);
+    lx_cards_reset();
     VkPipeline pipes[] = {R.pbr, R.shadow, R.sky, R.grid, R.outline, R.tonemap_ldr, R.tonemap_swap, R.ui, R.precip,
                           R.pbr_mrt, R.sky_mrt, R.pbr_probe, R.probe_filter, R.ssr_trace, R.ssr_composite,
                           R.ao, R.ao_apply, R.bloom_down, R.bloom_up, R.godrays, R.pbr_blend[0], R.pbr_blend[1], R.shadow_cut};
@@ -1828,7 +2007,7 @@ void lx_renderer_shutdown(void) {
     VkPipelineLayout layouts[] = {R.pbr_layout, R.shadow_layout, R.scene_only_layout, R.outline_layout, R.tonemap_layout, R.ui_layout,
                                   R.ssr_pipe_layout, R.filter_layout, R.post_layout, R.shadow_cut_layout};
     for (size_t i = 0; i < sizeof layouts / sizeof layouts[0]; i++) vkDestroyPipelineLayout(R.device, layouts[i], NULL);
-    VkDescriptorSetLayout set_layouts[] = {R.scene_layout, R.material_layout, R.tex_layout, R.probe_layout, R.ssr_layout, R.post_set_layout};
+    VkDescriptorSetLayout set_layouts[] = {R.scene_layout, R.material_layout, R.tex_layout, R.probe_layout, R.ssr_layout, R.post_set_layout, R.cards_layout};
     for (size_t i = 0; i < sizeof set_layouts / sizeof set_layouts[0]; i++) vkDestroyDescriptorSetLayout(R.device, set_layouts[i], NULL);
     vkDestroyDescriptorPool(R.device, R.desc_pool, NULL);
     VkSampler samplers[] = {R.linear_repeat, R.linear_clamp, R.shadow_sampler, R.point_clamp, R.cube_sampler};
@@ -1944,6 +2123,7 @@ static void mesh_garbage_collect(bool all) {
 }
 
 void lx_renderer_mesh_release(LxMesh *m) {
+    if (m) lx_cards_forget_mesh(m);
     if (!m || !m->gpu || !R.device) return;
     MeshGpu *g = m->gpu;
     m->gpu = NULL;
@@ -3387,6 +3567,13 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
     for (int k = 0; k < local_n; k++) dl_reset(&R.local_lists[k]);
     float proj_scale = view->proj.m[5] * 0.5f; /* screen-height fraction per unit at distance 1 */
     LxVec4 white = lx_v4(1, 1, 1, 1);
+    /* reflection cards: the first view of a frame gathers the objects around its camera (every view reads them) */
+    bool cards_gather = !R.preview && gs->reflection_cards && gs->ssr_enabled && R.cards_frame != R.frame_serial;
+    if (cards_gather) {
+        R.cards_frame = R.frame_serial;
+        lx_cards_begin_frame((uint32_t)R.frame_serial);
+    }
+    if (!R.preview && R.cards_frame != R.frame_serial) R.cards_live = false;   /* cards off this frame */
     for (int i = 1; i < s->count; i++) {
         LxEntityData *d = &s->entities[i];
         if (!d->alive || !d->active) continue;
@@ -3401,6 +3588,11 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
             LxAabb wb = lx_aabb_transform(mesh->bounds, d->world);
             LxVec3 c = lx_aabb_center(wb);
             float radius = lx_len3(lx_aabb_extent(wb));
+            if (cards_gather && d->generated != LX_GEN_GRASS && d->generated != LX_GEN_TERRAIN_CHUNK &&
+                lx_len3(lx_sub3(c, view->eye)) - radius < CARD_REACH) {
+                int tile = lx_cards_lookup(mesh, mat);
+                if (tile >= 0) cards_add(d, mesh, tile);
+            }
             if (lx_frustum_test_aabb(&frustum, wb)) {
                 float dist = lx_maxf(lx_len3(lx_sub3(c, view->eye)), 1e-3f);
                 float lmb[4];
@@ -3456,6 +3648,7 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
             }
         }
     }
+    if (cards_gather) { cards_finish(cmd, fr, view->eye); R.cards_live = true; }
     bool ok = dl_upload(&R.main_list, fr);
     if (R.trans_list.nb) {
         ok = dl_upload(&R.trans_list, fr) && ok;
@@ -3689,8 +3882,8 @@ void lx_render_scene(LxScene *s, const LxRenderView *view, LxRenderTarget *targe
             vkCmdSetViewport(cmd, 0, 1, &svp);
             vkCmdSetScissor(cmd, 0, 1, &ssc);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.ssr_trace);
-            VkDescriptorSet tsets[3] = {fr->scene_set, rt->ssr_trace_set, R.probe_set};
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.ssr_pipe_layout, 0, 3, tsets, 1, &ubo_off);
+            VkDescriptorSet tsets[4] = {fr->scene_set, rt->ssr_trace_set, R.probe_set, R.preview || !R.cards_live ? R.card_none_set : fr->card_set};
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, R.ssr_pipe_layout, 0, 4, tsets, 1, &ubo_off);
             vkCmdPushConstants(cmd, R.ssr_pipe_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, ssr_pc);
             vkCmdDraw(cmd, 3, 1, 0, 0);
             vkCmdEndRendering(cmd);

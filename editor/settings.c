@@ -160,8 +160,11 @@ static void build_graphics(UiNode *b) {
     row_num(s, "SSR Max Distance", &g->ssr_max_distance, 0.5f, 1, 500);
     row_num(s, "SSR Thickness", &g->ssr_thickness, 0.01f, 0.01f, 5);
     row_slider(s, "SSR Max Roughness", &g->ssr_max_roughness, 0.05f, 1);
+    row_bool(s, "Reflection Cards", &g->reflection_cards);
     note(s, UI_ICON_INFO, "Probes reflect the whole surroundings (an automatic one follows the camera; place Reflection Probe "
-                          "objects for rooms). Screen-space reflections add exact detail for what is on screen.");
+                          "objects for rooms). Screen-space reflections add exact detail for what is on screen. Reflection cards "
+                          "fill in objects the screen can't see (behind the camera, hidden or off the edge) from small "
+                          "snapshots of each object's six sides.");
     s = ed_section(b, UI_ICON_LAYERS, "Ambient Occlusion", &g_dummy_open, NULL);
     row_bool(s, "Enabled", &g->ao_enabled);
     row_num(s, "Radius (m)", &g->ao_radius, 0.05f, 0.05f, 10);

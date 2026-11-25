@@ -1314,6 +1314,7 @@ typedef struct LxGraphicsSettings {
     float ssr_max_distance;     /* world units */
     float ssr_thickness;        /* how thick on-screen surfaces are assumed to be */
     float ssr_max_roughness;    /* rougher surfaces use probes only */
+    bool reflection_cards;      /* where a screen-space ray misses (off screen, hidden), objects' six-side snapshots stand in */
     /* screen-space ambient occlusion: small creases and contact darkening (only the bounce and sky light darkens) */
     bool ao_enabled;
     float ao_radius;            /* world units */

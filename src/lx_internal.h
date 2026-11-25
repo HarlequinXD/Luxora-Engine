@@ -362,6 +362,21 @@ typedef struct LxTerrainGpuLayers {
     uint32_t version;          /* changes when the layers change */
 } LxTerrainGpuLayers;
 const LxTerrainGpuLayers *lx_terrain_gpu_layers(const LxMaterial *m);   /* NULL: not a terrain material */
+
+/* ---- reflection cards (src/gfx/cards.c): each object seen from its six sides, for traced reflections ---- */
+#define LX_CARD_RES 32       /* texels a card is across */
+#define LX_CARD_ATLAS 2048   /* the atlas all cards live in */
+bool lx_cards_wanted(const LxMesh *m, const LxMaterial *mat);   /* solid / cut-out, not terrain */
+void lx_cards_box(const LxMesh *m, LxVec3 *mn, LxVec3 *ext);  /* the box they look at (never flat) */
+void lx_cards_capture(const LxMesh *m, const LxMaterial *mat, uint8_t *albedo, uint8_t *depth);   /* 6 cards: RGBA8 + R8 */
+void lx_cards_begin_frame(uint32_t frame);
+int lx_cards_lookup(const LxMesh *m, const LxMaterial *mat);  /* first of six tiles, -1 = not ready (queued) */
+int lx_cards_capture_pending(int budget);
+void lx_cards_forget_mesh(const LxMesh *m);
+int lx_cards_take_dirty(int *tiles, int cap);                 /* tiles to upload */
+void lx_cards_tile_pixels(int tile, uint8_t *albedo, uint8_t *depth);
+void lx_cards_reset(void);
+float lx_cards_trace_box(const uint8_t *albedo, const uint8_t *depth, LxVec3 o, LxVec3 d, int steps, uint8_t rgb_out[3], int *face_out);
 void lx_terrain_shutdown(void);
 float lx_terrain_test_seams(LxScene *s, LxEntity e);   /* tests: worst mismatch along shared chunk edges */
 

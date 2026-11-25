@@ -1864,6 +1864,7 @@ static void lighting_frame(UiNode *body) {
     st->grow = 1;
     st->on_change = graphics_changed;
     float_row(sec, "SSR Max Distance", &g->ssr_max_distance, 0.5f, 1, 500)->on_change = graphics_changed;
+    bool_row(sec, "Reflection Cards", &g->reflection_cards)->on_change = graphics_changed;
     float_row(sec, "SSR Thickness", &g->ssr_thickness, 0.01f, 0.01f, 5)->on_change = graphics_changed;
     slider_row(sec, "SSR Max Roughness", &g->ssr_max_roughness, 0.05f, 1)->on_change = graphics_changed;
     UiNode *rr = ui_button(ui, sec, "Re-capture Probes", probe_recapture);

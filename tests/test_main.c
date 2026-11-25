@@ -141,6 +141,7 @@ static void test_reflection_probe(void) {
     lx_scene_destroy(c);
     LxGraphicsSettings g = lx_graphics_defaults(0), u = lx_graphics_defaults(3);
     CHECK(g.reflections_enabled && !g.ssr_enabled && u.ssr_enabled && u.reflection_resolution > g.reflection_resolution, "reflection presets");
+    CHECK(!g.reflection_cards && u.reflection_cards, "reflection cards: off on Low, on above");
 }
 
 static void test_icon_images(void) {
@@ -672,6 +673,71 @@ static void test_png_formats(void) {
         for (int x = 0; x < 9; x++) good &= p[(y * 9 + x) * 4] == (uint8_t)(x * 20 + y);
     CHECK(good, "interlaced pixels in the right places");
     lx_free(p);
+}
+
+/* reflection cards: each object drawn from its six sides; a ray through the object's box finds its surface where
+ * the opposite cards agree, and takes the colour of the card that faces it */
+static void test_reflection_cards(void) {
+    printf("reflection cards\n");
+    const int R = LX_CARD_RES, N = R * R;
+    uint8_t *a = lx_alloc((size_t)N * 6 * 4), *d = lx_alloc((size_t)N * 6);
+    LxMesh *cube = lx_asset_mesh("builtin:cube");
+    LxMaterial red = lx_material_default();
+    red.albedo = lx_v4(0.8f, 0.05f, 0.05f, 1);
+    lx_cards_capture(cube, &red, a, d);
+    int covered = 0;
+    for (int i = 0; i < N * 6; i++) covered += a[i * 4 + 3] == 255;
+    CHECK(covered == N * 6, "a cube fills all six cards (%d of %d texels)", covered, N * 6);
+    CHECK(d[N * 2 + N / 2] < 8, "seen from above, its top is right at the box's face (%d)", d[N * 2 + N / 2]);
+    CHECK(a[0] > 200 && a[1] < 80 && a[2] < 80, "in its colour (%d %d %d, sRGB)", a[0], a[1], a[2]);
+    uint8_t rgb[3];
+    int face = -1;
+    /* box space: 0..1. A ray from beside the box (+X), heading -X */
+    float t = lx_cards_trace_box(a, d, lx_v3(1.5f, 0.5f, 0.5f), lx_v3(-1, 0, 0), 16, rgb, &face);
+    CHECK(t > 0.45f && t < 0.56f && face == 0, "a ray from +X meets the +X face half a box away (t %.3f, face %d)", t, face);
+    t = lx_cards_trace_box(a, d, lx_v3(0.5f, 1.5f, 0.5f), lx_v3(0, -1, 0), 16, rgb, &face);
+    CHECK(t > 0.45f && t < 0.56f && face == 2 && rgb[0] > 200, "from above it meets the top, red (t %.3f, face %d)", t, face);
+    t = lx_cards_trace_box(a, d, lx_v3(1.5f, 1.5f, 0.5f), lx_v3(0, 0, 1), 16, rgb, &face);
+    CHECK(t < 0, "a ray that passes the box misses");
+    t = lx_cards_trace_box(a, d, lx_v3(0.5f, 0.5f, 0.5f), lx_v3(1, 0, 0), 16, rgb, &face);
+    CHECK(t < 0, "a ray starting inside the object it leaves doesn't hit it (the surface it reflects from)");
+
+    /* a sphere: the corners of its box are empty, its middle isn't */
+    LxMesh *sph = lx_asset_mesh("builtin:sphere");
+    lx_cards_capture(sph, &red, a, d);
+    float tc = lx_cards_trace_box(a, d, lx_v3(1.2f, 1.2f, 1.2f), lx_norm3(lx_v3(-1, -1, -1)), 32, NULL, NULL);
+    float tm = lx_cards_trace_box(a, d, lx_v3(1.5f, 0.5f, 0.5f), lx_v3(-1, 0, 0), 32, NULL, NULL);
+    CHECK(tc > 0.6f, "towards a sphere's corner the ray goes past the empty corner (t %.3f)", tc);
+    CHECK(tm > 0.45f && tm < 0.58f, "and through its middle meets the surface (t %.3f)", tm);
+    float tg = lx_cards_trace_box(a, d, lx_v3(1.5f, 0.97f, 0.97f), lx_v3(-1, 0, 0), 32, NULL, NULL);
+    CHECK(tg < 0, "past its edge, a ray misses it");
+
+    /* a flat plane still has a thickness to hit, from above */
+    LxMesh *plane = lx_asset_mesh("builtin:plane");
+    lx_cards_capture(plane, &red, a, d);
+    t = lx_cards_trace_box(a, d, lx_v3(0.5f, 3.0f, 0.5f), lx_v3(0, -1, 0), 64, NULL, &face);
+    CHECK(t > 1.9f && t < 3.1f, "a plane is hit from above (t %.3f)", t);
+    CHECK(lx_cards_wanted(cube, &red), "solid objects get cards");
+    LxMaterial glass = red;
+    glass.blend_mode = LX_BLEND_GLASS;
+    CHECK(!lx_cards_wanted(cube, &glass), "see-through ones don't");
+    lx_free(a);
+    lx_free(d);
+
+    /* the atlas: asked for, drawn a few a frame, then ready, with its tiles queued to upload */
+    lx_cards_reset();
+    lx_cards_begin_frame(1);
+    CHECK(lx_cards_lookup(cube, &red) < 0, "first asked: not drawn yet");
+    CHECK(lx_cards_capture_pending(4) == 1, "drawn the next frame");
+    int tile = lx_cards_lookup(cube, &red);
+    CHECK(tile >= 0 && tile % 6 == 0, "then ready, six tiles from %d", tile);
+    int dirty[16];
+    CHECK(lx_cards_take_dirty(dirty, 16) == 6, "its six tiles wait to be uploaded");
+    red.albedo.y = 0.5f;
+    CHECK(lx_cards_lookup(cube, &red) < 0 && lx_cards_capture_pending(4) == 1, "a changed material is drawn again");
+    lx_cards_forget_mesh(cube);
+    CHECK(lx_cards_lookup(cube, &red) < 0, "a mesh that goes away takes its cards with it");
+    lx_cards_reset();
 }
 
 static void test_bvh(void) {
@@ -4124,6 +4190,7 @@ int main(void) {
         CHECK(lx_image_alpha_kind(img, W, W) == 2, "in-between alpha: see-through");
         lx_free(img);
     }
+    RUN(test_reflection_cards);
     RUN(test_bvh);
     RUN(test_gi);
     RUN(test_gi_convergence);

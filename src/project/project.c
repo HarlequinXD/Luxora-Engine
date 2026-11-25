@@ -29,6 +29,7 @@ void lx_graphics_apply_preset(LxGraphicsSettings *g, int preset) {
     static const float lod_bias[] = {0.6f, 0.8f, 1.0f, 1.4f};
     static const int probe_res[] = {64, 128, 256, 256};
     static const bool ssr[] = {false, true, true, true};
+    static const bool cards[] = {false, true, true, true};
     static const int ssr_steps[] = {16, 24, 32, 48};
     static const bool ao[] = {false, true, true, true};
     static const bool godrays[] = {false, true, true, true};
@@ -43,6 +44,7 @@ void lx_graphics_apply_preset(LxGraphicsSettings *g, int preset) {
     g->lod_bias = lod_bias[preset];
     g->reflection_resolution = probe_res[preset];
     g->ssr_enabled = ssr[preset];
+    g->reflection_cards = cards[preset];
     g->ssr_steps = ssr_steps[preset];
     g->ao_enabled = ao[preset];
     g->godrays_enabled = godrays[preset];
@@ -132,9 +134,9 @@ bool lx_project_save(const LxProject *p) {
                  g->gi_responsiveness);
     lx_sb_printf(&sb, "lod = %d\nlod_bias = %g\nvsync = %d\ntarget_fps = %d\nexposure = %g\n", g->lod_enabled, g->lod_bias,
                  g->vsync, g->target_fps, g->exposure);
-    lx_sb_printf(&sb, "reflections = %d\nreflection_resolution = %d\nssr = %d\nssr_steps = %d\nssr_distance = %g\nssr_thickness = %g\nssr_roughness = %g\n",
+    lx_sb_printf(&sb, "reflections = %d\nreflection_resolution = %d\nssr = %d\nssr_steps = %d\nssr_distance = %g\nssr_thickness = %g\nssr_roughness = %g\nreflection_cards = %d\n",
                  g->reflections_enabled, g->reflection_resolution, g->ssr_enabled, g->ssr_steps, g->ssr_max_distance, g->ssr_thickness,
-                 g->ssr_max_roughness);
+                 g->ssr_max_roughness, g->reflection_cards);
     lx_sb_printf(&sb, "ao = %d\nao_radius = %g\nao_intensity = %g\nbloom = %d\nbloom_intensity = %g\ngodrays = %d\ngodrays_intensity = %g\n",
                  g->ao_enabled, g->ao_radius, g->ao_intensity, g->bloom_enabled, g->bloom_intensity, g->godrays_enabled, g->godrays_intensity);
     lx_sb_printf(&sb, "vignette = %g\nfilm_grain = %g\nchromatic_aberration = %g\ncontrast = %g\nsaturation = %g\ntemperature = %g\n",
@@ -216,6 +218,7 @@ bool lx_project_load(LxProject *p, const char *root) {
             else if (!strcmp(k, "ssr_distance")) g->ssr_max_distance = f;
             else if (!strcmp(k, "ssr_thickness")) g->ssr_thickness = f;
             else if (!strcmp(k, "ssr_roughness")) g->ssr_max_roughness = f;
+            else if (!strcmp(k, "reflection_cards")) g->reflection_cards = lx_parse_bool(v);
             else if (!strcmp(k, "ao")) g->ao_enabled = lx_parse_bool(v);
             else if (!strcmp(k, "ao_radius")) g->ao_radius = f;
             else if (!strcmp(k, "ao_intensity")) g->ao_intensity = f;
