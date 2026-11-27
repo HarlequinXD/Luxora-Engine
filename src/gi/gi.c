@@ -1072,6 +1072,37 @@ static bool vis_sees(const Level *L, int cx, int cy, int cz, LxVec3 g) {
     }
     return true;
 }
+/* the GI's L1 SH (red, green, blue; L0 y z x) at a point, as a surface facing n reads it: false outside every grid */
+bool lx_gi_sh_at(LxVec3 p, LxVec3 n, bool walls, float out[12]) {
+    for (int l = 0; l < NLEV; l++) {
+        const Level *L = &G.lv[l];
+        if (!L->on) continue;
+        LxVec3 q = lx_madd3(p, n, L->pcell * 0.25f);
+        LxVec3 g = lx_scale3(lx_sub3(q, L->origin), 1.0f / L->pcell);
+        if (g.x < 1 || g.y < 1 || g.z < 1 || g.x > L->pres[0] - 1 || g.y > L->pres[1] - 1 || g.z > L->pres[2] - 1) continue;
+        LxVec3 t = lx_v3(g.x - 0.5f, g.y - 0.5f, g.z - 0.5f);
+        int b[3] = {(int)floorf(t.x), (int)floorf(t.y), (int)floorf(t.z)};
+        float f[3] = {t.x - b[0], t.y - b[1], t.z - b[2]}, w[8], plain[8], sum = 0;
+        for (int k = 0; k < 8; k++) {
+            int x = b[0] + (k & 1), y = b[1] + ((k >> 1) & 1), z = b[2] + (k >> 2);
+            float wt = ((k & 1) ? f[0] : 1 - f[0]) * (((k >> 1) & 1) ? f[1] : 1 - f[1]) * ((k >> 2) ? f[2] : 1 - f[2]);
+            plain[k] = wt;
+            w[k] = (!walls || vis_sees(L, x, y, z, g)) ? wt : 0;
+            sum += w[k];
+        }
+        if (sum < 1e-6f) { memcpy(w, plain, sizeof w); sum = 1; }
+        float c[12] = {0};
+        for (int k = 0; k < 8; k++) {
+            if (w[k] <= 0) continue;
+            int i = pidx(L, b[0] + (k & 1), b[1] + ((k >> 1) & 1), b[2] + (k >> 2));
+            for (int j = 0; j < 12; j++) c[j] += L->sh[i * 12 + j] * w[k] / sum;
+        }
+        memcpy(out, c, sizeof c);
+        return true;
+    }
+    return false;
+}
+
 LxVec3 lx_gi_irradiance(LxVec3 p, LxVec3 n, bool walls) {
     for (int l = 0; l < NLEV; l++) {
         const Level *L = &G.lv[l];

@@ -685,7 +685,8 @@ void lx_gi_set_view_dir(LxVec3 fwd);   /* the camera's forward: levels slide tow
 const LxGiVolume *lx_gi_volume(void);
 int lx_gi_last_ray_count(void);
 int lx_gi_moving_triangles(void);   /* moving objects' triangles in GI this frame (tests) */
-LxVec3 lx_gi_irradiance(LxVec3 p, LxVec3 n, bool walls);   /* the shader's GI lookup on the CPU (tests) */
+LxVec3 lx_gi_irradiance(LxVec3 p, LxVec3 n, bool walls);
+bool lx_gi_sh_at(LxVec3 p, LxVec3 n, bool walls, float out[12]);   /* the shader's GI lookup on the CPU (tests) */
 float lx_gi_eval_l1(const float *c, LxVec3 n);   /* one channel's irradiance from L1 SH (never negative) */
 void lx_gi_set_walls(bool on);   /* tests: false = no walls between probes */
 float lx_gi_dfao(LxVec3 p, LxVec3 n);   /* the shader's contact occlusion on the CPU (tests) */

@@ -21,10 +21,11 @@ float lx_probe_weight(int i, vec3 p) {
 
 // Pre-filtered radiance reflected towards the viewer along r for a surface of this roughness.
 // local_weight reports how much came from placed probes (they already contain occlusion).
-vec3 lx_environment_reflection(vec3 p, vec3 r, float rough, out float local_weight) {
+// probe0_scale dims the automatic probe where its picture doesn't belong (lx_probe0_scale, gi_common.glsl).
+vec3 lx_environment_reflection(vec3 p, vec3 r, float rough, float probe0_scale, out float local_weight) {
     float lod = rough * max(u.refl_params.x - 1.0, 0.0);
     vec3 base = (u.refl_params.y > 0.5 && u.probe_pos[0].w > 0.0)
-              ? textureLod(u_probes[0], r, lod).rgb * u.probe_pos[0].w
+              ? textureLod(u_probes[0], r, lod).rgb * u.probe_pos[0].w * probe0_scale
               : lx_sky_glossy(r, rough);
     vec3 acc = vec3(0.0);
     float wsum = 0.0;

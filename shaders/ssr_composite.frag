@@ -5,6 +5,8 @@
 #pragma lx_common
 #pragma lx_include reflections.glsl
 #pragma lx_include ssr_common.glsl
+const float PI = 3.14159265;
+#pragma lx_include gi_common.glsl
 layout(set = 1, binding = 4) uniform sampler2D u_ssr;   // half-res trace result, premultiplied by confidence
 layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 o_color;
@@ -37,6 +39,14 @@ void main() {
     vec3 p = ssr_world_pos(uv, d);
     vec3 r = reflect(normalize(p - u.camera_pos.xyz), n);
     float local_w;
-    vec3 env = lx_environment_reflection(p, r, rough, local_w);
+    float cover = 0.0;   // as the lit surface worked out its GI (pbr_body), for the same probe dimming
+    GiSH here = GiSH(vec4(0.0), vec4(0.0), vec4(0.0));
+    if (u.gi_origin.w > 0.5) {
+        vec3 gg = (p - u.gi_origin.xyz) / u.gi_cell.xyz;
+        vec3 edge = min(gg, u.gi_res.xyz - gg);
+        cover = clamp(min(min(edge.x, edge.y), edge.z) - 0.5, 0.0, 1.0);
+        if (cover > 0.0) here = gi_gather(p, n);
+    }
+    vec3 env = lx_environment_reflection(p, r, rough, lx_probe0_scale(p, r, here, cover), local_w);
     o_color = vec4(sp.rgb * (s.rgb - env * s.a), 0.0);
 }

@@ -30,7 +30,7 @@ layout(set = 0, binding = 0, std140) uniform SceneUBO {
     vec4 probe_pos[LX_PROBE_SLOTS];  // xyz capture point, w intensity (0 = slot not in use)
     vec4 probe_min[LX_PROBE_SLOTS];  // xyz influence box min, w blend distance
     vec4 probe_max[LX_PROBE_SLOTS];  // xyz influence box max, w 1 = box projection
-    vec4 refl_params;     // x probe mip count, y 1 = probes on
+    vec4 refl_params;     // x probe mip count, y 1 = probes on, z 1 = probe0_gi holds the GI at the automatic probe
     LxLightData lights[LX_MAX_LIGHTS];
     vec4 light_shadow[LX_MAX_LIGHTS * 2];  // per light: (first atlas tile or -1, near, far, tan half-angle), (up xyz, tile resolution)
     vec4 gi_casc[2];      // camera GI grids, finest first: xyz first cell's corner, w cell size (0 = not in use)
@@ -52,6 +52,7 @@ layout(set = 0, binding = 0, std140) uniform SceneUBO {
     vec4 bolt;            // xyz towards the last lightning bolt, w seconds since it struck
     vec4 bolt_b;          // x its shape seed, y distance (m)
     mat4 precip_vp;       // looking straight down on the area around the eye: what keeps rain and snow off
+    vec4 probe0_gi[3];    // Live GI L1 SH (red, green, blue) where the automatic probe was captured
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2DArrayShadow u_shadow;

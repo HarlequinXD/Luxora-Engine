@@ -121,3 +121,18 @@ vec3 gi_eval(GiSH sh, vec3 n) {
     vec3 e = vec3(gi_eval_l1(sh.r, n), gi_eval_l1(sh.g, n), gi_eval_l1(sh.b, n)) * u.fog_color.w;
     return (any(isnan(e)) || any(isinf(e))) ? vec3(0.0) : e;   // a broken GI cell must not blacken the screen
 }
+
+/* The automatic reflection probe is one picture from one spot near the camera. Away from that spot it can show
+ * light that isn't there (a lamp it was captured beside, reflected in a dark field outside the window). Compare the
+ * GI arriving along the reflection here with what arrived at the capture spot: where less light comes from that
+ * direction here, the probe is dimmed to match (never brightened). Close to the spot the probe is trusted as is. */
+float lx_probe0_scale(vec3 p, vec3 r, GiSH here, float cover) {
+    if (u.refl_params.z < 0.5 || cover <= 0.0) return 1.0;
+    float far = smoothstep(1.5, 6.0, length(p - u.probe_pos[0].xyz)) * cover;
+    if (far <= 0.0) return 1.0;
+    const vec3 LUM = vec3(0.2126, 0.7152, 0.0722);
+    float la = dot(vec3(gi_eval_l1(here.r, r), gi_eval_l1(here.g, r), gi_eval_l1(here.b, r)), LUM);
+    float lb = dot(vec3(gi_eval_l1(u.probe0_gi[0], r), gi_eval_l1(u.probe0_gi[1], r), gi_eval_l1(u.probe0_gi[2], r)), LUM);
+    float ratio = clamp((la + 1e-4) / (lb + 1e-4), 0.0, 1.0);
+    return mix(1.0, ratio, far);
+}

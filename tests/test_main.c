@@ -817,6 +817,12 @@ static void test_gi(void) {
     LxVec3 e = lx_gi_irradiance(lx_v3(0, 1.5f, -1.45f), lx_v3(0, 0, -1), true);
     CHECK(e.x > 0, "irradiance present near wall (red %g)", e.x);
     CHECK(e.x > e.y * 1.3f && e.x > e.z * 1.3f, "colour bleeding towards the wall: r %g g %g b %g", e.x, e.y, e.z);
+    {   /* the SH the reflection probe's dimming reads is the same GI */
+        float sh[12];
+        bool got = lx_gi_sh_at(lx_v3(0, 1.5f, -1.45f), lx_v3(0, 0, -1), true, sh);
+        float red = lx_gi_eval_l1(sh, lx_v3(0, 0, -1));
+        CHECK(got && fabsf(red - e.x) < 1e-4f * (1.0f + e.x), "GI SH at a point matches its irradiance (%g vs %g)", red, e.x);
+    }
     printf("  %d rays/frame in %.1f ms\n", lx_gi_last_ray_count(), ms);
     lx_gi_shutdown();
     lx_scene_destroy(s);

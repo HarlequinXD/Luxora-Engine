@@ -108,6 +108,7 @@ typedef struct SceneUBO {
     float sky_params[4], sky_sun[4], sky_moon[4], sky_misc[4], sky_pole[4];
     float cloud_a[4], cloud_b[4], cloud_c[4], weather_a[4], weather_b[4], bolt[4], bolt_b[4];
     LxMat4 precip_vp;
+    float probe0_gi[3][4];   /* the Live GI's SH where the automatic probe was captured (red, green, blue) */
 } SceneUBO;
 _Static_assert(sizeof(SceneUBO) <= 4096, "SceneUBO must fit its 4 KB slot");
 
@@ -3133,6 +3134,16 @@ static void probes_fill_ubo(SceneUBO *u) {
     }
     u->refl[0] = (float)R.probe_mips;
     u->refl[1] = on ? 1.0f : 0.0f;
+    /* The automatic probe is one picture taken at one spot. Far from that spot (outside, past a lamp it was
+     * captured next to) its reflections would show light that isn't there. The shader compares the GI arriving
+     * from the reflection's direction here with what arrived at the capture spot, and dims the probe to match. */
+    u->refl[2] = 0.0f;
+    const ProbeSlot *p0 = &R.probes[0];
+    float sh[12];
+    if (on && p0->used && p0->valid && R.settings.gi_enabled && lx_gi_sh_at(p0->cap_pos, lx_v3(0, 1, 0), true, sh)) {
+        for (int c = 0; c < 3; c++) for (int k = 0; k < 4; k++) u->probe0_gi[c][k] = sh[c * 4 + k];
+        u->refl[2] = 1.0f;
+    }
 }
 
 /* Renders one cube face of a probe: the scene as seen from the capture point, 90 degree field of view.
