@@ -47,6 +47,6 @@ void main() {
         cover = clamp(min(min(edge.x, edge.y), edge.z) - 0.5, 0.0, 1.0);
         if (cover > 0.0) here = gi_gather(p, n);
     }
-    vec3 env = lx_environment_reflection(p, r, rough, lx_probe0_scale(p, r, here, cover), local_w);
+    vec3 env = lx_environment_reflection(p, r, rough, lx_probe0_use(p, r, here, cover), local_w);
     o_color = vec4(sp.rgb * (s.rgb - env * s.a), 0.0);
 }

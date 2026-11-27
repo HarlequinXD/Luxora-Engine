@@ -551,7 +551,7 @@ void main() {
     // specular ambient: probes (or the sky), pre-filtered by roughness
     vec3 r = reflect(-v, n);
     float local_w;
-    vec3 env = lx_environment_reflection(v_world, r, rough, lx_probe0_scale(v_world, r, gi_sh, gi_cover), local_w);
+    vec3 env = lx_environment_reflection(v_world, r, rough, lx_probe0_use(v_world, r, gi_sh, gi_cover), local_w);
     // specular occlusion: compare the GI arriving from the reflection direction with what
     // open sky would deliver from there, so only reflections that really look into geometry darken.
     // Placed probes captured the real surroundings, so they need it much less.

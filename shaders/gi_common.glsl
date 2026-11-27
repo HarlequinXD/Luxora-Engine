@@ -123,16 +123,22 @@ vec3 gi_eval(GiSH sh, vec3 n) {
 }
 
 /* The automatic reflection probe is one picture from one spot near the camera. Away from that spot it can show
- * light that isn't there (a lamp it was captured beside, reflected in a dark field outside the window). Compare the
- * GI arriving along the reflection here with what arrived at the capture spot: where less light comes from that
- * direction here, the probe is dimmed to match (never brightened). Close to the spot the probe is trusted as is. */
-float lx_probe0_scale(vec3 p, vec3 r, GiSH here, float cover) {
-    if (u.refl_params.z < 0.5 || cover <= 0.0) return 1.0;
-    float far = smoothstep(1.5, 6.0, length(p - u.probe_pos[0].xyz)) * cover;
-    if (far <= 0.0) return 1.0;
+ * light that isn't there (a lamp it was captured beside, reflected in a dark field outside the window).
+ * x: inside the Live GI, compare the GI arriving along the reflection here with what arrived at the capture spot;
+ *    where less light comes from that direction here, the probe is dimmed to match (never brightened).
+ * y: with distance from the capture spot the probe gives way to the sky: from 6 to 20 m where there's no GI to
+ *    compare with (GI off, or past its grids), from 10 to 30 m inside it (distant terrain never reflects the room
+ *    the camera is in).
+ * Close to the spot (1.5 m) the probe is trusted as it is. */
+vec2 lx_probe0_use(vec3 p, vec3 r, GiSH here, float cover) {
+    float d = length(p - u.probe_pos[0].xyz);
+    float keep = 1.0 - smoothstep(mix(6.0, 10.0, cover), mix(20.0, 30.0, cover), d);   // past 20-30 m a picture from here is never right
+    if (u.refl_params.z < 0.5 || cover <= 0.0) return vec2(1.0, keep);
+    float far = smoothstep(1.5, 6.0, d) * cover;
+    if (far <= 0.0) return vec2(1.0, keep);
     const vec3 LUM = vec3(0.2126, 0.7152, 0.0722);
     float la = dot(vec3(gi_eval_l1(here.r, r), gi_eval_l1(here.g, r), gi_eval_l1(here.b, r)), LUM);
     float lb = dot(vec3(gi_eval_l1(u.probe0_gi[0], r), gi_eval_l1(u.probe0_gi[1], r), gi_eval_l1(u.probe0_gi[2], r)), LUM);
     float ratio = clamp((la + 1e-4) / (lb + 1e-4), 0.0, 1.0);
-    return mix(1.0, ratio, far);
+    return vec2(mix(1.0, ratio, far), keep);
 }
