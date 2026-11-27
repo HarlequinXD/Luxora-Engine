@@ -1,4 +1,4 @@
-/* Settings windows: Project Settings (General, Graphics, Sound, Input, Platforms),
+/* Settings windows: Project Settings (General, Rendering, Sound, Input, Platforms),
  * Build Settings, About and Keyboard Shortcuts. */
 #include "editor.h"
 
@@ -134,14 +134,15 @@ static void probe_res_set(UiNode *n) {
 }
 static void build_graphics(UiNode *b) {
     LxGraphicsSettings *g = &ED.project.graphics;
-    UiNode *s = ed_section(b, UI_ICON_MONITOR, "Quality", &g_dummy_open, NULL);
+    UiNode *s = ed_section(b, UI_ICON_RENDER, "Quality", &g_dummy_open, NULL);
     UiNode *q = row_drop(s, "Preset", &g->quality_preset, QUALITY, 4);
     q->on_change = preset_changed;
     row_slider(s, "Render Scale", &g->render_scale, 0.25f, 2.0f);
+    note(s, UI_ICON_INFO, "The preset sets every section below at once; Render Scale is the resolution the 3D view is drawn at.");
+    s = ed_section(b, UI_ICON_MONITOR, "Display", &g_dummy_open, NULL);
     row_bool(s, "V-Sync", &g->vsync);
     row_int(s, "Frame Rate Limit (0 = off)", &g->target_fps, 0, 1000);
-    row_slider(s, "Exposure", &g->exposure, 0.1f, 4.0f);
-    s = ed_section(b, UI_ICON_SUN, "Live Global Illumination", &g_dummy_open, NULL);
+    s = ed_section(b, UI_ICON_BULB, "Global Illumination", &g_dummy_open, NULL);
     row_bool(s, "Enabled", &g->gi_enabled);
     row_int(s, "Rays per Frame", &g->gi_rays_per_frame, 1024, 1000000)->step = 1000;
     row_int(s, "Rays per Probe", &g->gi_rays_per_probe, 8, 256);
@@ -151,6 +152,16 @@ static void build_graphics(UiNode *b) {
     row_slider(s, "Responsiveness", &g->gi_responsiveness, 0.01f, 1);
     note(s, UI_ICON_INFO, "Fully real-time bounce light, sky light and glow: no baking. Rays are traced through distance fields on "
                           "all CPU cores, only where the light is changing, so a still scene costs nothing.");
+    s = ed_section(b, UI_ICON_LIGHT, "Shadows", &g_dummy_open, NULL);
+    row_int(s, "Resolution", &g->shadow_resolution, 256, 8192)->step = 64;
+    row_int(s, "Cascades", &g->shadow_cascades, 1, 4);
+    row_num(s, "Distance", &g->shadow_distance, 1, 5, 5000);
+    s = ed_section(b, UI_ICON_LAYERS, "Ambient Occlusion", &g_dummy_open, NULL);
+    row_bool(s, "Enabled", &g->ao_enabled);
+    row_num(s, "Radius (m)", &g->ao_radius, 0.05f, 0.05f, 10);
+    row_slider(s, "Strength", &g->ao_intensity, 0, 2);
+    note(s, UI_ICON_INFO, "Darkens creases, corners and where things touch the ground. It only takes away bounce and sky "
+                          "light, never direct sunlight, so lit surfaces stay bright.");
     s = ed_section(b, UI_ICON_PROBE, "Reflections", &g_dummy_open, NULL);
     row_bool(s, "Reflection Probes", &g->reflections_enabled);
     g_probe_res = g->reflection_resolution >= 512 ? 3 : g->reflection_resolution >= 256 ? 2 : g->reflection_resolution >= 128 ? 1 : 0;
@@ -165,30 +176,23 @@ static void build_graphics(UiNode *b) {
                           "objects for rooms). Screen-space reflections add exact detail for what is on screen. Reflection cards "
                           "fill in objects the screen can't see (behind the camera, hidden or off the edge) from small "
                           "snapshots of each object's six sides.");
-    s = ed_section(b, UI_ICON_LAYERS, "Ambient Occlusion", &g_dummy_open, NULL);
-    row_bool(s, "Enabled", &g->ao_enabled);
-    row_num(s, "Radius (m)", &g->ao_radius, 0.05f, 0.05f, 10);
-    row_slider(s, "Strength", &g->ao_intensity, 0, 2);
-    note(s, UI_ICON_INFO, "Darkens creases, corners and where things touch the ground. It only takes away bounce and sky "
-                          "light, never direct sunlight, so lit surfaces stay bright.");
-    s = ed_section(b, UI_ICON_CAMERA, "Camera & Lens", &g_dummy_open, NULL);
+    s = ed_section(b, UI_ICON_SUN, "Bloom & Sun Shafts", &g_dummy_open, NULL);
     row_bool(s, "Bloom", &g->bloom_enabled);
     row_slider(s, "Bloom Strength", &g->bloom_intensity, 0, 1);
     row_bool(s, "Sun Shafts", &g->godrays_enabled);
     row_slider(s, "Sun Shaft Strength", &g->godrays_intensity, 0, 2);
+    note(s, UI_ICON_INFO, "Bloom: bright light glows over its surroundings, like a real lens. Sun shafts: light streaks "
+                          "through gaps in trees, clouds and windows when the sun is in view.");
+    s = ed_section(b, UI_ICON_CAMERA, "Lens Effects", &g_dummy_open, NULL);
     row_slider(s, "Vignette", &g->vignette, 0, 1);
     row_slider(s, "Colour Fringes", &g->chromatic_aberration, 0, 1);
     row_slider(s, "Film Grain", &g->film_grain, 0, 1);
+    s = ed_section(b, UI_ICON_MATERIAL, "Colour Grading", &g_dummy_open, NULL);
+    row_slider(s, "Exposure", &g->exposure, 0.1f, 4.0f);
     row_slider(s, "Contrast", &g->contrast, 0.5f, 2);
     row_slider(s, "Saturation", &g->saturation, 0, 2);
     row_slider(s, "Temperature (cool - warm)", &g->temperature, -1, 1);
-    note(s, UI_ICON_INFO, "Bloom: bright light glows over its surroundings, like a real lens. Sun shafts: light streaks "
-                          "through gaps in trees, clouds and windows when the sun is in view.");
-    s = ed_section(b, UI_ICON_LAYERS, "Shadows", &g_dummy_open, NULL);
-    row_int(s, "Resolution", &g->shadow_resolution, 256, 8192)->step = 64;
-    row_int(s, "Cascades", &g->shadow_cascades, 1, 4);
-    row_num(s, "Distance", &g->shadow_distance, 1, 5, 5000);
-    s = ed_section(b, UI_ICON_MESH, "Geometry", &g_dummy_open, NULL);
+    s = ed_section(b, UI_ICON_MESH, "Level of Detail", &g_dummy_open, NULL);
     row_bool(s, "Automatic LODs", &g->lod_enabled);
     row_slider(s, "LOD Bias", &g->lod_bias, 0.2f, 3);
 }
@@ -854,8 +858,8 @@ void ed_project_settings(int category) {
     nav->w = 190;
     nav->gap = 2;
     /* page ids stay stable (menus open pages by id); Physics is id 5 but listed after Sound */
-    static const char *names[] = {"General", "Graphics", "Sound", "Physics", "Input Manager", "Platforms"};
-    static const UiIcon icons[] = {UI_ICON_APP, UI_ICON_MONITOR, UI_ICON_SPEAKER, UI_ICON_RIGIDBODY, UI_ICON_GAMEPAD, UI_ICON_PHONE};
+    static const char *names[] = {"General", "Rendering", "Sound", "Physics", "Input Manager", "Platforms"};
+    static const UiIcon icons[] = {UI_ICON_APP, UI_ICON_RENDER, UI_ICON_SPEAKER, UI_ICON_RIGIDBODY, UI_ICON_GAMEPAD, UI_ICON_PHONE};
     static const int ids[] = {0, 1, 2, 5, 3, 4};
     for (int i = 0; i < SETTINGS_PAGES; i++) {
         UiNode *b = ui_button(ui, nav, names[i], nav_pick);

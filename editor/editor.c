@@ -918,7 +918,7 @@ static void window_menu(UiNode *a) {
     it = item(p, "Animator", NULL, UI_ICON_ANIMATOR, m_show_tab); it->user = ED.view_tabs; it->tag = 2;
     ui_menu_separator(ED.ui, p);
     it = item(p, "Inspector", NULL, UI_ICON_INSPECTOR, m_show_tab); it->user = ED.inspector_tabs; it->tag = 0;
-    it = item(p, "Lighting", NULL, UI_ICON_SUN, m_show_tab); it->user = ED.inspector_tabs; it->tag = 1;
+    it = item(p, "Rendering", NULL, UI_ICON_RENDER, m_show_tab); it->user = ED.inspector_tabs; it->tag = 1;
     it = item(p, "Statistics", NULL, UI_ICON_STATS, m_show_tab); it->user = ED.inspector_tabs; it->tag = 2;
     ui_menu_separator(ED.ui, p);
     it = item(p, "Content Browser", NULL, UI_ICON_FOLDER, m_show_tab); it->user = ED.bottom_tabs; it->tag = 0;
@@ -927,7 +927,7 @@ static void window_menu(UiNode *a) {
     it = item(p, "Scene Manager", NULL, UI_ICON_SCENE, m_show_tab); it->user = ED.bottom_tabs; it->tag = 3;
     ui_menu_separator(ED.ui, p);
     it = item(p, "Input Manager...", NULL, UI_ICON_GAMEPAD, m_project_settings); it->tag = 3;
-    it = item(p, "Graphics Settings...", NULL, UI_ICON_MONITOR, m_project_settings); it->tag = 1;
+    it = item(p, "Rendering Settings...", NULL, UI_ICON_RENDER, m_project_settings); it->tag = 1;
     it = item(p, "Sound Settings...", NULL, UI_ICON_SPEAKER, m_project_settings); it->tag = 2;
     ui_menu_separator(ED.ui, p);
     item(p, "Reset Layout", NULL, UI_ICON_LAYERS, m_reset_layout);

@@ -53,6 +53,7 @@ typedef enum UiIcon {
     UI_ICON_KEYBOARD, UI_ICON_MOUSE, UI_ICON_GAMEPAD, UI_ICON_TOUCH, UI_ICON_JOYSTICK,
     /* platforms */
     UI_ICON_WINDOWS, UI_ICON_LINUX, UI_ICON_ANDROID, UI_ICON_MONITOR, UI_ICON_PHONE,
+    UI_ICON_RENDER,   /* a monitor showing a picture (hills and a sun): render settings */
     UI_ICON_COUNT
 } UiIcon;
 

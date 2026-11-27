@@ -389,7 +389,7 @@ static const LxFsmActionDesc A_EN_DAY_NIGHT = {"Day Night Cycle", "Rendering", "
      POPT("Store Is Night", LX_FSM_BOOL)},
     sizeof(int), 0, LX_FSM_EVERY_FRAME, en_day_night, en_day_night, NULL};
 
-/* ---- the Day-night sky and weather (Lighting panel: Sky Mode Day-night) ---- */
+/* ---- the Day-night sky and weather (Rendering panel: Sky Mode Day-night) ---- */
 static void sk_set_time(LxFsmCtx *c) {
     LxEnvironment *e = lx_scene_environment(c->scene);
     if (!lx_fsm_is_none(c, 0)) lx_sky_set_time(c->scene, lx_fsm_float(c, 0));

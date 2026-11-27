@@ -937,6 +937,15 @@ void ui_draw_icon(UiCtx *ui, UiIcon icon, float x, float y, float s, uint32_t c)
         ui_draw_rect(ui, x + s * 0.28f, y + s * 0.82f, s * 0.44f, s * 0.06f, c, s * 0.03f);
         if (icon == UI_ICON_VIEWPORT) ui_draw_triangle(ui, P(0.24f, 0.6f), P(0.42f, 0.34f), P(0.58f, 0.6f), c);
         break;
+    case UI_ICON_RENDER:   /* the monitor, with a little landscape on its screen */
+        ui_draw_rect(ui, x + s * 0.06f, y + s * 0.12f, s * 0.88f, s * 0.6f, c, s * 0.06f);
+        ui_draw_rect(ui, x + s * 0.12f, y + s * 0.18f, s * 0.76f, s * 0.48f, UI_HEX(0x1b1c1f), s * 0.02f);
+        ui_draw_circle(ui, x + s * 0.68f, y + s * 0.32f, s * 0.07f, UI_HEX(0xf2c14e), 12);
+        ui_draw_triangle(ui, P(0.14f, 0.64f), P(0.36f, 0.34f), P(0.58f, 0.64f), UI_HEX(0x4f9de0));
+        ui_draw_triangle(ui, P(0.42f, 0.64f), P(0.6f, 0.44f), P(0.86f, 0.64f), UI_HEX(0x58b368));
+        ui_draw_rect(ui, x + s * 0.42f, y + s * 0.72f, s * 0.16f, s * 0.1f, c, 0);
+        ui_draw_rect(ui, x + s * 0.26f, y + s * 0.82f, s * 0.48f, s * 0.06f, c, s * 0.03f);
+        break;
     case UI_ICON_STATS:
         for (int i = 0; i < 4; i++) {
             float hgt = (float[]){0.3f, 0.55f, 0.4f, 0.72f}[i];

@@ -11,7 +11,7 @@
  *   --show-graph <object>[/<state>]       select the object and open its State Graph (and a state, inside its Sub State)
  *
  * Screenshot helpers: LUXORA_SKY="<hour>[,<weather>]" turns on the Day-night sky, LUXORA_SHOW_LIGHTING=1 shows the
- * Lighting tab. For the State Graph view (environment variables, with --show-graph):
+ * Rendering tab. For the State Graph view (environment variables, with --show-graph):
  *   LUXORA_GRAPH_TAB=0..4      inspector tab (FSM, State, Events, Variables, Action Browser)
  *   LUXORA_GRAPH_ZOOM=0.45     the view's zoom once the graph is framed
  *   LUXORA_GRAPH_QUICKADD=1    open the quick-add box

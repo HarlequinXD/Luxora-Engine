@@ -993,7 +993,7 @@ static void build_entity_inspector(UiNode *body) {
         fit->h = 26;
         lx_strcpy(fit->tooltip, sizeof fit->tooltip, "Size and place the box around the level's Static objects, with headroom for characters");
         UiNode *hint = ui_label(ui, sec, "Characters and moving objects inside the box get baked light and baked shadows from it, like "
-                                         "Bakery Volumes. Fill it with Bake in the Lighting panel.");
+                                         "Bakery Volumes. Fill it with Bake in the Rendering panel.");
         hint->font = UI_FONT_SMALL;
         hint->fg = t->text_dim;
         hint->wrap = true;
@@ -1475,6 +1475,7 @@ static int g_quality, g_shadow_res_idx, g_probe_res_idx;
 static bool g_open_refl = true;
 static LxScene *g_lighting_scene;
 static bool g_open_env = true, g_open_gi = true, g_open_shadow = true, g_open_post = true;
+static bool g_open_quality = true, g_open_ao = true, g_open_lens = true, g_open_grade = true, g_open_detail = true;
 
 static void graphics_changed(UiNode *n) {
     LX_UNUSED(n);
@@ -1741,7 +1742,19 @@ static void lighting_frame(UiNode *body) {
     LxGraphicsSettings *g = lx_graphics_settings();
     g_quality = g->quality_preset;
     g_shadow_res_idx = g->shadow_resolution >= 4096 ? 3 : g->shadow_resolution >= 2048 ? 2 : g->shadow_resolution >= 1024 ? 1 : 0;
-    UiNode *sec = ed_section(body, UI_ICON_GLOBE, "Environment (scene)", &g_open_env, NULL);
+    /* what's set per project (every scene) is marked (project); what belongs to this scene, (scene) */
+    UiNode *sec = ed_section(body, UI_ICON_RENDER, "Quality (project)", &g_open_quality, NULL);
+    UiNode *row = ed_prop_row(sec, "Graphics Preset");
+    UiNode *q = ui_dropdown(ui, row, &g_quality, QUALITY, 4);
+    q->grow = 1;
+    q->on_change = quality_changed;
+    lx_strcpy(q->tooltip, sizeof q->tooltip, "Sets every setting below at once. Low also turns off screen-space reflections, "
+                                             "reflection cards, ambient occlusion and sun shafts; each can be turned back on in its section.");
+    UiNode *rs = slider_row(sec, "Render Scale", &g->render_scale, 0.25f, 2);
+    rs->on_change = graphics_changed;
+    lx_strcpy(rs->tooltip, sizeof rs->tooltip, "The resolution the 3D view is drawn at, against the window's: below 1 is faster and softer, above 1 sharper and slower.");
+
+    sec = ed_section(body, UI_ICON_GLOBE, "Sky & Environment (scene)", &g_open_env, NULL);
     g_sky_clock = NULL;
     {
         static const char *MODES[] = {"Gradient", "Day-night"};
@@ -1818,18 +1831,7 @@ static void lighting_frame(UiNode *body) {
         bake_ui_sync();
     }
 
-    sec = ed_section(body, UI_ICON_SUN, "Global Illumination (project)", &g_open_gi, NULL);
-    UiNode *row = ed_prop_row(sec, "Graphics Preset");
-    UiNode *q = ui_dropdown(ui, row, &g_quality, QUALITY, 4);
-    q->grow = 1;
-    q->on_change = quality_changed;
-    {
-        UiNode *l = ui_label(ui, sec, "Sets every effect, not just GI: Low also turns off screen-space reflections, reflection "
-                                      "cards, ambient occlusion and sun shafts. Each one can be turned back on below.");
-        l->font = UI_FONT_SMALL;
-        l->fg = ui_theme(ui)->text_dim;
-        l->wrap = true;
-    }
+    sec = ed_section(body, UI_ICON_BULB, "Global Illumination (project)", &g_open_gi, NULL);
     bool_row(sec, "Live GI", &g->gi_enabled)->on_change = graphics_changed;
     row = ed_prop_row(sec, "Rays / Frame");
     UiNode *ph = ui_int(ui, row, &g->gi_rays_per_frame, 1024, 1000000);
@@ -1858,6 +1860,22 @@ static void lighting_frame(UiNode *body) {
     rb->icon = UI_ICON_REFRESH;
     rb->h = 26;
 
+    sec = ed_section(body, UI_ICON_LIGHT, "Shadows (project)", &g_open_shadow, NULL);
+    row = ed_prop_row(sec, "Resolution");
+    UiNode *sr = ui_dropdown(ui, row, &g_shadow_res_idx, SHADOW_RES, 4);
+    sr->grow = 1;
+    sr->on_change = shadow_res_changed;
+    row = ed_prop_row(sec, "Cascades");
+    UiNode *cs = ui_int(ui, row, &g->shadow_cascades, 1, 4);
+    cs->grow = 1;
+    cs->on_change = graphics_changed;
+    float_row(sec, "Shadow Distance", &g->shadow_distance, 1, 5, 2000)->on_change = graphics_changed;
+
+    sec = ed_section(body, UI_ICON_LAYERS, "Ambient Occlusion (project)", &g_open_ao, NULL);
+    bool_row(sec, "Ambient Occlusion", &g->ao_enabled)->on_change = graphics_changed;
+    float_row(sec, "Radius (m)", &g->ao_radius, 0.05f, 0.05f, 10)->on_change = graphics_changed;
+    slider_row(sec, "Strength", &g->ao_intensity, 0, 2)->on_change = graphics_changed;
+
     sec = ed_section(body, UI_ICON_PROBE, "Reflections (project)", &g_open_refl, NULL);
     bool_row(sec, "Reflection Probes", &g->reflections_enabled)->on_change = graphics_changed;
     g_probe_res_idx = g->reflection_resolution >= 512 ? 3 : g->reflection_resolution >= 256 ? 2 : g->reflection_resolution >= 128 ? 1 : 0;
@@ -1871,47 +1889,40 @@ static void lighting_frame(UiNode *body) {
     st->grow = 1;
     st->on_change = graphics_changed;
     float_row(sec, "SSR Max Distance", &g->ssr_max_distance, 0.5f, 1, 500)->on_change = graphics_changed;
-    bool_row(sec, "Reflection Cards", &g->reflection_cards)->on_change = graphics_changed;
     float_row(sec, "SSR Thickness", &g->ssr_thickness, 0.01f, 0.01f, 5)->on_change = graphics_changed;
     slider_row(sec, "SSR Max Roughness", &g->ssr_max_roughness, 0.05f, 1)->on_change = graphics_changed;
+    UiNode *rc = bool_row(sec, "Reflection Cards", &g->reflection_cards);
+    rc->on_change = graphics_changed;
+    lx_strcpy(rc->tooltip, sizeof rc->tooltip, "Fills in objects the screen can't see (behind the camera, hidden, off the edge). Needs Screen-Space Reflections.");
     UiNode *rr = ui_button(ui, sec, "Re-capture Probes", probe_recapture);
     rr->icon = UI_ICON_REFRESH;
     rr->h = 26;
 
-    sec = ed_section(body, UI_ICON_CAMERA, "Camera & Lens (project)", &g_open_post, NULL);
-    bool_row(sec, "Ambient Occlusion", &g->ao_enabled)->on_change = graphics_changed;
-    float_row(sec, "AO Radius", &g->ao_radius, 0.05f, 0.05f, 10)->on_change = graphics_changed;
-    slider_row(sec, "AO Strength", &g->ao_intensity, 0, 2)->on_change = graphics_changed;
+    sec = ed_section(body, UI_ICON_SUN, "Bloom & Sun Shafts (project)", &g_open_post, NULL);
     bool_row(sec, "Bloom", &g->bloom_enabled)->on_change = graphics_changed;
     slider_row(sec, "Bloom Strength", &g->bloom_intensity, 0, 1)->on_change = graphics_changed;
     bool_row(sec, "Sun Shafts", &g->godrays_enabled)->on_change = graphics_changed;
     slider_row(sec, "Sun Shaft Strength", &g->godrays_intensity, 0, 2)->on_change = graphics_changed;
+
+    sec = ed_section(body, UI_ICON_CAMERA, "Lens Effects (project)", &g_open_lens, NULL);
     slider_row(sec, "Vignette", &g->vignette, 0, 1)->on_change = graphics_changed;
     slider_row(sec, "Colour Fringes", &g->chromatic_aberration, 0, 1)->on_change = graphics_changed;
     slider_row(sec, "Film Grain", &g->film_grain, 0, 1)->on_change = graphics_changed;
+
+    sec = ed_section(body, UI_ICON_MATERIAL, "Colour Grading (project)", &g_open_grade, NULL);
     slider_row(sec, "Contrast", &g->contrast, 0.5f, 2)->on_change = graphics_changed;
     slider_row(sec, "Saturation", &g->saturation, 0, 2)->on_change = graphics_changed;
     slider_row(sec, "Temperature", &g->temperature, -1, 1)->on_change = graphics_changed;
 
-    sec = ed_section(body, UI_ICON_LAYERS, "Shadows & Detail (project)", &g_open_shadow, NULL);
-    row = ed_prop_row(sec, "Resolution");
-    UiNode *sr = ui_dropdown(ui, row, &g_shadow_res_idx, SHADOW_RES, 4);
-    sr->grow = 1;
-    sr->on_change = shadow_res_changed;
-    row = ed_prop_row(sec, "Cascades");
-    UiNode *cs = ui_int(ui, row, &g->shadow_cascades, 1, 4);
-    cs->grow = 1;
-    cs->on_change = graphics_changed;
-    float_row(sec, "Shadow Distance", &g->shadow_distance, 1, 5, 2000)->on_change = graphics_changed;
+    sec = ed_section(body, UI_ICON_MESH, "Level of Detail (project)", &g_open_detail, NULL);
     bool_row(sec, "Automatic LODs", &g->lod_enabled)->on_change = graphics_changed;
     slider_row(sec, "LOD Bias", &g->lod_bias, 0.2f, 3)->on_change = graphics_changed;
-    slider_row(sec, "Render Scale", &g->render_scale, 0.25f, 2)->on_change = graphics_changed;
 }
 
 UiNode *ed_lighting_panel(UiNode *parent) {
     UiNode *p = ui_box(ED.ui, parent, UI_COL);
-    lx_strcpy(p->text, sizeof p->text, "Lighting");
-    p->icon = UI_ICON_SUN;
+    lx_strcpy(p->text, sizeof p->text, "Rendering");
+    p->icon = UI_ICON_RENDER;
     p->bg = ui_theme(ED.ui)->panel;
     UiNode *body = ui_box(ED.ui, p, UI_COL);
     body->grow = 1;
