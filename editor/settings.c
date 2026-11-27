@@ -142,6 +142,7 @@ static void build_graphics(UiNode *b) {
     s = ed_section(b, UI_ICON_MONITOR, "Display", &g_dummy_open, NULL);
     row_bool(s, "V-Sync", &g->vsync);
     row_int(s, "Frame Rate Limit (0 = off)", &g->target_fps, 0, 1000);
+    note(s, UI_ICON_INFO, "For the built game. The editor always keeps in step with the screen, whatever these say.");
     s = ed_section(b, UI_ICON_BULB, "Global Illumination", &g_dummy_open, NULL);
     row_bool(s, "Enabled", &g->gi_enabled);
     row_int(s, "Rays per Frame", &g->gi_rays_per_frame, 1024, 1000000)->step = 1000;

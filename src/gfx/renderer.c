@@ -869,7 +869,10 @@ static bool create_swapchain(void) {
     if (np > 16) np = 16;
     vkGetPhysicalDeviceSurfacePresentModesKHR(R.gpu, R.surface, &np, modes);
     VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
-    if (!R.vsync)
+    /* the editor always waits for the screen (its own low-latency way, below): VSync Off is for the built game. An
+     * editor drawing hundreds of unsynced pictures a second can swamp the desktop's compositor on Linux and leave
+     * the whole desktop struggling to answer clicks */
+    if (!R.vsync && !R.low_latency)
         for (uint32_t i = 0; i < np; i++) {
             if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) mode = modes[i];
             if (modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR && mode == VK_PRESENT_MODE_FIFO_KHR) mode = modes[i];
@@ -901,6 +904,12 @@ static bool create_swapchain(void) {
     ci.oldSwapchain = R.swapchain;
     VkSwapchainKHR sc;
     VkResult r = vkCreateSwapchainKHR(R.device, &ci, NULL, &sc);
+    if (r != VK_SUCCESS && ci.presentMode != VK_PRESENT_MODE_FIFO_KHR) {
+        /* a driver that won't switch: plain vsync is always there, and a window that keeps drawing beats a frozen one */
+        LX_WARN("vkCreateSwapchainKHR (%s) with present mode %d: falling back to vsync", lx_vk_result(r), (int)ci.presentMode);
+        ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+        r = vkCreateSwapchainKHR(R.device, &ci, NULL, &sc);
+    }
     if (r != VK_SUCCESS) { LX_ERROR("vkCreateSwapchainKHR: %s", lx_vk_result(r)); return false; }
     destroy_swapchain();
     R.swapchain = sc;

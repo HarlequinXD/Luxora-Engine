@@ -139,6 +139,8 @@ bool lx_platform_init(const LxWindowDesc *d) {
 
 void lx_platform_shutdown(void) {
     if (!X.dpy) return;
+    XUngrabPointer(X.dpy, CurrentTime);   /* never leave the desktop's pointer held */
+    XFlush(X.dpy);
     if (X.ic) XDestroyIC(X.ic);
     if (X.im) XCloseIM(X.im);
     XDestroyWindow(X.dpy, X.win);
@@ -326,6 +328,10 @@ bool lx_platform_pump(void) {
         case FocusIn: g_lx_input.focused = true; break;
         case FocusOut:
             g_lx_input.focused = false;
+            if (g_lx_input.mouse_locked) {   /* another window has the keyboard: the pointer goes with it at once */
+                XUngrabPointer(X.dpy, CurrentTime);
+                g_lx_input.mouse_locked = false;
+            }
             memset(g_lx_input.keys, 0, sizeof g_lx_input.keys);
             memset(g_lx_input.mouse, 0, sizeof g_lx_input.mouse);
             break;
